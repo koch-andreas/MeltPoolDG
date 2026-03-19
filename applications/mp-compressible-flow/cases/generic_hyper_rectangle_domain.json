@@ -2,45 +2,36 @@
   "base": {
     "problem name": "compressible_flow",
     "case name": "generic_hyper_rectangle_domain",
-    "dimension": "2",
+    "dimension": "1",
     "do print parameters": "false",
     "verbosity level": 1,
-    "global refinements": 1
+    "global refinements": 2
   },
   "case setup": {
     "boundary x min": {
-      "type": "inflow",
-      "density": "0.4",
-      "velocity": "150; 0",
-      "energy": "213300",
+      "type": "no_slip_wall",
       "inflow ramp-up type": "none"
     },
     "boundary x max": {
-      "type": "subsonic_outflow_fixed_energy",
-      "energy": "213300"
-    },
-    "boundary y min": {
-      "type": "no_slip_wall"
-    },
-    "boundary y max": {
-      "type": "no_slip_wall"
+      "type": "subsonic_outflow_fixed_pressure",
+      "pressure": "17400"
     },
     "initial conditions": {
       "density": "0.4",
-      "velocity": "150; 0.0",
-      "energy": "213300"
+      "velocity": "0.0",
+      "energy": "65250"
     },
     "domain": {
-      "size": "80e-6, 40e-6",
-      "base grid resolution": "20, 10"
+      "size": "80e-6",
+      "base grid resolution": "20"
     }
   },
   "time stepping": {
     "start time": "0.0",
-    "end time": "1e-10"
+    "end time": "1e-7"
   },
   "output": {
-    "write frequency": "1",
+    "write frequency": "1000",
     "do user defined postprocessing": "true",
     "paraview": {
       "filename": "solution_generic_hyper_rectangle_domain",
@@ -72,6 +63,7 @@
     "gas": {
       "reference density": "0.04",
       "dynamic viscosity": "0.000035",
+      "specific isobaric heat": "435",
       "gamma": "1.6666666666",
       "specific gas constant": "174",
       "thermal conductivity": "0.02863",

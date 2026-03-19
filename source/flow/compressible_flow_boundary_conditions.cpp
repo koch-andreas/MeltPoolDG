@@ -262,8 +262,8 @@ namespace MeltPoolDG::Flow
             grad_w_p_view.grad_momentum(d) = w_m_view.grad_momentum(d);
           }
         // homogeneous Neumann
-        grad_w_p_view.grad_total_energy() = -(w_m_view.grad_total_energy());
-        w_p_view.total_energy()           = w_m_view.total_energy();
+        grad_w_p_view.grad_total_energy() = (w_m_view.grad_total_energy());
+        w_p_view.total_energy()           = 70000.;
       }
     else if (boundary_type == BoundaryType::inflow)
       {
