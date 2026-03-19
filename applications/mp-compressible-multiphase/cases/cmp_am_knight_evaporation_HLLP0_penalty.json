@@ -9,12 +9,12 @@
   },
   "time stepping": {
     "start time": "0.0",
-    "end time": "3.0e-3",
+    "end time": "1.0e-4",
     "time step size": "1.0e-10",
     "max n steps": "100000000"
   },
   "output": {
-    "write time step size": "1.0e-5",
+    "write time step size": "1.0e-6",
     "do user defined postprocessing": "true",
     "paraview": {
       "filename": "Ti6Al4V_evaporation_1_bar",
@@ -31,7 +31,7 @@
     "atmospheric pressure": "1.0e5"
   },
   "compressible navier stokes": {
-    "numerical flux type": "lax_friedrichs_modified",
+    "numerical flux type": "lax_friedrichs_exact",
     "courant number": "0.02",
     "viscous courant number": "0.02",
     "use cfl criteria": "true",
@@ -56,11 +56,11 @@
     "evaporation model": "Knight",
     "laser heat source": {
       "do ramp": "true",
-      "ramp time": "1.0e-4",
+      "ramp time": "1.0e-5",
       "laser power density": "2.0e9"
     },
     "HLLP0 and penalty": {
-      "penalty parameter temperature jump": "0.5"
+      "penalty parameter temperature jump": "2.0"
     }
   },
   "material": {
@@ -79,6 +79,7 @@
       "dynamic viscosity": "0.0035",
       "specific isobaric heat": "1126.0",
       "reference density": "3400.0",
+      "specific gas constant": "173.943514644351",
       "gamma": "1.006804865",
       "thermal conductivity": "28.63",
       "equation of state": {
