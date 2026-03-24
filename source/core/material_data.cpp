@@ -41,28 +41,32 @@ namespace MeltPoolDG
                         "<material template> in the first place of the <material> "
                         "section in these cases.");
 
-      prm.add_action("material template", [this](const std::string &value) {
-        switch (MaterialTemplate::_from_string(value.c_str()))
-          {
-            case MaterialTemplate::none:
-              // nothing to do
-              break;
-              case MaterialTemplate::stainless_steel: {
-                *this = create_stainless_steel_material_data();
-                break;
-              }
-              case MaterialTemplate::Ti64: {
-                *this = create_Ti64_material_data();
-                break;
-              }
-              case MaterialTemplate::Ti64Cunningham: {
-                *this = create_Ti64_Cunningham_material_data();
-                break;
-              }
-            default:
-              AssertThrow(false, dealii::ExcNotImplemented());
-          }
-      });
+      prm.add_action(
+        "material template",
+        [this](const std::string &value) {
+          switch (MaterialTemplate::_from_string(value.c_str()))
+            {
+                case MaterialTemplate::none: {
+                  // nothing to do
+                  break;
+                }
+                case MaterialTemplate::stainless_steel: {
+                  *this = create_stainless_steel_material_data();
+                  break;
+                }
+                case MaterialTemplate::Ti64: {
+                  *this = create_Ti64_material_data();
+                  break;
+                }
+                case MaterialTemplate::Ti64Benchmark: {
+                  *this = create_Ti64_benchmark_material_data();
+                  break;
+                }
+              default:
+                AssertThrow(false, dealii::ExcNotImplemented());
+            }
+        },
+        true);
 
       gas.add_parameters(prm, "gas");
       liquid.add_parameters(prm, "liquid");
@@ -183,22 +187,22 @@ namespace MeltPoolDG
 
   template <typename number>
   MaterialData<number>
-  MaterialData<number>::create_Ti64_Cunningham_material_data()
+  MaterialData<number>::create_Ti64_benchmark_material_data()
   {
     MaterialData<number> data;
-    data.material_template = MaterialTemplate::Ti64Cunningham;
+    data.material_template = MaterialTemplate::Ti64Benchmark;
 
     // clang-format off
     data.gas.specific_heat_capacity = 520;                  //  J / (kg K)
     data.gas.thermal_conductivity   = 0.018;                //  W / (m K)
     data.gas.density                = 1.784;                //  kg / m³
     data.gas.dynamic_viscosity      = 0.0001;               //  kg / (m s)
-                                   
+
     data.liquid.specific_heat_capacity = 1126;              //  J / (kg K)
     data.liquid.thermal_conductivity   = 28.8;              //  W / (m K)
     data.liquid.density                = 4420;              //  kg / m³
     data.liquid.dynamic_viscosity      = 0.004;             //  kg / (m s)
-    
+
     data.solid.specific_heat_capacity = 800;                //  J / (kg K)
     data.solid.thermal_conductivity   = 28.8;               //  W / (m K)
     data.solid.density                = 4420;               //  kg / m³

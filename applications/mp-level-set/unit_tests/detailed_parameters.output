@@ -1822,7 +1822,7 @@
             "default_value": "none",
             "documentation": "If this parameter is initialized, the material parameters of the specified material will be used as template. Individual properties can be modified. However, be aware to put <material template> in the first place of the <material> section in these cases.",
             "pattern": "187",
-            "pattern_description": "[Selection none|stainless_steel|Ti64|Ti64Cunningham ]",
+            "pattern_description": "[Selection none|stainless_steel|Ti64|Ti64Benchmark ]",
             "actions": "187,188"
         },
         "gas":

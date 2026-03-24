@@ -1538,7 +1538,7 @@
             "none",
             "stainless_steel",
             "Ti64",
-            "Ti64Cunningham"
+            "Ti64Benchmark"
           ],
           "description": "If this parameter is initialized, the material parameters of the specified material will be used as template. Individual properties can be modified. However, be aware to put <material template> in the first place of the <material> section in these cases.",
           "default": "none"

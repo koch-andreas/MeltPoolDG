@@ -89,6 +89,8 @@ namespace MeltPoolDG
 
     const auto &param = simulation_case->parameters;
 
+    std::cout << "solidus temperature" << param.material.solidus_temperature << std::endl;
+
     try
       {
         auto scope_n = std::make_unique<const ScopedName>("mp::run");

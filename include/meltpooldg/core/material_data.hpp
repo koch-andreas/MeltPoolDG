@@ -15,8 +15,8 @@ namespace MeltPoolDG
     none,            // all material parameters must be specified
     stainless_steel, // melt and solid material parameters will be set to stainless steel values
     Ti64,            // melt and solid material parameters will be set to Ti-6Al-4V values
-    Ti64Cunningham   // melt and solid material parameters will be set to Ti-6Al-4V values for the
-                     // Cunningham benchmark
+    Ti64Benchmark    // melt and solid material parameters will be set to Ti-6Al-4V values for the
+                     // benchmark paper together with PolyMTL.
   )
   BETTER_ENUM(SolidLiquidPropertiesTransitionType,
               char,
@@ -146,9 +146,9 @@ namespace MeltPoolDG
 
     /**
      * Creates MaterialData with all parameters set to the Ti-6Al-4V values
-     * used in the Cunningham benchmark.
+     * used in the benchmark paper with PolyMTL.
      */
     static MaterialData<number>
-    create_Ti64_Cunningham_material_data();
+    create_Ti64_benchmark_material_data();
   };
 } // namespace MeltPoolDG
