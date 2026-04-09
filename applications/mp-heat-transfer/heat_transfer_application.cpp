@@ -227,7 +227,8 @@ namespace MeltPoolDG::Heat
                 param.material.two_phase_fluid_properties_transition_type ==
                   TwoPhaseFluidPropertiesTransitionType::consistent_with_evaporation));
 
-            heat_operation = std::make_shared<HeatDiffuseOperation<dim, number>>(
+            std::shared_ptr<Heat::HeatDiffuseOperation<dim, number>> heat_diffuse_operation;
+            heat_diffuse_operation = std::make_shared<HeatDiffuseOperation<dim, number>>(
               *scratch_data,
               simulation_case->get_boundary_condition_manager("heat_transfer"),
               simulation_case->get_periodic_bc(),
@@ -242,6 +243,13 @@ namespace MeltPoolDG::Heat
               level_set_dof_idx,
               level_set_as_heaviside_ptr,
               param.application_specific_parameters.do_solidification);
+
+            // register evaporative mass flux to compute the evaporative cooling
+            if (param.evapor.evaporative_cooling.enable)
+              {
+                heat_diffuse_operation->register_evaporative_mass_flux(nullptr, 0, param.evapor);
+              }
+            heat_operation = heat_diffuse_operation;
             break;
           }
           case TwoPhaseOperatorType::cut: {
@@ -272,9 +280,11 @@ namespace MeltPoolDG::Heat
               velocity_old_ptr);
 
             if (laser_operation)
-              heat_cut_operation->register_laser_intensity_function_and_direction(
-                laser_operation->get_intensity_profile(),
-                param.laser.template get_direction<dim>());
+              {
+                heat_cut_operation->register_laser_intensity_function_and_direction(
+                  laser_operation->get_intensity_profile(),
+                  param.laser.template get_direction<dim>());
+              }
 
             heat_cut_operation->register_lambdas_for_solution_transfer(
               [this]() {

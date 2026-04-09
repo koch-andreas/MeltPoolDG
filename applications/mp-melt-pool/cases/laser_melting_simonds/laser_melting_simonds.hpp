@@ -48,6 +48,9 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
   inline static double outlet_pressure    = 0.0;
   inline static double inflow_temperature = T_initial_top;
 
+  // for heat application only
+  inline static double eps_prefactor = 2.0;
+
   template <int dim>
   class InflowVelocity : public Function<dim>
   {

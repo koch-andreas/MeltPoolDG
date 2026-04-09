@@ -51,6 +51,9 @@ namespace MeltPoolDG::Heat
   {
     delta_phase_weighted =
       create_phase_weighted_delta_approximation(delta_approximation_phase_weighted_data);
+
+    for (unsigned int d = 0; d < dim; d++)
+      std::cout << "laser direction " << laser_direction[d] << std::endl;
   }
 
 

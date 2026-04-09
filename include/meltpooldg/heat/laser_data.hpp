@@ -109,7 +109,8 @@ namespace MeltPoolDG::Heat
     void
     post(const unsigned int dim,
          const bool         heat_use_volume_specific_thermal_capacity_for_phase_interpolation,
-         const MaterialData<number> &material);
+         const MaterialData<number> &material,
+         const bool                  heat_is_cut_operator);
 
     void
     check_input_parameters() const;

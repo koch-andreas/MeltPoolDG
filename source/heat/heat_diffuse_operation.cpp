@@ -122,9 +122,12 @@ namespace MeltPoolDG::Heat
     const unsigned int                          evapor_mass_flux_dof_idx_in,
     const Evaporation::EvaporationData<number> &evapor_data)
   {
-    heat_operator->register_evaporative_mass_flux(evaporative_mass_flux_in,
-                                                  evapor_mass_flux_dof_idx_in,
-                                                  evapor_data);
+    if (evaporative_mass_flux_in)
+      heat_operator->register_evaporative_mass_flux(evaporative_mass_flux_in,
+                                                    evapor_mass_flux_dof_idx_in,
+                                                    evapor_data);
+    else
+      heat_operator->register_evaporative_mass_flux(nullptr, 0, evapor_data);
   }
 
 

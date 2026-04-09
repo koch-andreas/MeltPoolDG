@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cassert>
+
 #include "laser_melting_simonds.hpp"
 //
 
@@ -138,6 +140,17 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
         prm.add_parameter("bottom",
                           T_initial_bottom,
                           "Set the initial temperature on the bottom boundary.");
+      }
+      prm.leave_subsection();
+
+      prm.enter_subsection("prescribed level set");
+      {
+        prm.add_parameter(
+          "eps prefactor",
+          eps_prefactor,
+          "Factor multiplied by the minimum mesh size "
+          "to compute the interface thickness parameter. Used for the prescribed level-set function "
+          "for the HeatTransferCase with a diffuse-interface operator");
       }
       prm.leave_subsection();
 
@@ -336,17 +349,21 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
         if (this->parameters.laser.model == Heat::LaserModelType::interface_projection_regularized)
           {
             // attach prescribed heaviside
-            LevelSet::ReinitializationData<Number> reinit_data;
-            reinit_data.interface_thickness_parameter.type =
-              LevelSet::InterfaceThicknessParameterType::proportional_to_cell_size;
-            reinit_data.interface_thickness_parameter.value = 2;
+            // AssertThrow(height_gas+height_substrate == width, ExcMessage("Epsilon is only defined
+            // if a square domain is considered."));
 
-            this->attach_initial_condition(
-              std::make_shared<InitialLevelSet<dim>>(
-                reinit_data.compute_interface_thickness_parameter_epsilon(
-                  dealii::GridTools::minimal_cell_diameter(*this->triangulation) / std::sqrt(dim)),
-                LevelSet::LevelSetType::smoothed_heaviside),
-              "prescribed_heaviside");
+            const auto min_mesh_size =
+              this->parameters.amr.do_amr ?
+                width / std::pow(2, this->parameters.amr.max_grid_refinement_level) :
+                width / std::pow(2, this->parameters.base.global_refinements);
+            const auto eps = eps_prefactor * min_mesh_size;
+
+            std::cout << "min_mesh_size" << min_mesh_size << std::endl;
+            std::cout << "eps_prefactor" << eps_prefactor << std::endl;
+
+            this->attach_initial_condition(std::make_shared<InitialLevelSet<dim>>(
+                                             eps, LevelSet::LevelSetType::smoothed_heaviside),
+                                           "prescribed_heaviside");
           }
         else if (this->parameters.laser.model == Heat::LaserModelType::interface_projection_sharp)
           {
