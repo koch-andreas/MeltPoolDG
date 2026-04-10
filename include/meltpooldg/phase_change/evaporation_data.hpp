@@ -95,6 +95,8 @@ namespace MeltPoolDG::Evaporation
 
       number activation_temperature = numbers::invalid_double;
 
+      bool enable_linear_activation_ramp = true;
+
       // only for the diffuse operator
       EvaporCoolingInterfaceFluxType model = EvaporCoolingInterfaceFluxType::regularized;
       LevelSet::DeltaApproximationPhaseWeightedData<number> delta_approximation_phase_weighted;

@@ -64,6 +64,13 @@ namespace MeltPoolDG::Evaporation
                           evaporative_cooling.enable,
                           "Set this parameter to true to consider evaporative cooling "
                           "in the heat equation");
+        prm.add_parameter("enable linear activation ramp",
+                          evaporative_cooling.enable_linear_activation_ramp,
+                          "Enable a linear activation ramp for evaporative cooling between "
+                          "the activation temperature and the boiling temperature. "
+                          "If enabled, the mass flux increases smoothly and linearly within "
+                          "this temperature range. Otherwise, the mass flux is computed directly "
+                          "without applying a ramp.");
         prm.add_parameter("consider enthalpy transport vapor mass flux",
                           evaporative_cooling.consider_enthalpy_transport_vapor_mass_flux,
                           "Set this parameter to true to account for the enthalpy "
