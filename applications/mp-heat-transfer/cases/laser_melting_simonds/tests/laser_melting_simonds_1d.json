@@ -1,0 +1,58 @@
+{
+  "base": {
+    "case name": "laser_melting_simonds",
+    "dimension": "2",
+    "do print parameters": "false",
+    "global refinements": "6",
+    "verbosity level": "1",
+    "fe": {
+      "degree": "1"
+    }
+  },
+  "time stepping": {
+    "end time": "5.e-5",
+    "start time": "0.0",
+    "time step size": "1e-6"
+  },
+  "laser": {
+    "dirac delta function approximation": {
+      "gas phase weight": "927.68",
+      "heavy phase weight": "4976920",
+      "type": "heaviside_phase_weighted"
+    },
+    "model": "interface_projection_regularized",
+    "intensity profile": "uniform",
+    "power": "3.54688e9"
+  },
+  "material": {
+    "material template": "Ti64Cunningham"
+  },
+  "evaporation": {
+    "evaporative mass flux model": "saturated_vapor_pressure",
+    "recoil pressure": {
+      "dirac delta function approximation": {
+        "auto weights": "true",
+        "type": "heaviside_phase_weighted"
+      },
+      "interface distributed flux type": "local_value",
+      "enable": "true"
+    },
+    "evaporative cooling": {
+      "enable": "true",
+      "consider enthalpy transport vapor mass flux": "false",
+      "dirac delta function approximation": {
+        "auto weights": "true",
+        "type": "heaviside_phase_weighted"
+      }
+    }
+  },
+  "heat": {
+    "diffuse": {
+      "use volume-specific thermal capacity for phase interpolation": "true"
+    },
+    "nlsolve": {
+      "field correction tolerance": "1e-9",
+      "residual tolerance": "1e-4"
+    }
+  }
+}
