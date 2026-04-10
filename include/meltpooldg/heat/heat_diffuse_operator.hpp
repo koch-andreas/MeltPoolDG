@@ -143,8 +143,8 @@ namespace MeltPoolDG::Heat
     const VectorType  *level_set_as_heaviside;
 
     // optional: two phase flow with evaporation
-    VectorType                                              *evaporative_mass_flux = nullptr;
-    unsigned int                                             mass_flux_dof_idx     = 0;
+    VectorType  *evaporative_mass_flux = nullptr;
+    unsigned int mass_flux_dof_idx     = dealii::numbers::invalid_unsigned_int;
     std::unique_ptr<Evaporation::EvaporativeCooling<number>> evaporative_cooling;
 
     // optional: melting/solidification effects
@@ -361,7 +361,7 @@ namespace MeltPoolDG::Heat
                  std::vector<number> /*weights*/
                  >> *surface_mesh_info = nullptr;
 
-    Evaporation::EvaporCoolingInterfaceFluxType mass_flux_type =
+    Evaporation::EvaporCoolingInterfaceFluxType evaporative_cooling_interface_flux_type =
       Evaporation::EvaporCoolingInterfaceFluxType::none;
   };
 } // namespace MeltPoolDG::Heat
