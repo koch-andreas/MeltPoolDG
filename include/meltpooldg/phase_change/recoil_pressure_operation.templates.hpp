@@ -79,14 +79,25 @@ namespace MeltPoolDG::Evaporation
     const number T_ac = recoil_data.activation_temperature;
     const number T_v  = boiling_temperature;
 
-    const dealii::VectorizedArray<number> scaling_coeff =
-      internal::compute_scaling_coeff(T, T_ac, T_v);
+    dealii::VectorizedArray<number> recoil_pressure =
+      recoil_data.pressure_coefficient *
+      compute_saturated_gas_pressure(T,
+                                     T_v,
+                                     recoil_data.ambient_gas_pressure,
+                                     recoil_data.temperature_constant);
 
-    return scaling_coeff * recoil_data.pressure_coefficient *
-           compute_saturated_gas_pressure(T,
-                                          T_v,
-                                          recoil_data.ambient_gas_pressure,
-                                          recoil_data.temperature_constant);
+    if (recoil_data.subtract_ambient_pressure)
+      recoil_pressure -= recoil_data.ambient_gas_pressure;
+
+    if (recoil_data.enable_linear_activation_ramp)
+      {
+        const dealii::VectorizedArray<number> scaling_coeff =
+          internal::compute_scaling_coeff(T, T_ac, T_v);
+        recoil_pressure *= scaling_coeff;
+      }
+
+    return compare_and_apply_mask<dealii::SIMDComparison::greater_than_or_equal>(
+      recoil_pressure, 0, recoil_pressure, dealii::VectorizedArray<number>(0));
   }
 
   template <typename number>
@@ -97,13 +108,23 @@ namespace MeltPoolDG::Evaporation
     const number T_ac = recoil_data.activation_temperature;
     const number T_v  = boiling_temperature;
 
-    const number scaling_coeff = internal::compute_scaling_coeff(T, T_ac, T_v);
 
-    return scaling_coeff * recoil_data.pressure_coefficient *
-           compute_saturated_gas_pressure(T,
-                                          T_v,
-                                          recoil_data.ambient_gas_pressure,
-                                          recoil_data.temperature_constant);
+    number recoil_pressure = recoil_data.pressure_coefficient *
+                             compute_saturated_gas_pressure(T,
+                                                            T_v,
+                                                            recoil_data.ambient_gas_pressure,
+                                                            recoil_data.temperature_constant);
+
+    if (recoil_data.subtract_ambient_pressure)
+      recoil_pressure -= recoil_data.ambient_gas_pressure;
+
+    if (recoil_data.enable_linear_activation_ramp)
+      {
+        const number scaling_coeff = internal::compute_scaling_coeff(T, T_ac, T_v);
+        recoil_pressure *= scaling_coeff;
+      }
+
+    return (recoil_pressure >= 0.0) ? recoil_pressure : 0.0;
   }
 
 } // namespace MeltPoolDG::Evaporation

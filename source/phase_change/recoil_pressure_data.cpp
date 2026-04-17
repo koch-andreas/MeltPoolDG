@@ -18,6 +18,17 @@ namespace MeltPoolDG::Evaporation
         "(i.e. recoil pressure), considered as an interfacial force in the momentum balance equation."
         "If 'evaporative dilation rate' is enabled, this pressure jump will be added to the "
         "one resulting from the discontinuous normal velocity field.");
+      prm.add_parameter(
+        "enable linear activation ramp",
+        enable_linear_activation_ramp,
+        "Enable a linear activation ramp for recoil pressure between "
+        "the activation temperature and the boiling temperature. "
+        "If enabled, the recoil pressure increases smoothly and linearly within "
+        "this temperature range. Otherwise, the recoil pressure is computed directly "
+        "without applying a ramp.");
+      prm.add_parameter("subtract ambient pressure",
+                        subtract_ambient_pressure,
+                        "Subtract ambient pressure from the recoil pressure.");
       prm.add_parameter("ambient gas pressure",
                         ambient_gas_pressure,
                         "Ambient gas pressure for the recoil pressure model.");

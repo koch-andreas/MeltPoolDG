@@ -36,6 +36,12 @@ namespace MeltPoolDG::Evaporation
     // Enable or disable recoil-pressure related effects.
     bool enable = false;
 
+    // TODO
+    bool enable_linear_activation_ramp = true;
+
+    // TODO
+    bool subtract_ambient_pressure = false;
+
     // ambient gas pressure
     // default value for air in Pa
     number ambient_gas_pressure = 1.013e5;
