@@ -363,7 +363,7 @@ namespace MeltPoolDG::Simulation::CompressibleMultiphase
       // set level-set function
       dealii::Point<dim, number> p;
       // avoid phase interface colliding with element face (bug in dealii has to be fixed)
-      p[0] = 0.0135468746e-4;
+      p[0] = 1.;
 
       dealii::Tensor<1, dim, number> normal;
       normal[0] = -1.;

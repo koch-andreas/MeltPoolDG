@@ -62,6 +62,7 @@ namespace MeltPoolDG::Flow
     const std::function<void(unsigned int, unsigned int)> &func) const
   {
     current_time_step = time_step;
+    current_time = time;
     using local_applier_type =
       std::function<void(const dealii::MatrixFree<dim, number> &,
                          dealii::LinearAlgebra::distributed::Vector<number>       &dst,
@@ -143,8 +144,18 @@ namespace MeltPoolDG::Flow
                                               phi.quadrature_point(q),
                                               phi.get_value(q));
 
-            if (not external_forces.empty())
-              phi.submit_value(source, q);
+                CompressibleFlow::ConservedVariablesType<dim, number> regularized_heat_source{};
+                const VectorizedArray<double> interface_position = dealii::make_vectorized_array(0.);
+                constexpr double epsilon = 10. * 3.125e-6;
+                const dealii::Point<dim, VectorizedArray<double>> quad_point = phi.quadrature_point(q);
+                const dealii::VectorizedArray<double> x = quad_point[0];
+                auto delta = 1. / (sqrt(2.*std::numbers::pi) * epsilon) * std::exp(-((x-interface_position)/epsilon) * ((x-interface_position)/epsilon) / 2.);
+                regularized_heat_source[2] = delta * 0.5 * (1. - std::cos(std::numbers::pi * current_time / 1.e-4)) * 2.0e9;
+                if (current_time > 1.e-4)
+                  regularized_heat_source[2] = 2.0e9;
+                source += regularized_heat_source;
+
+            phi.submit_value(source, q);
             phi.submit_gradient(flux, q);
           }
 

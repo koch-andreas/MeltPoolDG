@@ -308,11 +308,15 @@ namespace MeltPoolDG::Multiphase
       calculate_convective_interface_flux_HLLP0(
         const ConservedVariablesType                                  &u_liquid,
         const ConservedVariablesType                                  &u_gas,
+        const ConservedVariablesGradType                              &grad_u_liquid,
+        const ConservedVariablesGradType                              &grad_u_gas,
         const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> &normal,
         const auto                                                    &convective_terms_liquid,
         const auto                                                    &convective_terms_gas,
         const Flow::CompressibleMultiphaseScratchData<dim, number>    &multiphase_scratch_data,
-        const number                                                  &m_dot_evap)
+        const number                                                  &m_dot_evap,
+        const number & heat_source,
+        const number & current_time)
   {
     // Note: Variables, that are relevant for both the liquid and the gas phase, are considered as
     // arrays of length 2 in the following. The first element refers to the liquid phase and the
@@ -510,6 +514,12 @@ namespace MeltPoolDG::Multiphase
     flux[gas] +=
       shock_flux[gas] * compare_and_apply_mask<dealii::SIMDComparison::less_than_or_equal>(
                           shock_speed[gas], zero_vec, zero_vec, one_vec);
+
+    /**std::cout << "u_n_star_l = " << vel_n_star[liquid] << std::endl;
+    std::cout << "u_n_star_g = " << vel_n_star[gas] << std::endl;
+
+    std::cout << "p_star_l = " << pressure_star[liquid] << std::endl;
+    std::cout << "p_star_g = " << pressure_star[gas] << std::endl;**/
 
     return {flux[liquid], flux[gas], normal_velocity_interface};
   }
@@ -880,12 +890,12 @@ namespace MeltPoolDG::Multiphase
     // compute Robin-type viscous interface jump conditions
     // TODO: add contributions for surface tension and Marangoni forces (for dim>1)
 
-    ConservedVariablesType J_Rob;
+    ConservedVariablesType J_Rob{};
 
     J_Rob[Idx::energy] =
       m_dot_evap * (u_liquid[Idx::energy] / u_liquid[Idx::density] -
                     u_gas[Idx::energy] / u_gas[Idx::density]) +
-      (pressure_liquid * vel_n_liquid - pressure_gas * vel_n_gas) + laser_heat_source -
+      (pressure_liquid * vel_n_liquid - pressure_gas * vel_n_gas) /*+ laser_heat_source*/ -
       m_dot_evap * multiphase_scratch_data.phase_change.liquid_gas.latent_heat_of_vaporization;
 
     const ConservedVariablesGradType viscous_flux_liquid =
@@ -911,11 +921,60 @@ namespace MeltPoolDG::Multiphase
         visc_ave_weight_phase_liquid,
         contract_tensor_with_vector<dim + 2, dim, number>(viscous_flux_gas, normal));
 
+    const auto grad_vel_liquid=Flow::calculate_grad_velocity<dim, number>(u_liquid, grad_u_liquid);
+    const auto grad_vel_gas=Flow::calculate_grad_velocity<dim, number>(u_gas, grad_u_gas);
+
+    const dealii::VectorizedArray<number> div_u_l = 2. / 3. * dealii::trace(grad_vel_liquid);
+    const dealii::VectorizedArray<number> tau_l = multiphase_scratch_data.material_liquid.data.dynamic_viscosity * (2. * grad_vel_liquid[0][0])
+    - multiphase_scratch_data.material_liquid.data.dynamic_viscosity * div_u_l;
+
+    const dealii::VectorizedArray<number> div_u_g = 2. / 3. * dealii::trace(grad_vel_gas);
+    const dealii::VectorizedArray<number> tau_g = multiphase_scratch_data.material_gas.data.dynamic_viscosity * (2. * grad_vel_gas[0][0])
+    - multiphase_scratch_data.material_gas.data.dynamic_viscosity * div_u_g;
+
+    const auto heat_flux_l = -multiphase_scratch_data.material_liquid.data.thermal_conductivity *
+        multiphase_scratch_data.material_liquid.eos_utils->calculate_grad_T(u_liquid,
+                                                                            grad_u_liquid)[0];
+    const auto heat_flux_g = -multiphase_scratch_data.material_gas.data.thermal_conductivity *
+        multiphase_scratch_data.material_gas.eos_utils->calculate_grad_T(u_gas,
+                                                                            grad_u_gas)[0];
+
+    /*std::cout << "tau_nn_l = " << tau_l << std::endl;
+    std::cout << "tau_nn_g = " << tau_g << std::endl;
+
+    std::cout << "p_n_l = " << pressure_liquid << std::endl;
+    std::cout << "p_n_g = " << pressure_gas << std::endl;
+
+    std::cout << "u_n_l = " << vel_n_liquid << std::endl;
+    std::cout << "u_n_g = " << vel_n_gas << std::endl;
+
+    std::cout << "delta_q = " << laser_heat_source << std::endl;
+
+
+    std::cout << "q_n_l = " << heat_flux_l << std::endl;
+    std::cout << "q_n_g = " << heat_flux_g << std::endl;
+
+    std::cout << "T_l = " << multiphase_scratch_data.material_liquid.eos_utils->calculate_temperature(u_liquid) << std::endl;
+    std::cout << "T_g = " << multiphase_scratch_data.material_gas.eos_utils->calculate_temperature(u_gas) << std::endl;
+
+    std::cout << "delta_T = " << delta_T << std::endl;*/
+
+    //penalty_term_dT[Idx::energy] += 0.001 * (pressure_liquid * vel_n_liquid - pressure_gas * vel_n_gas + laser_heat_source - tau_l * vel_n_liquid + tau_g * vel_n_gas + heat_flux_l - heat_flux_g);
+
     const ConservedVariablesType total_viscous_flux_liquid =
       -J_Rob * visc_ave_weight_phase_liquid - weighted_viscous_flux + penalty_term_dT;
 
     const ConservedVariablesType total_viscous_flux_gas =
       -J_Rob * visc_ave_weight_phase_gas + weighted_viscous_flux - penalty_term_dT;
+
+    /*const auto energy_jump_error_left = pressure_liquid * vel_n_liquid - pressure_gas * vel_n_gas
+      + laser_heat_source;
+
+    std::cout << "left error: " << energy_jump_error_left << std::endl;
+
+    const auto energy_jump_error_right = tau_l * vel_n_liquid - tau_g * vel_n_gas - heat_flux_l + heat_flux_g;
+
+    std::cout << "right error: " << energy_jump_error_right << std::endl;*/
 
     return {total_viscous_flux_liquid, total_viscous_flux_gas};
   }

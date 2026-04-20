@@ -107,6 +107,8 @@ namespace MeltPoolDG::Flow
     /// Time integrator class used for the time integration.
     TimeIntegration::LowStorageExplicitRungeKuttaIntegrator<number> time_integrator;
 
+    mutable double current_time{};
+
     /// This pointer may hold an instance of an external fluid force contribution
     /// (e.g., gravity, body forces, or user - defined source terms)
     std::vector<std::shared_ptr<ExternalFlowForce<dim, number>>> external_forces;

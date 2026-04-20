@@ -5,7 +5,7 @@
     "dimension": "1",
     "verbosity level": "0",
     "do print parameters": "false",
-    "global refinements": "0"
+    "global refinements": "4"
   },
   "time stepping": {
     "start time": "0.0",
@@ -14,10 +14,10 @@
     "max n steps": "100000000"
   },
   "output": {
-    "write time step size": "1.0e-6",
+    "write time step size": "1.0e-7",
     "do user defined postprocessing": "true",
     "paraview": {
-      "filename": "Ti6Al4V_evaporation_1_bar",
+      "filename": "Ti6Al4V_regularized_heat_source",
       "enable": "true"
     }
   },
@@ -26,14 +26,14 @@
     "right boundary condition": "outflow_fixed_pressure",
     "initial conditions": {
       "gas": "1.14979854471105; 0.0; 1.5e5",
-      "liquid": "4942.52838219827; 0.0; -1.00077284582753e10"
+      "liquid": "1.14979854471105; 0.0; 1.5e5"
     },
-    "atmospheric pressure": "1.0e5"
+    "atmospheric pressure": "1.e5"
   },
   "compressible navier stokes": {
     "numerical flux type": "lax_friedrichs_exact",
-    "courant number": "0.02",
-    "viscous courant number": "0.02",
+    "courant number": "0.01",
+    "viscous courant number": "0.01",
     "use cfl criteria": "true",
     "gravity constant": "0.0",
     "domain representation type": "cut",
@@ -57,14 +57,14 @@
     "laser heat source": {
       "do ramp": "true",
       "ramp time": "1.0e-5",
-      "laser power density": "2.0e9"
+      "laser power density": "2.e6"
     },
     "HLLP0 and penalty": {
-      "penalty parameter temperature jump": "2.0"
+      "penalty parameter temperature jump": "0.125"
     }
   },
   "material": {
-    "gas": {
+    "liquid": {
       "dynamic viscosity": "0.000035",
       "specific isobaric heat": "434.858786610879",
       "specific gas constant": "173.943514644351",
@@ -75,18 +75,18 @@
         "type": "ideal_gas"
       }
     },
-    "liquid": {
-      "dynamic viscosity": "0.0035",
-      "specific isobaric heat": "1126.0",
-      "reference density": "3400.0",
-      "specific gas constant": "173.943514644351",
-      "gamma": "1.006804865",
-      "thermal conductivity": "28.63",
+    "gas": {
+      "dynamic viscosity": "0.001",
+      "specific isobaric heat": "4285.0",
+      "reference density": "700.0",
+      "specific gas constant": "461.5",
+      "gamma": "1.19",
+      "thermal conductivity": "0.6",
       "equation of state": {
         "type": "noble_abel_stiffened_gas",
-        "p inf": "258134879.2",
-        "b": "0.00018759",
-        "q": "-2587818.15"
+        "p inf": "7.028e5",
+        "b": "6.61e-4",
+        "q": "-1177788"
       }
     }
   },
@@ -97,7 +97,7 @@
       "latent heat of vaporization": "8.84e6"
     },
     "solid liquid": {
-      "use darcy damping": "true",
+      "use darcy damping": "false",
       "liquidus temperature": "2200",
       "solidus temperature": "1933"
     }
@@ -111,7 +111,7 @@
     }
   },
   "darcy damping": {
-    "mushy zone morphology": "1.e9",
+    "mushy zone morphology": "1.e12",
     "avoid div zero constant": "1.0"
   }
 }

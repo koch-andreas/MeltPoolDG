@@ -12,6 +12,8 @@
 #include <meltpooldg/flow/compressible_multiphase_operator.hpp>
 #include <meltpooldg/utilities/preprocessor_directives.hpp>
 
+#include <cmath>
+
 
 namespace MeltPoolDG::Multiphase
 {
@@ -142,6 +144,13 @@ namespace MeltPoolDG::Multiphase
       constant_body_force = VectorTools::evaluate_function_at_vectorized_points(
         *constant_function, dealii::Point<dim, dealii::VectorizedArray<number>>());
 
+    const number laser_heat_source =
+              update_laser_heat_source<number>(multiphase_scratch_data.phase_coupling,
+                                               current_time);
+
+    const dealii::VectorizedArray<number> interface_position = dealii::make_vectorized_array(0.);
+    const number element_size = 3.125e-6;
+
     // lambda function for cell integral
     auto process_cell =
       [&]<bool is_gas_phase, bool is_viscous, typename IntegratorType>(IntegratorType &eval,
@@ -185,11 +194,17 @@ namespace MeltPoolDG::Multiphase
 
                 const VectorizedArray<number> solid_fraction = 1. - liquid_fraction;
 
-                const VectorizedArray<number> darcy_damping_coefficient =
+                VectorizedArray<number> darcy_damping_coefficient =
                   -multiphase_scratch_data.darcy_damping.mushy_zone_morphology * solid_fraction *
                   solid_fraction /
                   (liquid_fraction * liquid_fraction * liquid_fraction +
                    multiphase_scratch_data.darcy_damping.avoid_div_zero_constant);
+
+                darcy_damping_coefficient = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                      eval.quadrature_point(q)[0],
+                      dealii::make_vectorized_array(-4.e-4),
+                      darcy_damping_coefficient,
+                      0. * darcy_damping_coefficient);
 
                 // contribution to momentum equation
                 darcy_damping[1] = darcy_damping_coefficient * velocity[0];
@@ -203,6 +218,28 @@ namespace MeltPoolDG::Multiphase
 
             if (multiphase_scratch_data.phase_change.solid_liquid.use_darcy_damping)
               flux += darcy_damping;
+
+            if (not is_gas_phase)
+              {
+                ConservedVariablesType regularized_heat_source{};
+                constexpr double epsilon = 1. * 3.125e-6;
+                const dealii::Point<dim, VectorizedArray<double>> quad_point = eval.quadrature_point(q);
+                const dealii::VectorizedArray<double> x = quad_point[0];
+                auto delta = 1. / (sqrt(2.*std::numbers::pi) * epsilon) * std::exp(-((x-interface_position)/epsilon) * ((x-interface_position)/epsilon) / 2.);
+                delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                      x,
+                                      dealii::make_vectorized_array(-10.*epsilon),
+                                      0. * delta,
+                                      delta);
+                delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(
+                                      x,
+                                      dealii::make_vectorized_array(10.*epsilon),
+                                      0. * delta,
+                                      delta);
+
+                regularized_heat_source[2] = delta * laser_heat_source;
+                flux += regularized_heat_source;
+              }
 
             if (multiphase_scratch_data.body_force.get() != nullptr)
               flux += force;
@@ -435,11 +472,15 @@ namespace MeltPoolDG::Multiphase
                                                                         ConservedVariablesGradType>(
                                 w_liquid,
                                 w_gas,
+                                grad_w_gas,
+                                grad_w_liquid,
                                 normal,
                                 convective_terms_liquid,
                                 convective_terms_gas,
                                 multiphase_scratch_data,
-                                m_dot_evap);
+                                m_dot_evap,
+                                laser_heat_source,
+                                current_time);
 
                             ConservedVariablesType flux_liquid =
                               contract_tensor_with_vector<dim + 2, dim, number>(riemann_flux_liquid,

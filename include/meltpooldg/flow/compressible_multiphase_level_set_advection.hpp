@@ -119,14 +119,22 @@ namespace MeltPoolDG::Multiphase
       else if (case_name == "two_phase")
         {
           // one phase boundary
-          for (unsigned int i = 0; i < level_set.size(); i++)
-            level_set[i] += time_step * interface_velocity[0];
+         // for (unsigned int i = 0; i < level_set.size(); i++)
+            //level_set[i] += time_step * interface_velocity[0];
+
+          //interface_position += time_step * interface_velocity[0];
         }
       else
         AssertThrow(false,
                     dealii::ExcMessage(
                       "Analytical function for level-set advection is "
                       "only supported for the cases 'oscillating_water_column' and 'two_phase'."));
+    }
+
+    static double
+     get_interface_position()
+    {
+      return interface_position;
     }
 
     /**
@@ -153,6 +161,7 @@ namespace MeltPoolDG::Multiphase
     /// Vector for the phase interface velocities. Depending on the number of interfaces, the size
     /// of the vector is variable.
     static std::vector<number> interface_velocity;
+    static double interface_position;
   };
 
   template <int dim, typename number>
@@ -160,6 +169,9 @@ namespace MeltPoolDG::Multiphase
 
   template <int dim, typename number>
   std::vector<number> LevelSetAdvection<dim, number>::interface_velocity;
+
+  template <int dim, typename number>
+  double LevelSetAdvection<dim, number>::interface_position = 0.0135468746e-4;
 
   template <int dim, typename number>
   LevelSetOscillatingWaterColumn<dim, number>
