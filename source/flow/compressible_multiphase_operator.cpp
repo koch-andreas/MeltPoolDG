@@ -202,7 +202,7 @@ namespace MeltPoolDG::Multiphase
 
                 darcy_damping_coefficient = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
                       eval.quadrature_point(q)[0],
-                      dealii::make_vectorized_array(-4.e-4),
+                      dealii::make_vectorized_array(-3.e-4),
                       darcy_damping_coefficient,
                       0. * darcy_damping_coefficient);
 
@@ -222,7 +222,7 @@ namespace MeltPoolDG::Multiphase
             if (not is_gas_phase)
               {
                 ConservedVariablesType regularized_heat_source{};
-                constexpr double epsilon = 1. * 3.125e-6;
+                double epsilon = 2. * 3.125e-6;
                 const dealii::Point<dim, VectorizedArray<double>> quad_point = eval.quadrature_point(q);
                 const dealii::VectorizedArray<double> x = quad_point[0];
                 auto delta = 1. / (sqrt(2.*std::numbers::pi) * epsilon) * std::exp(-((x-interface_position)/epsilon) * ((x-interface_position)/epsilon) / 2.);

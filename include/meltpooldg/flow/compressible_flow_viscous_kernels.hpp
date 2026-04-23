@@ -53,6 +53,11 @@ namespace MeltPoolDG::Flow
       calculate_viscous_stress_tensor(
         const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &grad_u) const;
 
+    inline DEAL_II_ALWAYS_INLINE //
+      dealii::Tensor<2, dim, dealii::VectorizedArray<number>>
+      calculate_viscous_stress_tensor_damped(
+        const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &grad_u) const;
+
     /**
      * @brief Calculate the viscous flux F_v, i.e. F_v(u, grad(u)).
      *
@@ -206,6 +211,25 @@ namespace MeltPoolDG::Flow
 
   template <int dim, typename number>
   inline DEAL_II_ALWAYS_INLINE //
+    dealii::Tensor<2, dim, dealii::VectorizedArray<number>>
+    CompressibleFlowViscousKernels<dim, number>::calculate_viscous_stress_tensor_damped(
+      const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &grad_u) const
+  {
+    const dealii::VectorizedArray<number> div_u = 2. / 3. * dealii::trace(grad_u);
+
+    dealii::Tensor<2, dim, dealii::VectorizedArray<number>> out;
+    for (unsigned int d = 0; d < dim; ++d)
+      {
+        for (unsigned int e = 0; e < dim; ++e)
+          out[d][e] = material.data.dynamic_viscosity * (grad_u[d][e] + grad_u[e][d]);
+        out[d][d] -= (material.data.dynamic_viscosity) * div_u;
+      }
+
+    return out;
+  }
+
+  template <int dim, typename number>
+  inline DEAL_II_ALWAYS_INLINE //
     auto
     CompressibleFlowViscousKernels<dim, number>::calculate_viscous_flux(
       const ConservedVariablesType     &conserved_variables,
@@ -220,6 +244,9 @@ namespace MeltPoolDG::Flow
     const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> viscous_stress =
       calculate_viscous_stress_tensor(grad_u);
 
+    const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> viscous_stress_damped =
+      calculate_viscous_stress_tensor_damped(grad_u);
+
     const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> neg_heat_flux =
       material.data.thermal_conductivity *
       material.eos_utils->calculate_grad_T(conserved_variables, grad_conserved_variables);
@@ -232,7 +259,7 @@ namespace MeltPoolDG::Flow
 
         // momentum
         for (unsigned int e = 0; e < dim; ++e)
-          flux[e + 1][d] = viscous_stress[e][d];
+          flux[e + 1][d] = viscous_stress_damped[e][d];
 
         // energy
         flux[dim + 1][d] = neg_heat_flux[d];

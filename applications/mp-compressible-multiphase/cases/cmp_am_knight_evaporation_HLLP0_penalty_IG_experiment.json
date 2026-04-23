@@ -22,7 +22,7 @@
     }
   },
   "simulation specific parameters": {
-    "left boundary condition": "no_slip_wall",
+    "left boundary condition": "outflow_fixed_pressure",
     "right boundary condition": "outflow_fixed_pressure",
     "initial conditions": {
       "gas": "1.14979854471105; 0.0; 1.5e5",
@@ -57,7 +57,7 @@
     "laser heat source": {
       "do ramp": "true",
       "ramp time": "1.0e-5",
-      "laser power density": "2.e6"
+      "laser power density": "2.e9"
     },
     "HLLP0 and penalty": {
       "penalty parameter temperature jump": "0.125"

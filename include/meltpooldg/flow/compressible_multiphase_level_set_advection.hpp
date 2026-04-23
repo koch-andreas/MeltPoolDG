@@ -161,6 +161,8 @@ namespace MeltPoolDG::Multiphase
     /// Vector for the phase interface velocities. Depending on the number of interfaces, the size
     /// of the vector is variable.
     static std::vector<number> interface_velocity;
+
+  public:
     static double interface_position;
   };
 
@@ -171,7 +173,7 @@ namespace MeltPoolDG::Multiphase
   std::vector<number> LevelSetAdvection<dim, number>::interface_velocity;
 
   template <int dim, typename number>
-  double LevelSetAdvection<dim, number>::interface_position = 0.0135468746e-4;
+  double LevelSetAdvection<dim, number>::interface_position = 0.;
 
   template <int dim, typename number>
   LevelSetOscillatingWaterColumn<dim, number>

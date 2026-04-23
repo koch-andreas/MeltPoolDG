@@ -1,0 +1,117 @@
+{
+  "base": {
+    "problem name": "compressible_multiphase",
+    "case name": "two_phase",
+    "dimension": "1",
+    "verbosity level": "0",
+    "do print parameters": "false",
+    "global refinements": "3"
+  },
+  "time stepping": {
+    "start time": "0.0",
+    "end time": "1.0e-5",
+    "time step size": "1.0e-10",
+    "max n steps": "100000000"
+  },
+  "output": {
+    "write time step size": "1.0e-7",
+    "do user defined postprocessing": "true",
+    "paraview": {
+      "filename": "Ti6Al4V_regularized_heat_source_water_base_IG",
+      "enable": "true"
+    }
+  },
+  "simulation specific parameters": {
+    "left boundary condition": "outflow_fixed_pressure",
+    "right boundary condition": "outflow_fixed_pressure",
+    "initial conditions": {
+      "gas": "1.14979854471105; 0.0; 1.5e5",
+      "liquid": "1.14979854471105; 0.0; 1.5e5"
+    },
+    "atmospheric pressure": "1.e5"
+  },
+  "compressible navier stokes": {
+    "numerical flux type": "lax_friedrichs_exact",
+    "courant number": "0.01",
+    "viscous courant number": "0.01",
+    "use cfl criteria": "true",
+    "gravity constant": "0.0",
+    "domain representation type": "cut",
+    "time integration": {
+      "linear solver": {
+        "preconditioner type": "Identity",
+        "solver type": "CG",
+        "max iterations": "10000",
+        "rel tolerance": "1e-20",
+        "abs tolerance": "1e-20"
+      }
+    },
+    "fe": {
+      "degree": "1",
+      "type": "FE_DGQ"
+    }
+  },
+  "compressible flow phase coupling": {
+    "type": "HLLP0_and_penalty",
+    "evaporation model": "Knight",
+    "laser heat source": {
+      "do ramp": "true",
+      "ramp time": "2.0e-5",
+      "laser power density": "2.e7"
+    },
+    "HLLP0 and penalty": {
+      "penalty parameter temperature jump": "0.125"
+    }
+  },
+  "material": {
+    "liquid": {
+      "dynamic viscosity": "0.000035",
+      "specific isobaric heat": "434.858786610879",
+      "specific gas constant": "173.943514644351",
+      "reference density": "0.15",
+      "gamma": "1.666666666666666",
+      "thermal conductivity": "0.02863",
+      "equation of state": {
+        "type": "ideal_gas"
+      }
+    },
+    "gas": {
+      "dynamic viscosity": "0.001",
+      "specific isobaric heat": "4285.0",
+      "reference density": "700.0",
+      "specific gas constant": "461.5",
+      "gamma": "1.19",
+      "thermal conductivity": "0.6",
+      "equation of state": {
+        "type": "noble_abel_stiffened_gas",
+        "p inf": "7.028e5",
+        "b": "6.61e-4",
+        "q": "-1177788"
+      }
+    }
+  },
+  "phase change": {
+    "liquid gas": {
+      "boiling temperature": "3133.0",
+      "reference pressure": "1.0e5",
+      "latent heat of vaporization": "8.84e6"
+    },
+    "solid liquid": {
+      "use darcy damping": "false",
+      "liquidus temperature": "2200",
+      "solidus temperature": "1933"
+    }
+  },
+  "cut": {
+    "stabilization": {
+      "ghost-penalty": {
+        "gamma M degree 0": "1.0",
+        "gamma M degree 1": "1.0"
+      }
+    }
+  },
+  "darcy damping": {
+    "mushy zone morphology": "1.e12",
+    "avoid div zero constant": "1.0"
+  }
+}
