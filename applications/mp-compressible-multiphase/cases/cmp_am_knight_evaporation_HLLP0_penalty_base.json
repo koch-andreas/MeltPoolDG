@@ -68,7 +68,7 @@
       "dynamic viscosity": "0.001",
       "specific isobaric heat": "4190.0",
       "specific gas constant": "0.",
-      "reference density": "800.0",
+      "reference density": "50.0",
       "gamma": "2.788103",
       "thermal conductivity": "0.6",
       "equation of state": {

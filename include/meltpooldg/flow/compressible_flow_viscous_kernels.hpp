@@ -259,7 +259,7 @@ namespace MeltPoolDG::Flow
 
         // momentum
         for (unsigned int e = 0; e < dim; ++e)
-          flux[e + 1][d] = viscous_stress_damped[e][d];
+          flux[e + 1][d] = viscous_stress[e][d];
 
         // energy
         flux[dim + 1][d] = neg_heat_flux[d];

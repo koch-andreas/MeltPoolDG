@@ -69,6 +69,24 @@ namespace MeltPoolDG::Multiphase
                          const VectorType                            &src,
                          const std::pair<unsigned int, unsigned int> &cell_range) const;
 
+  void
+   output_at_quad_points(const dealii::MatrixFree<dim, number> &,
+              VectorType &dst,
+              const VectorType &src,
+              const std::pair<unsigned int, unsigned int> &cell_range) const;
+
+   void
+  output_at_quad_points_face(const dealii::MatrixFree<dim, number> &,
+             VectorType &dst,
+             const VectorType &src,
+             const std::pair<unsigned int, unsigned int> &face_range) const;
+
+   void
+  local_apply_dummy(const dealii::MatrixFree<dim, number> &,
+             VectorType &dst,
+             const VectorType &src,
+             const std::pair<unsigned int, unsigned int> &face_range) const;
+
     /**
      * @brief Local applier for the face integrals in the right-hand side evaluation.
      *

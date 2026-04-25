@@ -101,12 +101,39 @@ namespace MeltPoolDG::Multiphase
   {
     Assert(time_step > 0., dealii::ExcMessage("Time step size must be larger than 0!"));
     inv_time_step = 1. / time_step;
-
-    using local_applier_type =
+using local_applier_type =
       std::function<void(const MatrixFree<dim, number> &,
                          LinearAlgebra::distributed::Vector<number> &,
                          const LinearAlgebra::distributed::Vector<number> &,
                          const std::pair<unsigned int, unsigned int> &)>;
+    if (time+time_step>(1e-4-1e-11))
+    //if (time>(0.05e-5-0.48*time_step) and time<(0.05e-5+0.48*time_step))
+      {
+        local_applier_type cell_quad          = MPDG_LAMBDA_WRAPPER(output_at_quad_points);
+    multiphase_scratch_data.scratch_data.get_matrix_free().cell_loop(
+    cell_quad,
+  dst,
+  src);
+
+        /*multiphase_scratch_data.boundary_conditions.update_boundary_conditions(time);
+        local_applier_type cell          = MPDG_LAMBDA_WRAPPER(local_apply_dummy);
+        local_applier_type face          = MPDG_LAMBDA_WRAPPER(output_at_quad_points_face);
+        local_applier_type boundary_face = MPDG_LAMBDA_WRAPPER(local_apply_dummy);
+        multiphase_scratch_data.scratch_data.get_matrix_free().loop(
+          cell,
+          face,
+          boundary_face,
+          dst,
+          src,
+          true,
+          MatrixFree<dim, number>::DataAccessOnFaces::gradients,
+          MatrixFree<dim, number>::DataAccessOnFaces::gradients);*/
+
+      }
+
+
+
+
 
     multiphase_scratch_data.boundary_conditions.update_boundary_conditions(time);
     local_applier_type cell          = MPDG_LAMBDA_WRAPPER(local_apply_cell_rhs);
@@ -620,6 +647,152 @@ namespace MeltPoolDG::Multiphase
           break;
       }
   }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+  output_at_quad_points(const MatrixFree<dim, number> &,
+               VectorType &dst,
+               const VectorType &src,
+               const std::pair<unsigned int, unsigned int> &cell_range) const
+  {
+      auto eval_liquid = create_cell_integrator(CutUtil::CellCategory::liquid, 0);
+      for (unsigned int cell = cell_range.first; cell < cell_range.second; ++cell)
+        {
+          eval_liquid.reinit(cell);
+          eval_liquid.gather_evaluate(src,
+                                      EvaluationFlags::values |
+                                        (is_viscous_liquid ? EvaluationFlags::gradients :
+                                                             EvaluationFlags::nothing));
+          const number laser_heat_source =
+              update_laser_heat_source<number>(multiphase_scratch_data.phase_coupling,
+                                               current_time);
+
+          for (const unsigned int q : eval_liquid.quadrature_point_indices())
+            {
+              const auto w        = eval_liquid.get_value(q);
+              const auto grad_w        = eval_liquid.get_gradient(q);
+              const auto quad_point = eval_liquid.quadrature_point(q)[0];
+              const auto velocity = Flow::calculate_velocity<dim, number>(w);
+              const auto pressure =
+                multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(w);
+              const auto temperature =
+                multiphase_scratch_data.material_liquid.eos_utils->calculate_temperature(w);
+
+              double epsilon = 2. * 3.125e-6;
+              auto delta = 1. / (sqrt(2.*std::numbers::pi) * epsilon) * std::exp(-((quad_point)/epsilon) * ((quad_point)/epsilon) / 2.);
+              delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                    quad_point,
+                                    dealii::make_vectorized_array(-10.*epsilon),
+                                    0. * delta,
+                                    delta);
+              delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(
+                                    quad_point,
+                                    dealii::make_vectorized_array(10.*epsilon),
+                                    0. * delta,
+                                    delta);
+
+              const auto regularized_heat_source = delta * laser_heat_source;
+
+              const ConservedVariablesGradType convective_flux = convective_terms_liquid.calculate_convective_flux(w);
+              const ConservedVariablesGradType viscous_flux = viscous_terms_liquid.calculate_viscous_flux(w,grad_w);
+
+              std::cout << std::fixed << std::setprecision(12);
+
+              for (unsigned int lane = 0; lane < multiphase_scratch_data.scratch_data.get_matrix_free()
+                                               .n_active_entries_per_cell_batch(cell);
+               ++lane)
+                {
+                  std::cout << "position: " << quad_point[lane]
+                  << "; density: " << w[0][lane]
+                  << "; momentum: " << w[1][lane]
+                  << "; total energy: " << w[2][lane]
+                  << ": temperature: " << temperature[lane]
+                  << "; pressure: " << pressure[lane]
+                  << "; velocity: " << w[1][lane] / w[0][lane]
+                  << "; inner energy: " << w[1][lane] / w[0][lane]
+                  << "; heat source: " << regularized_heat_source[lane]
+                  << "; convective flux mass: " << convective_flux[0][0][lane]
+                  << "; convective flux momentum: " << convective_flux[1][0][lane]
+                  << "; convective flux total energy: " << convective_flux[2][0][lane]
+                  << "; viscous flux momentum: " << viscous_flux[1][0][lane]
+                  << "; viscous flux total energy: " << viscous_flux[2][0][lane]
+                  << std::endl;
+                }
+            }
+        }
+  }
+
+    template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+  output_at_quad_points_face(const MatrixFree<dim, number> &,
+               VectorType &dst,
+               const VectorType &src,
+               const std::pair<unsigned int, unsigned int> &face_range) const
+  {
+    auto [eval_liquid_m, eval_liquid_p] =
+            create_face_integrators(CutUtil::CellCategory::liquid, 0);
+      for (unsigned int cell = face_range.first; cell < face_range.second; ++cell)
+        {
+          eval_liquid_m.reinit(cell);
+          eval_liquid_m.gather_evaluate(src,
+                                      EvaluationFlags::values |
+                                        (is_viscous_liquid ? EvaluationFlags::gradients :
+                                                             EvaluationFlags::nothing));
+
+          eval_liquid_p.reinit(cell);
+          eval_liquid_p.gather_evaluate(src,
+                                      EvaluationFlags::values |
+                                        (is_viscous_liquid ? EvaluationFlags::gradients :
+                                                             EvaluationFlags::nothing));
+
+          const auto interior_penalty_parameter = 0.5 *
+      std::max(eval_liquid_m.read_cell_data(multiphase_scratch_data.interior_penalty_parameter),
+               eval_liquid_p.read_cell_data(
+                 multiphase_scratch_data.interior_penalty_parameter));
+
+          for (const unsigned int q : eval_liquid_m.quadrature_point_indices())
+            {
+              const auto w_m        = eval_liquid_m.get_value(q);
+              const auto normal = eval_liquid_m.normal_vector(q);
+              const auto grad_w_m        = eval_liquid_m.get_gradient(q);
+              const auto w_p        = eval_liquid_p.get_value(q);
+              const auto grad_w_p        = eval_liquid_p.get_gradient(q);
+              const auto quad_point = eval_liquid_m.quadrature_point(q)[0];
+
+              const auto convective_numerical_flux = convective_terms_liquid.calculate_convective_numerical_flux(w_m,w_p,normal);
+              const auto viscous_numerical_flux = viscous_terms_liquid.calculate_viscous_numerical_flux(w_m,w_p,grad_w_m,grad_w_p, normal,interior_penalty_parameter);
+
+              std::cout << std::fixed << std::setprecision(12);
+
+              for (unsigned int lane = 0; lane < multiphase_scratch_data.scratch_data.get_matrix_free()
+                                               .n_active_entries_per_face_batch(cell);
+               ++lane)
+                {
+                  std::cout << "position: " << quad_point[lane]
+                  << "; convective numerical flux mass: " << convective_numerical_flux[0][lane]
+                  << "; convective numerical flux momentum: " << convective_numerical_flux[1][lane]
+                  << "; convective numerical flux total energy: " << convective_numerical_flux[2][lane]
+                  << "; viscous numerical flux mass: " << viscous_numerical_flux[0][lane]
+                  << "; viscous numerical flux momentum: " << viscous_numerical_flux[1][lane]
+                  << "; viscous numerical flux total energy: " << viscous_numerical_flux[2][lane]
+                  << std::endl;
+                }
+            }
+        }
+  }
+
+   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+  local_apply_dummy(const MatrixFree<dim, number> &,
+               VectorType &dst,
+               const VectorType &src,
+               const std::pair<unsigned int, unsigned int> &face_range) const
+  {
+  }
+
 
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
   void
