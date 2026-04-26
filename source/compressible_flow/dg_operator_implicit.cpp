@@ -53,6 +53,8 @@ namespace MeltPoolDG::CompressibleFlow
       flow_scratch_data.boundary_conditions.update_boundary_conditions(time);
     };
 
+    current_time = time;
+
     time_integrator.perform_time_step(
       time,
       time_step,
@@ -282,6 +284,31 @@ namespace MeltPoolDG::CompressibleFlow
                                                phi.get_value(q));
 
             value_q -= 1. / current_time_step * (phi.get_value(q) - phi_old.get_value(q));
+
+            number factor = 1.;
+            if (current_time < 1.e-5)
+              factor = 0.5 * (1. - std::cos(std::numbers::pi * current_time / 1.e-5));
+
+            const number laser_heat_source = factor * 2.e7;
+
+
+            double epsilon = 2. * 3.125e-7;
+            const dealii::Point<dim, VectorizedArray<double>> quad_point = phi.quadrature_point(q);
+            const dealii::VectorizedArray<double> x = quad_point[0];
+            auto delta = 1. / (sqrt(2.*std::numbers::pi) * epsilon) * std::exp(-((x-5.e-4)/epsilon) * ((x-5.e-4)/epsilon) / 2.);
+            delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                  x,
+                                  dealii::make_vectorized_array(5.e-4-10.*epsilon),
+                                  0. * delta,
+                                  delta);
+            delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(
+                                  x,
+                                  dealii::make_vectorized_array(5.e-4+10.*epsilon),
+                                  0. * delta,
+                                  delta);
+
+            const dealii::VectorizedArray<double> regularized_heat_source = delta * laser_heat_source;
+            value_q[dim+1] += regularized_heat_source;
 
             phi.submit_gradient(grad_q, q);
             phi.submit_value(value_q, q);

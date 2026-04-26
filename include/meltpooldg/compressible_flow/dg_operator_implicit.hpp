@@ -185,6 +185,8 @@ namespace MeltPoolDG::CompressibleFlow
     /// appliers.
     mutable number current_time_step;
 
+    mutable number current_time = 0.;
+
     /// Scratch data for compressible flows
     OperationScratchData<dim, number> &flow_scratch_data;
 

@@ -4,17 +4,17 @@
     "case name": "generic_hyper_rectangle_domain",
     "dimension": 1,
     "do print parameters": false,
-    "verbosity level": 1,
-    "global refinements": 3
+    "verbosity level": 0,
+    "global refinements": 0
   },
   "case setup": {
     "boundary x min": {
-      "type": "subsonic_outflow_fixed_pressure",
-      "pressure": "1.0e5"
+      "type": "subsonic_outflow_fixed_energy",
+      "energy": "1.5e5"
     },
     "boundary x max": {
-      "type": "subsonic_outflow_fixed_pressure",
-      "pressure": "1.0e5"
+      "type": "subsonic_outflow_fixed_energy",
+      "energy": "1.5e5"
     },
     "initial conditions": {
       "density": "1.14979854471105",
@@ -22,32 +22,44 @@
       "energy": "1.5e5/1.14979854471105"
     },
     "domain": {
-      "size": "1000e-6",
-      "base grid resolution": "20"
+      "size": "1e-3",
+      "base grid resolution": "160"
     }
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 1.0e-5
+    "end time": 5e-6,
+    "time step size": 1e-8
   },
   "output": {
-    "write frequency": 1000,
+    "write time step size": 1.0e-7,
     "do user defined postprocessing": true,
     "output variables": "all",
     "directory": "./output",
     "paraview": {
-      "filename": "solution_generic_hyper_rectangle_domain",
+      "filename": "solution_generic_hyper_rectangle_impl_Euler",
       "enable": true
     }
   },
   "compressible navier stokes": {
-    "numerical flux type": "lax_friedrichs_modified",
+    "numerical flux type": "lax_friedrichs_exact",
+    "linearization jump convective flux": "lambda_fd",
     "use cfl criteria": true,
-    "courant number": 0.01,
-    "viscous courant number": 0.01,
+    "jacobian type": "exact",
+    "courant number": 0.2,
+    "viscous courant number": 0.2,
     "gravity constant": 0,
     "time integration": {
-      "type": "LSRK_stage_1_order_1"
+      "type": "bdf_1",
+      "linear solver": {
+        "rel tolerance": 1e-4,
+        "abs tolerance": 1e-5,
+        "preconditioner type": "Diagonal",
+        "max iterations": 1000000
+      },
+      "nlsolve": {
+        "residual tolerance": 1e-4
+      }
     },
     "fe": {
       "degree": 1,
@@ -59,9 +71,9 @@
       "eos type": "ideal_gas",
       "reference density": 0.15,
       "reference dynamic viscosity": 3.5e-05,
-      "specific isobaric heat": 434.858786610879,
-      "dynamic viscosity": 0.000035,
+      "dynamic viscosity": 3.5e-05,
       "gamma": 1.6666666666,
+      "specific isobaric heat": 434.858786610879,
       "specific gas constant": 173.943514644351,
       "thermal conductivity": 0.02863
     }

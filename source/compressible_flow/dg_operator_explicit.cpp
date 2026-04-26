@@ -39,6 +39,8 @@ namespace MeltPoolDG::CompressibleFlow
   void
   DGOperatorExplicit<dim, number, n_species>::advance_time_step(number time, number time_step)
   {
+    current_time = time;
+
     std::function<void(number, number, VectorType &, const VectorType &)> pre_processing =
       [&](number time, number, VectorType &, const VectorType &) -> void {
       flow_scratch_data.boundary_conditions.update_boundary_conditions(time);
@@ -153,12 +155,37 @@ namespace MeltPoolDG::CompressibleFlow
 
             if (not external_forces.empty())
               phi.submit_value(source, q);
+
+            number factor = 1.;
+            if (current_time < 1.e-5)
+              factor = 0.5 * (1. - std::cos(std::numbers::pi * current_time / 1.e-5));
+
+            const number laser_heat_source = factor * 2.e7;
+
+
+            double epsilon = 2. * 3.125e-7;
+            const dealii::Point<dim, VectorizedArray<double>> quad_point = phi.quadrature_point(q);
+            const dealii::VectorizedArray<double> x = quad_point[0];
+            auto delta = 1. / (sqrt(2.*std::numbers::pi) * epsilon) * std::exp(-((x-5.e-4)/epsilon) * ((x-5.e-4)/epsilon) / 2.);
+            delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                  x,
+                                  dealii::make_vectorized_array(5.e-4-10.*epsilon),
+                                  0. * delta,
+                                  delta);
+            delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(
+                                  x,
+                                  dealii::make_vectorized_array(5.e-4+10.*epsilon),
+                                  0. * delta,
+                                  delta);
+
+            FlowSourceType regularized_heat_source;
+            regularized_heat_source[dim+1] = delta * laser_heat_source;
+
+            phi.submit_value(regularized_heat_source, q);
             phi.submit_gradient(flux, q);
           }
 
-        phi.integrate_scatter((not external_forces.empty() ? EvaluationFlags::values :
-                                                             EvaluationFlags::nothing) |
-                                EvaluationFlags::gradients,
+        phi.integrate_scatter(EvaluationFlags::values | EvaluationFlags::gradients,
                               dst);
       }
   }

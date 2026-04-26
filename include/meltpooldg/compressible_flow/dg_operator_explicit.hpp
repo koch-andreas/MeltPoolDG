@@ -124,6 +124,8 @@ namespace MeltPoolDG::CompressibleFlow
     /// Current time step size
     mutable number current_time_step;
 
+    mutable number current_time = 0.;
+
     /**
      * Return true if the flow is viscous, false otherwise. In single component flows, this is
      * determined by the value of the dynamic viscosity in the material data. In multi-component
