@@ -17,7 +17,7 @@
     "write time step size": "1.0e-7",
     "do user defined postprocessing": "true",
     "paraview": {
-      "filename": "Ti6Al4V_regularized_heat_source_water_base_IG",
+      "filename": "Ti6Al4V_regularized_heat_source_NASG_Gauss_experiment",
       "enable": "true"
     }
   },
@@ -26,7 +26,7 @@
     "right boundary condition": "outflow_fixed_pressure",
     "initial conditions": {
       "gas": "1.14979854471105; 0.0; 1.5e5",
-      "liquid": "1.14979854471105; 0.0; 1.5e5"
+      "liquid": "4942.52838219827; 0.0; -1.00077284582753e10"
     },
     "atmospheric pressure": "1.e5"
   },
@@ -56,8 +56,8 @@
     "evaporation model": "Knight",
     "laser heat source": {
       "do ramp": "true",
-      "ramp time": "2.0e-5",
-      "laser power density": "2.e7"
+      "ramp time": "1.0e-5",
+      "laser power density": "2.e9"
     },
     "HLLP0 and penalty": {
       "penalty parameter temperature jump": "0.125"
@@ -65,14 +65,17 @@
   },
   "material": {
     "liquid": {
-      "dynamic viscosity": "0.000035",
-      "specific isobaric heat": "434.858786610879",
-      "specific gas constant": "173.943514644351",
-      "reference density": "0.01",
-      "gamma": "1.666666666666666",
-      "thermal conductivity": "0.02863",
+      "dynamic viscosity": "0.0035",
+      "specific isobaric heat": "1126.0",
+      "reference density": "0.0",
+      "specific gas constant": "0.",
+      "gamma": "1.006804865",
+      "thermal conductivity": "28.63",
       "equation of state": {
-        "type": "ideal_gas"
+        "type": "noble_abel_stiffened_gas",
+        "p inf": "258134879.2",
+        "b": "0.00018759",
+        "q": "-2587818.15"
       }
     },
     "gas": {

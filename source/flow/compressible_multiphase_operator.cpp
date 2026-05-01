@@ -264,6 +264,24 @@ using local_applier_type =
                                       0. * delta,
                                       delta);
 
+
+                // hat-shaped heat source
+                /*double epsilon = 4. * 6.25e-6;
+                const dealii::Point<dim, VectorizedArray<double>> quad_point = eval.quadrature_point(q);
+                const dealii::VectorizedArray<double> x = quad_point[0];
+                auto delta = (-(std::abs(x+5.e-4)) + epsilon) / epsilon * 42000.;  //(-std::abs(x) + epsilon) / epsilon * 42000.;   //1. / (sqrt(2.*std::numbers::pi) * epsilon) * std::exp(-((x-interface_position)/epsilon) * ((x-interface_position)/epsilon) / 2.);
+                delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                      x,
+                                      dealii::make_vectorized_array(-epsilon),
+                                      0. * delta,
+                                      delta);
+                delta = dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(
+                                      x,
+                                      dealii::make_vectorized_array(epsilon),
+                                      0. * delta,
+                                      delta);*/
+
+
                 regularized_heat_source[2] = delta * laser_heat_source;
                 flux += regularized_heat_source;
               }

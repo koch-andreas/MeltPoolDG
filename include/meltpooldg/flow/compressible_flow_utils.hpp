@@ -296,7 +296,7 @@ namespace MeltPoolDG::Flow
                   matrix_free.get_cell_iterator(i, v, dof_index);
 
                 // simplified computation for hypercube elements
-                array_penalty_parameter[i][v] = fac / cell->minimum_vertex_distance();
+                array_penalty_parameter[i][v] = 2. * fac / cell->minimum_vertex_distance();
               }
           }
       }

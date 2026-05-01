@@ -17,7 +17,7 @@
     "write time step size": "1.0e-7",
     "do user defined postprocessing": "true",
     "paraview": {
-      "filename": "Ti6Al4V_regularized_heat_source_water_base_IG",
+      "filename": "Ti6Al4V_regularized_heat_source_water_base_IG_hat_vs_diffuse_heat_source",
       "enable": "true"
     }
   },
@@ -68,7 +68,7 @@
       "dynamic viscosity": "0.000035",
       "specific isobaric heat": "434.858786610879",
       "specific gas constant": "173.943514644351",
-      "reference density": "0.01",
+      "reference density": "0.0",
       "gamma": "1.666666666666666",
       "thermal conductivity": "0.02863",
       "equation of state": {

@@ -76,6 +76,7 @@ namespace MeltPoolDG::Multiphase
         mapping_info_surface,
         mapping_info_cells,
         mapping_info_faces))
+    , mf_context( multiphase_scratch_data.scratch_data.get_matrix_free(), comp_flow_dof_idx_in, comp_flow_quad_idx_in)
   {
     // Currently, only explicit Euler time discretization with ghost-penalty stabilized mass matrix
     // is enabled for cutDG
@@ -275,6 +276,10 @@ namespace MeltPoolDG::Multiphase
           multiphase_scratch_data.flow_data.time_integrator.linear_solver_data);
       },
       cmp_operator);
+
+    // apply minmod slope limiter
+    //apply_muscl_limiter<dim, 3, number>(mf_context,multiphase_scratch_data.solution_history.get_current_solution(),multiphase_scratch_data.solution_history.get_current_solution());
+
   }
 
   template <int dim, typename number>
