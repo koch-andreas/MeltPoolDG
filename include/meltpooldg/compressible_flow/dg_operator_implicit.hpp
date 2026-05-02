@@ -46,6 +46,8 @@ namespace MeltPoolDG::CompressibleFlow
     void
     reinit() override;
 
+    bool eigenvalue_flag = false;
+
     /**
      * @brief Advances solver by a single time step.
      *
@@ -215,6 +217,23 @@ namespace MeltPoolDG::CompressibleFlow
      */
     void
     apply_jacobian_analytic(const VectorType &src, VectorType &dst) const;
+
+    void
+    set_eigenvalue_flag()
+    {
+     eigenvalue_flag = true;
+    }
+
+    void
+   reset_eigenvalue_flag()
+    {
+     eigenvalue_flag = false;
+    }
+
+    void
+    vmult(
+    VectorType       &dst,
+    const VectorType &src) const;
 
     /**
      * @brief Compute the result of J*x, where J is the Jacobian approximated by finite differences.

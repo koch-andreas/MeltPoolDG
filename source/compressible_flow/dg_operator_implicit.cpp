@@ -6,6 +6,7 @@
 #include <meltpooldg/utilities/dealii_tensor.hpp>
 #include <meltpooldg/utilities/matrix_free_util.hpp>
 #include <meltpooldg/utilities/vector_tools.templates.hpp>
+#include <meltpooldg/linear_algebra/utilities_matrixfree.hpp>
 
 namespace MeltPoolDG::CompressibleFlow
 {
@@ -177,6 +178,45 @@ namespace MeltPoolDG::CompressibleFlow
       dst,
       src,
       true);
+  }
+
+  template <int dim, typename number, bool is_viscous>
+  void
+  DGOperatorImplicit<dim, number, is_viscous>::vmult(
+  VectorType       &dst,
+  const VectorType &src) const
+  {
+    flow_scratch_data.scratch_data.get_matrix_free().loop(
+      &DGOperatorImplicit::local_cell_jacobian,
+      &DGOperatorImplicit::local_face_jacobian,
+      &DGOperatorImplicit::local_boundary_face_jacobian,
+      this,
+      dst,
+      src,
+      true);
+
+    using local_applier_type = std::function<void(const dealii::MatrixFree<dim, number> &,
+                                                  VectorType       &dst,
+                                                  const VectorType &src,
+                                                  const std::pair<unsigned int, unsigned int> &)>;
+
+    const std::function<void(unsigned int, unsigned int)> func{};
+
+    local_applier_type inverse =
+      [dof_idx = flow_scratch_data.dof_idx,
+       quad_idx =
+         flow_scratch_data.quad_idx](const MatrixFree<dim, number>               &matrix_free,
+                                     VectorType                                  &dst,
+                                     const VectorType                            &src,
+                                     const std::pair<unsigned int, unsigned int> &cell_range) {
+        MeltPoolDG::Utilities::MatrixFree::
+          local_apply_inverse_mass_matrix<dim, n_conserved_variables<dim, 1>, number>(
+            matrix_free, dst, src, cell_range, dof_idx, quad_idx);
+    };
+    flow_scratch_data.scratch_data.get_matrix_free().cell_loop(
+      inverse, dst, dst, std::function<void(unsigned int, unsigned int)>(), std::function<void(unsigned int, unsigned int)>());
+
+    dst *= current_time_step;
   }
 
   template <int dim, typename number, bool is_viscous>
@@ -564,7 +604,9 @@ namespace MeltPoolDG::CompressibleFlow
     const auto w_q       = phi.get_value(q_index);
     const auto delta_w_q = delta_phi.get_value(q_index);
 
-    ConservedVariables value_q = 1. / current_time_step * delta_w_q;
+    ConservedVariables value_q{};
+    if (!eigenvalue_flag)
+      value_q = 1. / current_time_step * delta_w_q;
     for (auto &external_force : external_forces_jacobian)
       value_q -= external_force->value(
         current_time_step, cell_iterators, phi.quadrature_point(q_index), w_q, delta_w_q);

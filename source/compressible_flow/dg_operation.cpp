@@ -17,6 +17,7 @@
 #include <meltpooldg/utilities/fe_integrator.hpp>
 #include <meltpooldg/utilities/fe_util.hpp>
 #include <meltpooldg/utilities/vector_tools.templates.hpp>
+#include <meltpooldg/utilities/eigenvalues.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -102,6 +103,27 @@ namespace MeltPoolDG::CompressibleFlow
     flow_scratch_data.solution_history.update_ghost_values();
 
     comp_flow_operator->advance_time_step(current_time, time_step);
+
+    comp_flow_operator->set_eigenvalue_flag();
+
+    VectorType b;
+    b.reinit(flow_scratch_data.solution_history.get_current_solution());
+    b = 1.0;
+
+    auto eigenvalues = estimate_eigenvalues_gmres(*comp_flow_operator, b, 1000);
+    for (auto &eig : eigenvalues)
+      {
+        eig = -eig;
+      }
+      const std::string filename = "eigenvalues.csv";
+
+      std::ofstream file(filename);
+      AssertThrow(file, dealii::ExcMessage("Can not open the file: " + filename));
+
+      for (const auto &v : eigenvalues)
+        file << v.real() << ';' << v.imag() << '\n';
+
+    comp_flow_operator->reset_eigenvalue_flag();
   }
 
   template <int dim, typename number, int n_species>

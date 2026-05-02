@@ -14,7 +14,7 @@
     "write frequency": "1",
     "do user defined postprocessing": "true",
     "paraview": {
-      "enable": "false"
+      "enable": "true"
     }
   },
   "compressible navier stokes": {
@@ -24,10 +24,11 @@
     "jacobian type": "exact",
     "gravity": 0.5,
     "time integration": {
-      "type": "bdf_6",
+      "type": "bdf_1",
       "linear solver": {
         "rel tolerance": 1e-10,
-        "abs tolerance": 1e-12
+        "abs tolerance": 1e-12,
+        "preconditioner type": "Identity"
       },
       "nlsolve": {
         "residual tolerance": 1e-10

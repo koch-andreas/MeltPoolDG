@@ -26,6 +26,27 @@ namespace MeltPoolDG::CompressibleFlow
     virtual void
     advance_time_step(number time, number time_step) = 0;
 
+    virtual void vmult(dealii::LinearAlgebra::distributed::Vector<number> &dst,
+                   const dealii::LinearAlgebra::distributed::Vector<number> &src) const
+    {}
+
+    virtual void
+    compute_residual(number            current_time,
+                     number            time_step,
+                     const dealii::LinearAlgebra::distributed::Vector<number> &src,
+                     dealii::LinearAlgebra::distributed::Vector<number>       &dst,
+                     const dealii::LinearAlgebra::distributed::Vector<number> &old_solution) const
+    {}
+
+    virtual void
+    set_eigenvalue_flag()
+    {}
+
+    virtual void
+    reset_eigenvalue_flag()
+    {}
+
+
     /**
      * @brief Reinit the operator.
      *
