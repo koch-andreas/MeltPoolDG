@@ -86,15 +86,7 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
     const MPI_Comm mpi_communicator)
     : CaseClass(parameter_file, mpi_communicator)
     , cell_repetitions(dim, 1)
-  {
-    const Number half_width = width * 0.5;
-    bottom_left             = (dim == 1) ? Point<dim>(-height_substrate) :
-                              (dim == 2) ? Point<dim>(-half_width, -height_substrate) :
-                                           Point<dim>(-half_width, -half_width, -height_substrate);
-    top_right               = (dim == 1) ? Point<dim>(height_gas) :
-                              (dim == 2) ? Point<dim>(half_width, height_gas) :
-                                           Point<dim>(half_width, half_width, height_gas);
-  }
+  {}
 
   template <int dim, typename Number, typename CaseClass>
   bool
@@ -177,6 +169,16 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
   void
   SimulationLaserMeltingSimonds<dim, Number, CaseClass>::create_spatial_discretization()
   {
+    // NOTE: Simulation specific parameters that are read via the input file are only
+    // available here and not in the constructor
+    const Number half_width = width * 0.5;
+    bottom_left             = (dim == 1) ? Point<dim>(-height_substrate) :
+                              (dim == 2) ? Point<dim>(-half_width, -height_substrate) :
+                                           Point<dim>(-half_width, -half_width, -height_substrate);
+    top_right               = (dim == 1) ? Point<dim>(height_gas) :
+                              (dim == 2) ? Point<dim>(half_width, height_gas) :
+                                           Point<dim>(half_width, half_width, height_gas);
+
     if (this->parameters.base.fe.type == FiniteElementType::FE_SimplexP || dim == 1)
       {
 #ifdef DEAL_II_WITH_METIS
@@ -263,12 +265,12 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
                   AssertThrow(false, ExcNotImplemented());
               }
           }
+
     // substrate
     this->attach_boundary_condition(
       {substrate_bc, std::make_shared<Functions::ConstantFunction<dim>>(T_initial_bottom)},
       "dirichlet",
       "heat_transfer");
-
 
     if constexpr (std::is_same_v<CaseClass, MeltPoolCase<dim, Number>>)
       {
@@ -278,32 +280,56 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
           this->parameters.ls.get_n_subdivisions() / std::sqrt(dim));
 
         AssertThrow(eps > 0, dealii::ExcNotImplemented());
-        this->attach_boundary_condition({substrate_bc, std::make_shared<InitialLevelSet<dim>>(eps)},
-                                        "dirichlet",
-                                        "level_set");
-        this->attach_boundary_condition(
-          {gas_inflow_bc, std::make_shared<InitialLevelSet<dim>>(eps)}, "dirichlet", "level_set");
+        // this->attach_boundary_condition({substrate_bc,
+        // std::make_shared<InitialLevelSet<dim>>(eps)}, "dirichlet", "level_set");
+        // this->attach_boundary_condition({substrate_bc,
+        // std::make_shared<dealii::Functions::ZeroFunction<dim>>()},
+        //"dirichlet",
+        //"reinitialization");
+
+        if constexpr (dim > 1)
+          {
+            this->attach_boundary_condition({gas_inflow_bc,
+                                             std::make_shared<InitialLevelSet<dim>>(eps)},
+                                            "dirichlet",
+                                            "level_set");
+            this->attach_boundary_condition(
+              {gas_inflow_bc, std::make_shared<dealii::Functions::ZeroFunction<dim>>()},
+              "dirichlet",
+              "reinitialization");
+          }
 
         // substrate
         this->attach_boundary_condition(substrate_bc, "no_slip", "navier_stokes_u");
 
         // gas: top
-        this->attach_boundary_condition(gas_top_bc, "symmetry", "navier_stokes_u");
+        if constexpr (dim == 1)
+          // gas: outlet
+          this->attach_boundary_condition(
+            {gas_top_bc, std::make_shared<Functions::ConstantFunction<dim>>(outlet_pressure)},
+            "open",
+            "navier_stokes_u");
+        else
+          this->attach_boundary_condition(gas_top_bc, "symmetry", "navier_stokes_u");
 
-        // gas: inflow
-        this->attach_boundary_condition({gas_inflow_bc, std::make_shared<InflowVelocity<dim>>()},
-                                        "dirichlet",
-                                        "navier_stokes_u");
-        this->attach_boundary_condition(
-          {gas_inflow_bc, std::make_shared<Functions::ConstantFunction<dim>>(T_initial_bottom)},
-          "dirichlet",
-          "heat_transfer");
+        if constexpr (dim > 1)
+          {
+            // gas: inflow
+            this->attach_boundary_condition({gas_inflow_bc,
+                                             std::make_shared<InflowVelocity<dim>>()},
+                                            "dirichlet",
+                                            "navier_stokes_u");
+            this->attach_boundary_condition(
+              {gas_inflow_bc, std::make_shared<Functions::ConstantFunction<dim>>(T_initial_bottom)},
+              "dirichlet",
+              "heat_transfer");
 
-        // gas: outlet
-        this->attach_boundary_condition(
-          {gas_outlet_bc, std::make_shared<Functions::ConstantFunction<dim>>(outlet_pressure)},
-          "open",
-          "navier_stokes_u");
+            // gas: outlet
+            this->attach_boundary_condition(
+              {gas_outlet_bc, std::make_shared<Functions::ConstantFunction<dim>>(outlet_pressure)},
+              "open",
+              "navier_stokes_u");
+          }
       }
 
     /*

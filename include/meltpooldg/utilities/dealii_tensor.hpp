@@ -189,7 +189,7 @@ namespace MeltPoolDG
           vec[d][v] = in[d][v] / n_norm[v];
       else
         for (unsigned int d = 0; d < dim; ++d)
-          vec[d][v] = 0.0;
+          vec[d][v] = in[d][v] / zero;
 
     return vec;
   }
