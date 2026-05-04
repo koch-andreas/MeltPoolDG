@@ -69,6 +69,29 @@ namespace MeltPoolDG::Multiphase
                          const VectorType                            &src,
                          const std::pair<unsigned int, unsigned int> &cell_range) const;
 
+   void
+    local_apply_cell_p(const dealii::MatrixFree<dim, number>       &matrix_free,
+                         VectorType                                  &dst,
+                         const VectorType                            &src,
+                         const std::pair<unsigned int, unsigned int> &cell_range) const;
+
+ void
+ p_postprocessing(
+    VectorType       &dst,
+   const VectorType &src) const;
+
+   void
+    local_apply_face_p(const dealii::MatrixFree<dim, number>       &matrix_free,
+                         VectorType                                  &dst,
+                         const VectorType                            &src,
+                         const std::pair<unsigned int, unsigned int> &cell_range) const;
+
+   void
+    local_apply_boundary_face_p(const dealii::MatrixFree<dim, number>       &matrix_free,
+                         VectorType                                  &dst,
+                         const VectorType                            &src,
+                         const std::pair<unsigned int, unsigned int> &cell_range) const;
+
   void
    output_at_quad_points(const dealii::MatrixFree<dim, number> &,
               VectorType &dst,

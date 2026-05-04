@@ -274,6 +274,8 @@ namespace MeltPoolDG::Multiphase
           multiphase_scratch_data.solution_history.get_current_solution(),
           rhs,
           multiphase_scratch_data.flow_data.time_integrator.linear_solver_data);
+
+        op.p_postprocessing(multiphase_scratch_data.solution_history.get_current_solution(),multiphase_scratch_data.solution_history.get_current_solution());
       },
       cmp_operator);
 

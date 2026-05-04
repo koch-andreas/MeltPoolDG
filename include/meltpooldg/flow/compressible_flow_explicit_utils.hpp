@@ -177,7 +177,8 @@ namespace MeltPoolDG::Flow
     auto numerical_flux =
       convective_terms.calculate_convective_numerical_flux(evaluator_m.get_value(q),
                                                            evaluator_p.get_value(q),
-                                                           evaluator_m.normal_vector(q));
+                                                           evaluator_m.normal_vector(q),
+                                                           evaluator_m.quadrature_point(q)[0]);
 
     if (is_viscous)
       numerical_flux -= viscous_terms.calculate_viscous_numerical_flux(evaluator_m.get_value(q),
@@ -253,7 +254,7 @@ namespace MeltPoolDG::Flow
     const auto [w_p, grad_w_p] = boundary_conditions.get_boundary_face_value_and_gradient(
       evaluator_m.quadrature_point(q), normal, boundary_id, w_m, grad_w_m, material, is_gas_phase);
 
-    auto flux = convective_terms.calculate_convective_numerical_flux(w_m, w_p, normal);
+    auto flux = convective_terms.calculate_convective_numerical_flux(w_m, w_p, normal, evaluator_m.quadrature_point(q)[0]);
 
     if (is_viscous)
       flux -= viscous_terms.calculate_viscous_numerical_flux(

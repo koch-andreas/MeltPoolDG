@@ -56,7 +56,9 @@ namespace MeltPoolDG::Flow
     inline DEAL_II_ALWAYS_INLINE //
       dealii::Tensor<2, dim, dealii::VectorizedArray<number>>
       calculate_viscous_stress_tensor_damped(
-        const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &grad_u) const;
+        const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &grad_u,
+        const ConservedVariablesType     &conserved_variables,
+      const ConservedVariablesGradType &grad_conserved_variables) const;
 
     /**
      * @brief Calculate the viscous flux F_v, i.e. F_v(u, grad(u)).
@@ -69,7 +71,8 @@ namespace MeltPoolDG::Flow
     inline DEAL_II_ALWAYS_INLINE //
       ConservedVariablesGradType
       calculate_viscous_flux(const ConservedVariablesType     &conserved_variables,
-                             const ConservedVariablesGradType &grad_conserved_variables) const;
+                             const ConservedVariablesGradType &grad_conserved_variables,
+                             const dealii::VectorizedArray<number> &quad_points = dealii::make_vectorized_array(0.)) const;
 
     /**
      * @brief Calculate the viscous numerical flux F_v^* using the symmetric interior penalty
@@ -196,14 +199,36 @@ namespace MeltPoolDG::Flow
     CompressibleFlowViscousKernels<dim, number>::calculate_viscous_stress_tensor(
       const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &grad_u) const
   {
-    const dealii::VectorizedArray<number> div_u = 2. / 3. * dealii::trace(grad_u);
+    const dealii::VectorizedArray<number> div_u = dealii::trace(grad_u);
 
     dealii::Tensor<2, dim, dealii::VectorizedArray<number>> out;
     for (unsigned int d = 0; d < dim; ++d)
       {
         for (unsigned int e = 0; e < dim; ++e)
           out[d][e] = material.data.dynamic_viscosity * (grad_u[d][e] + grad_u[e][d]);
-        out[d][d] -= material.data.dynamic_viscosity * div_u;
+        out[d][d] -= 2. / 3. * material.data.dynamic_viscosity * div_u;
+      }
+
+    // --- compression sensor: only activate in compression
+    dealii::VectorizedArray<number> chi;
+
+    for (unsigned int v = 0; v < chi.size(); ++v)
+      {
+        const number div_val = div_u[v];
+        chi[v] = (div_val < 0.0) ? -div_val : 0.0;
+      }
+
+    // normalize sensor (optional but strongly recommended)
+    chi /= (chi + 1e-12);
+
+    // --- artificial viscosity coefficient
+    const dealii::VectorizedArray<number> mu_art =
+      0. * chi;
+
+    // --- apply ONLY isotropic damping (bulk viscosity)
+    for (unsigned int d = 0; d < dim; ++d)
+      {
+        out[d][d] -= mu_art * div_u;
       }
 
     return out;
@@ -213,7 +238,9 @@ namespace MeltPoolDG::Flow
   inline DEAL_II_ALWAYS_INLINE //
     dealii::Tensor<2, dim, dealii::VectorizedArray<number>>
     CompressibleFlowViscousKernels<dim, number>::calculate_viscous_stress_tensor_damped(
-      const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &grad_u) const
+      const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &grad_u,
+      const ConservedVariablesType     &conserved_variables,
+      const ConservedVariablesGradType &grad_conserved_variables) const
   {
     const dealii::VectorizedArray<number> div_u = 2. / 3. * dealii::trace(grad_u);
 
@@ -222,7 +249,7 @@ namespace MeltPoolDG::Flow
       {
         for (unsigned int e = 0; e < dim; ++e)
           out[d][e] = material.data.dynamic_viscosity * (grad_u[d][e] + grad_u[e][d]);
-        out[d][d] -= (material.data.dynamic_viscosity) * div_u;
+        out[d][d] -= (material.data.dynamic_viscosity + 0. /** std::abs(material.eos_utils->calculate_grad_T(conserved_variables, grad_conserved_variables)[0])*/) * div_u;
       }
 
     return out;
@@ -233,7 +260,8 @@ namespace MeltPoolDG::Flow
     auto
     CompressibleFlowViscousKernels<dim, number>::calculate_viscous_flux(
       const ConservedVariablesType     &conserved_variables,
-      const ConservedVariablesGradType &grad_conserved_variables) const
+      const ConservedVariablesGradType &grad_conserved_variables,
+      const dealii::VectorizedArray<number> &quad_points) const
     -> ConservedVariablesGradType
   {
     const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> velocity =
@@ -245,7 +273,7 @@ namespace MeltPoolDG::Flow
       calculate_viscous_stress_tensor(grad_u);
 
     const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> viscous_stress_damped =
-      calculate_viscous_stress_tensor_damped(grad_u);
+      calculate_viscous_stress_tensor_damped(grad_u, conserved_variables, grad_conserved_variables);
 
     const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> neg_heat_flux =
       material.data.thermal_conductivity *
@@ -259,13 +287,31 @@ namespace MeltPoolDG::Flow
 
         // momentum
         for (unsigned int e = 0; e < dim; ++e)
-          flux[e + 1][d] = viscous_stress[e][d];
+          flux[e + 1][d] = viscous_stress_damped[e][d];
 
         // energy
         flux[dim + 1][d] = neg_heat_flux[d];
 
         for (unsigned int e = 0; e < dim; ++e)
-          flux[dim + 1][d] += velocity[e] * viscous_stress[d][e];
+          flux[dim + 1][d] += velocity[e] * viscous_stress_damped[d][e];
+
+        /*const number epsilon = 0.0000000000001;
+        const dealii::VectorizedArray<number> grad_p = (material.data.gamma - 1.) / (1./conserved_variables[0] - material.data.eos_data.b)
+              * material.data.specific_isobaric_heat / material.data.gamma * material.eos_utils->calculate_grad_T(conserved_variables,grad_conserved_variables)[0]
+              + (material.data.gamma -1.) * material.eos_utils->calculate_temperature(conserved_variables) * material.data.specific_isobaric_heat
+              / material.data.gamma * 1./((1./conserved_variables[0]-material.data.eos_data.b) * (1./conserved_variables[0]-material.data.eos_data.b))
+                * 1. / conserved_variables[0] / conserved_variables[0] * grad_conserved_variables[0][0];*/
+
+        /*const dealii::VectorizedArray<number> div_u = dealii::trace(grad_u);
+        const dealii::VectorizedArray<number> div_mask = dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(
+                      -div_u,
+                      dealii::make_vectorized_array(0.),
+                      -div_u,
+                      dealii::make_vectorized_array(0.));*/
+
+        //flux[0][d] += epsilon * grad_conserved_variables[0][0] * std::abs(grad_p);
+        //flux[1][d] += epsilon * grad_conserved_variables[1][0] * std::abs(grad_p);
+        //flux[2][d] += epsilon * grad_conserved_variables[2][0] * std::abs(grad_p);
       }
 
     return flux;

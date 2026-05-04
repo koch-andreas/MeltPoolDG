@@ -152,6 +152,32 @@ using local_applier_type =
     dst *= time_step;
   }
 
+    template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::p_postprocessing(
+     VectorType       &dst,
+    const VectorType &src) const
+  {
+using local_applier_type =
+      std::function<void(const MatrixFree<dim, number> &,
+                         LinearAlgebra::distributed::Vector<number> &,
+                         const LinearAlgebra::distributed::Vector<number> &,
+                         const std::pair<unsigned int, unsigned int> &)>;
+
+    local_applier_type cell          = MPDG_LAMBDA_WRAPPER(local_apply_cell_p);
+    local_applier_type face          = MPDG_LAMBDA_WRAPPER(local_apply_face_p);
+    local_applier_type boundary_face = MPDG_LAMBDA_WRAPPER(local_apply_boundary_face_p);
+    multiphase_scratch_data.scratch_data.get_matrix_free().loop(
+      cell,
+      face,
+      boundary_face,
+      dst,
+      src,
+      false,
+      MatrixFree<dim, number>::DataAccessOnFaces::values,
+      MatrixFree<dim, number>::DataAccessOnFaces::values);
+  }
+
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
   void
   CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
@@ -779,7 +805,7 @@ using local_applier_type =
               const auto grad_w_p        = eval_liquid_p.get_gradient(q);
               const auto quad_point = eval_liquid_m.quadrature_point(q)[0];
 
-              const auto convective_numerical_flux = convective_terms_liquid.calculate_convective_numerical_flux(w_m,w_p,normal);
+              const auto convective_numerical_flux = convective_terms_liquid.calculate_convective_numerical_flux(w_m,w_p,normal, eval_liquid_m.quadrature_point(q)[0]);
               const auto viscous_numerical_flux = viscous_terms_liquid.calculate_viscous_numerical_flux(w_m,w_p,grad_w_m,grad_w_p, normal,interior_penalty_parameter);
 
               std::cout << std::fixed << std::setprecision(12);
@@ -848,12 +874,20 @@ using local_applier_type =
 
           for (const unsigned int q : eval_m.quadrature_point_indices())
             {
+              /*double epsilon = 2. * 3.125e-6;
+              const auto quad_point = eval_m.quadrature_point(q)[0];
+              dealii::VectorizedArray<number> factor = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                          std::abs(quad_point),
+                                          dealii::make_vectorized_array(10.*epsilon),
+                                          dealii::make_vectorized_array(1.e5),
+                                          dealii::make_vectorized_array(1.));*/
+
               const auto [flux_m, flux_p, grad_flux_m, grad_flux_p] =
                 MeltPoolDG::Flow::rhs_face_integral_kernel<dim,
                                                            number,
                                                            FEFaceIntegrator<dim, dim + 2, number>,
                                                            is_viscous>(
-                  eval_m, eval_p, q, interior_penalty_parameter, convective_terms, viscous_terms);
+                  eval_m, eval_p, q, /*factor */ interior_penalty_parameter, convective_terms, viscous_terms);
 
               eval_m.submit_value(flux_m, q);
               eval_p.submit_value(flux_p, q);
@@ -1075,6 +1109,15 @@ using local_applier_type =
 
           for (const unsigned int q : eval_m.quadrature_point_indices())
             {
+
+              /*double epsilon = 2. * 3.125e-6;
+              const auto quad_point = eval_m.quadrature_point(q)[0];
+              dealii::VectorizedArray<number> factor = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                          std::abs(quad_point),
+                                          dealii::make_vectorized_array(10.*epsilon),
+                                          dealii::make_vectorized_array(1.e5),
+                                          dealii::make_vectorized_array(1.));*/
+
               const auto [flux_m, grad_flux_m] =
                 Flow::rhs_boundary_face_integral_kernel<dim,
                                                         number,
@@ -1084,7 +1127,7 @@ using local_applier_type =
                   eval_m,
                   q,
                   multiphase_scratch_data.scratch_data.get_matrix_free().get_boundary_id(face),
-                  interior_penalty_parameter,
+                  /*factor */ interior_penalty_parameter,
                   convective_terms,
                   viscous_terms,
                   material,
@@ -1381,6 +1424,10 @@ using local_applier_type =
         }
     };
 
+    //auto eval_liquid_m = create_face_integrator(true, CutUtil::CellCategory::liquid, 0);
+    //auto eval_liquid_p = create_face_integrator(false, CutUtil::CellCategory::liquid, 0);
+    //apply_ghost_penalty(eval_liquid_m, eval_liquid_p);
+
     switch (face_type)
       {
           case CutUtil::FaceType::mixed_face_liquid_intersected: {
@@ -1428,6 +1475,59 @@ using local_applier_type =
         default:
           break;
       }
+  }
+
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+void
+CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+local_apply_boundary_face_p(const dealii::MatrixFree<dim, number> &,
+                     VectorType                                  &dst,
+                     const VectorType                            &src,
+                     const std::pair<unsigned int, unsigned int> &face_range) const
+  {
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+void
+CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+local_apply_cell_p(const dealii::MatrixFree<dim, number> &,
+                     VectorType                                  &dst,
+                     const VectorType                            &src,
+                     const std::pair<unsigned int, unsigned int> &face_range) const
+  {
+  }
+
+    template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+    local_apply_face_p(const dealii::MatrixFree<dim, number> &,
+                         VectorType                                  &dst,
+                         const VectorType                            &src,
+                         const std::pair<unsigned int, unsigned int> &face_range) const
+  {
+    /*auto eval_m = create_face_integrator(true, CutUtil::CellCategory::liquid, 0);
+    auto eval_p = create_face_integrator(false, CutUtil::CellCategory::liquid, 0);
+
+      EvaluationFlags::EvaluationFlags evaluation_flags =
+        dealii::EvaluationFlags::values;
+
+      for (unsigned int face = face_range.first; face < face_range.second; ++face)
+        {
+          eval_m.reinit(face);
+          eval_m.read_dof_values(src);
+
+          eval_p.reinit(face);
+          eval_p.read_dof_values(src);
+
+          for (const unsigned int q : eval_m.quadrature_point_indices())
+            {
+              std::cout << eval_m.get_dof_values(q) << std::endl;
+            }
+
+          eval_m.set_dof_values(dst);
+        }
+    eval_m.distribute_local_to_global(dst);*/
   }
 
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
