@@ -223,6 +223,19 @@ namespace MeltPoolDG::Flow
                                                                                         normal) +
                    0.5 * lambda * (u_m - u_p);
 
+            double epsilon = 2. * 3.125e-6;
+            flux[1] += 2.0 * ((material.eos_utils->calculate_thermodynamic_pressure(u_m) -
+            material.eos_utils->calculate_thermodynamic_pressure(u_p)+1.e-2)/std::abs(material.eos_utils->calculate_thermodynamic_pressure(u_m) -
+            material.eos_utils->calculate_thermodynamic_pressure(u_p)+1.e-2)) * (material.eos_utils->calculate_thermodynamic_pressure(u_m) -
+              material.eos_utils->calculate_thermodynamic_pressure(u_p)) *
+               dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                          std::abs(quadrature_points),
+                                          dealii::make_vectorized_array(10.*epsilon),
+                                          dealii::make_vectorized_array(1.),
+                                          dealii::make_vectorized_array(0.));;
+            /*flux[2] -= 0.0 * (1./u_m[0]-material.data.eos_data.b) / (material.data.gamma - 1.) * std::abs((material.eos_utils->calculate_thermodynamic_pressure(u_m) -
+              material.eos_utils->calculate_thermodynamic_pressure(u_p)));*/
+
             return flux;
 
             /*flux[1] -= 10.0 * (material.eos_utils->calculate_thermodynamic_pressure(u_m) -
