@@ -1506,7 +1506,7 @@ local_apply_cell_p(const dealii::MatrixFree<dim, number> &,
                          const VectorType                            &src,
                          const std::pair<unsigned int, unsigned int> &face_range) const
   {
-    /*auto eval_m = create_face_integrator(true, CutUtil::CellCategory::liquid, 0);
+    auto eval_m = create_face_integrator(true, CutUtil::CellCategory::liquid, 0);
     auto eval_p = create_face_integrator(false, CutUtil::CellCategory::liquid, 0);
 
       EvaluationFlags::EvaluationFlags evaluation_flags =
@@ -1520,14 +1520,52 @@ local_apply_cell_p(const dealii::MatrixFree<dim, number> &,
           eval_p.reinit(face);
           eval_p.read_dof_values(src);
 
-          for (const unsigned int q : eval_m.quadrature_point_indices())
+          //std::cout << "------" << std::endl;
+          for (unsigned int dof_number = 0; dof_number < 1; ++dof_number)
             {
-              std::cout << eval_m.get_dof_values(q) << std::endl;
-            }
+              const auto u_m = eval_m.get_dof_value(dof_number);
+              const auto u_p = eval_p.get_dof_value(dof_number);
 
+              const auto &mat = multiphase_scratch_data.material_liquid.data;
+              const dealii::VectorizedArray<number> p_m = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_m);
+              const dealii::VectorizedArray<number> p_p = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_p);
+              const dealii::VectorizedArray<number> p_ave = 0.5 * (p_m + p_p);
+              const dealii::VectorizedArray<number> e_i_corrected_m = (p_ave + (mat.gamma * mat.eos_data.p_inf)) / (mat.gamma - 1.) * (1./u_m[0] - mat.eos_data.b) + mat.eos_data.q;
+              const dealii::VectorizedArray<number> e_i_corrected_p = (p_ave + (mat.gamma * mat.eos_data.p_inf)) / (mat.gamma - 1.) * (1./u_p[0] - mat.eos_data.b) + mat.eos_data.q;
+              const dealii::VectorizedArray<number> vel_m = Flow::calculate_velocity<dim, number>(u_m)[0];
+              const dealii::VectorizedArray<number> vel_p = Flow::calculate_velocity<dim, number>(u_p)[0];
+              const dealii::VectorizedArray<number> E_m = u_m[0] * (e_i_corrected_m + 0.5 * vel_m * vel_m);
+              const dealii::VectorizedArray<number> E_p = u_p[0] * (e_i_corrected_p + 0.5 * vel_p * vel_p);
+              auto u_m_new = u_m;
+			  auto u_p_new = u_p;
+
+              u_m_new[1] = u_m[1] - time_step *
+
+              /*double epsilon = 2. * 3.125e-6;
+			  u_m_new[dim+1] = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                          std::abs(eval_m.quadrature_point(dof_number)[0]),
+                                          dealii::make_vectorized_array(10.*epsilon),
+                                          E_m,
+                                          u_m[2]);
+              u_p_new[dim+1] = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                          std::abs(eval_p.quadrature_point(dof_number)[0]),
+                                          dealii::make_vectorized_array(10.*epsilon),
+                                          E_p,
+                                          u_p[2]);*/
+
+              /*std::cout << "u_m: " << u_m << std::endl;
+              std::cout << "u_m: " << u_p << std::endl;
+              std::cout << "u_m_new: " << u_m_new << std::endl;
+              std::cout << "u_m_new: " << u_p_new << std::endl;
+              std::cout << "diff: " << (u_m_new - u_p_new) - (u_m - u_p) << std::endl;*/
+
+
+			  eval_m.submit_dof_value(u_m_new, dof_number);
+			  eval_p.submit_dof_value(u_p_new, dof_number);
+            }
           eval_m.set_dof_values(dst);
+          eval_p.set_dof_values(dst);
         }
-    eval_m.distribute_local_to_global(dst);*/
   }
 
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
