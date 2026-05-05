@@ -275,29 +275,20 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
     if constexpr (std::is_same_v<CaseClass, MeltPoolCase<dim, Number>>)
       {
         // set field-specific BCs
+        //
+        // TODO: fix or add assert that this is only valid for eps = absolute value
         const double eps = this->parameters.ls.reinit.compute_interface_thickness_parameter_epsilon(
           dealii::GridTools::minimal_cell_diameter(*this->triangulation) /
           this->parameters.ls.get_n_subdivisions() / std::sqrt(dim));
 
         AssertThrow(eps > 0, dealii::ExcNotImplemented());
+
         // this->attach_boundary_condition({substrate_bc,
         // std::make_shared<InitialLevelSet<dim>>(eps)}, "dirichlet", "level_set");
         // this->attach_boundary_condition({substrate_bc,
         // std::make_shared<dealii::Functions::ZeroFunction<dim>>()},
         //"dirichlet",
         //"reinitialization");
-
-        if constexpr (dim > 1)
-          {
-            this->attach_boundary_condition({gas_inflow_bc,
-                                             std::make_shared<InitialLevelSet<dim>>(eps)},
-                                            "dirichlet",
-                                            "level_set");
-            this->attach_boundary_condition(
-              {gas_inflow_bc, std::make_shared<dealii::Functions::ZeroFunction<dim>>()},
-              "dirichlet",
-              "reinitialization");
-          }
 
         // substrate
         this->attach_boundary_condition(substrate_bc, "no_slip", "navier_stokes_u");
@@ -314,15 +305,33 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
 
         if constexpr (dim > 1)
           {
-            // gas: inflow
-            this->attach_boundary_condition({gas_inflow_bc,
-                                             std::make_shared<InflowVelocity<dim>>()},
-                                            "dirichlet",
-                                            "navier_stokes_u");
-            this->attach_boundary_condition(
-              {gas_inflow_bc, std::make_shared<Functions::ConstantFunction<dim>>(T_initial_bottom)},
-              "dirichlet",
-              "heat_transfer");
+            if (inflow_velocity > 0)
+              {
+                // gas: inflow
+                this->attach_boundary_condition({gas_inflow_bc,
+                                                 std::make_shared<InflowVelocity<dim>>()},
+                                                "dirichlet",
+                                                "navier_stokes_u");
+                this->attach_boundary_condition({gas_inflow_bc,
+                                                 std::make_shared<Functions::ConstantFunction<dim>>(
+                                                   T_initial_bottom)},
+                                                "dirichlet",
+                                                "heat_transfer");
+                this->attach_boundary_condition({gas_inflow_bc,
+                                                 std::make_shared<InitialLevelSet<dim>>(eps)},
+                                                "dirichlet",
+                                                "level_set");
+                this->attach_boundary_condition(
+                  {gas_inflow_bc, std::make_shared<dealii::Functions::ZeroFunction<dim>>()},
+                  "dirichlet",
+                  "reinitialization");
+              }
+            else
+              this->attach_boundary_condition({gas_inflow_bc,
+                                               std::make_shared<Functions::ConstantFunction<dim>>(
+                                                 outlet_pressure)},
+                                              "open",
+                                              "navier_stokes_u");
 
             // gas: outlet
             this->attach_boundary_condition(

@@ -308,6 +308,8 @@ namespace MeltPoolDG::LevelSet
     // curvature_operation->distribute_constraintst();
 
     scratch_data.get_constraint(ls_dof_idx).distribute(get_level_set());
+    transform_level_set_to_smooth_heaviside();
+
     scratch_data.get_constraint(ls_hanging_nodes_dof_idx).distribute(level_set_as_heaviside);
     scratch_data.get_constraint(ls_hanging_nodes_dof_idx).distribute(distance_to_level_set);
 
