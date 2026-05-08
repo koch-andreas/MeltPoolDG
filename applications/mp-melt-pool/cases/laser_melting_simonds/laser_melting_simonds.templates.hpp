@@ -19,12 +19,29 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
   double
   InflowVelocity<dim>::value(const Point<dim> &p, const unsigned int component) const
   {
-    if (std::abs(p[0] + width * 0.5) < 1e-12 && p[dim - 1] > delta_h)
-      return (component == 0) ?
-               std::min(inflow_velocity, inflow_velocity * p[dim - 1] / (1.05 * delta_h)) :
-               0.0;
-    else
+    // only the 0 component is relevant
+    if (component > 0)
       return 0;
+
+    // not at the inflow wall
+    if (std::abs(p[0] + width * 0.5) > 1e-12)
+      return 0;
+
+    const double y  = p[dim - 1];
+    const double y0 = 0.5 * delta_h;
+    const double y1 = 1.5 * delta_h;
+
+    if (y >= y1)
+      return inflow_velocity;
+    else if (y >= y0)
+      {
+        const double s    = (y - y0) / (y1 - y0);
+        const double ramp = 2.0 * s * s - s * s * s * s;
+
+        return inflow_velocity * ramp;
+      }
+    else
+      return 0.0;
   }
 
   template <int dim>
@@ -232,10 +249,12 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
     this->triangulation->refine_global(this->parameters.base.global_refinements);
 
     //  Note: For 1D we consider the constraints along the z-axis, i.e. bottom_bc and top_bc.
-    const types::boundary_id substrate_bc  = 1;
-    const types::boundary_id gas_top_bc    = 2;
-    const types::boundary_id gas_inflow_bc = 3;
-    const types::boundary_id gas_outlet_bc = 4;
+    const types::boundary_id substrate_bottom_bc       = 1;
+    const types::boundary_id substrate_outflow_wall_bc = 2;
+    const types::boundary_id substrate_inflow_wall_bc  = 3;
+    const types::boundary_id gas_top_bc                = 4;
+    const types::boundary_id gas_inflow_bc             = 5;
+    const types::boundary_id gas_outlet_bc             = 6;
 
     const auto double_eq = [](const Number a, const Number b) { return std::abs(a - b) <= 1e-10; };
 
@@ -246,15 +265,18 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
           {
             // set boundaries at faces where z=const
             if (double_eq(face->center()[dim - 1], bottom_left[dim - 1]))
-              face->set_boundary_id(substrate_bc);
+              face->set_boundary_id(substrate_bottom_bc);
             else if (double_eq(face->center()[dim - 1], top_right[dim - 1]))
               face->set_boundary_id(gas_top_bc);
             // set wall boundaries
             else if (dim > 1)
               {
                 // substrate: walls (all points with z<delta_h)
-                if (face->center()[dim - 1] <= delta_h)
-                  face->set_boundary_id(substrate_bc);
+                if (double_eq(face->center()[0], bottom_left[0]) &&
+                    (face->center()[dim - 1] <= delta_h))
+                  face->set_boundary_id(substrate_inflow_wall_bc);
+                else if (face->center()[dim - 1] <= delta_h)
+                  face->set_boundary_id(substrate_outflow_wall_bc);
                 // gas inflow: all points with x=0 and z>=delta_h
                 else if (double_eq(face->center()[0], bottom_left[0]) &&
                          (face->center()[dim - 1] > delta_h))
@@ -266,78 +288,83 @@ namespace MeltPoolDG::Simulation::LaserMeltingSimonds
               }
           }
 
-    // substrate
     this->attach_boundary_condition(
-      {substrate_bc, std::make_shared<Functions::ConstantFunction<dim>>(T_initial_bottom)},
+      {substrate_bottom_bc, std::make_shared<Functions::ConstantFunction<dim>>(T_initial_bottom)},
       "dirichlet",
       "heat_transfer");
 
     if constexpr (std::is_same_v<CaseClass, MeltPoolCase<dim, Number>>)
       {
-        // set field-specific BCs
-        //
-        // TODO: fix or add assert that this is only valid for eps = absolute value
-        const double eps = this->parameters.ls.reinit.compute_interface_thickness_parameter_epsilon(
-          dealii::GridTools::minimal_cell_diameter(*this->triangulation) /
-          this->parameters.ls.get_n_subdivisions() / std::sqrt(dim));
-
-        AssertThrow(eps > 0, dealii::ExcNotImplemented());
-
-        // this->attach_boundary_condition({substrate_bc,
-        // std::make_shared<InitialLevelSet<dim>>(eps)}, "dirichlet", "level_set");
-        // this->attach_boundary_condition({substrate_bc,
-        // std::make_shared<dealii::Functions::ZeroFunction<dim>>()},
-        //"dirichlet",
-        //"reinitialization");
-
-        // substrate
-        this->attach_boundary_condition(substrate_bc, "no_slip", "navier_stokes_u");
-
-        // gas: top
-        if constexpr (dim == 1)
-          // gas: outlet
-          this->attach_boundary_condition(
-            {gas_top_bc, std::make_shared<Functions::ConstantFunction<dim>>(outlet_pressure)},
-            "open",
-            "navier_stokes_u");
-        else
-          this->attach_boundary_condition(gas_top_bc, "symmetry", "navier_stokes_u");
-
-        if constexpr (dim > 1)
+        if (inflow_velocity == 0 or dim == 1)
           {
-            if (inflow_velocity > 0)
-              {
-                // gas: inflow
-                this->attach_boundary_condition({gas_inflow_bc,
-                                                 std::make_shared<InflowVelocity<dim>>()},
-                                                "dirichlet",
-                                                "navier_stokes_u");
-                this->attach_boundary_condition({gas_inflow_bc,
-                                                 std::make_shared<Functions::ConstantFunction<dim>>(
-                                                   T_initial_bottom)},
-                                                "dirichlet",
-                                                "heat_transfer");
-                this->attach_boundary_condition({gas_inflow_bc,
-                                                 std::make_shared<InitialLevelSet<dim>>(eps)},
-                                                "dirichlet",
-                                                "level_set");
-                this->attach_boundary_condition(
-                  {gas_inflow_bc, std::make_shared<dealii::Functions::ZeroFunction<dim>>()},
-                  "dirichlet",
-                  "reinitialization");
-              }
-            else
-              this->attach_boundary_condition({gas_inflow_bc,
-                                               std::make_shared<Functions::ConstantFunction<dim>>(
-                                                 outlet_pressure)},
-                                              "open",
-                                              "navier_stokes_u");
+            // NS
+            this->attach_boundary_condition(substrate_bottom_bc, "no_slip", "navier_stokes_u");
 
-            // gas: outlet
+            if constexpr (dim == 1)
+              // gas: outlet
+              this->attach_boundary_condition(gas_top_bc, "no_slip", "navier_stokes_u");
+            else
+              this->attach_boundary_condition(gas_top_bc, "no_slip", "navier_stokes_u");
+
+            this->attach_boundary_condition(gas_inflow_bc, "no_slip", "navier_stokes_u");
+            this->attach_boundary_condition(gas_outlet_bc, "no_slip", "navier_stokes_u");
+            this->attach_boundary_condition(substrate_outflow_wall_bc,
+                                            "no_slip",
+                                            "navier_stokes_u");
+            this->attach_boundary_condition(substrate_inflow_wall_bc, "no_slip", "navier_stokes_u");
+          }
+        else
+          {
+            // TODO: fix or add assert that this is only valid for eps = absolute value
+            const double eps =
+              this->parameters.ls.reinit.compute_interface_thickness_parameter_epsilon(
+                dealii::GridTools::minimal_cell_diameter(*this->triangulation) /
+                this->parameters.ls.get_n_subdivisions() / std::sqrt(dim));
+
+            AssertThrow(eps > 0, dealii::ExcNotImplemented());
+
+            // bottom
+            this->attach_boundary_condition(substrate_bottom_bc, "no_slip", "navier_stokes_u");
+
+            // top
+            this->attach_boundary_condition(gas_top_bc, "symmetry", "navier_stokes_u");
+
+            // outflow (gas + substrate)
+            //
+            // !!! Note: there is a switch in the BC between no-slip and pressure along the boundary
             this->attach_boundary_condition(
               {gas_outlet_bc, std::make_shared<Functions::ConstantFunction<dim>>(outlet_pressure)},
               "open",
               "navier_stokes_u");
+
+            // inflow (gas + substrate)
+            this->attach_boundary_condition({gas_inflow_bc,
+                                             std::make_shared<InflowVelocity<dim>>()},
+                                            "dirichlet",
+                                            "navier_stokes_u");
+            this->attach_boundary_condition({substrate_inflow_wall_bc,
+                                             std::make_shared<InflowVelocity<dim>>()},
+                                            "dirichlet",
+                                            "navier_stokes_u");
+            this->attach_boundary_condition(
+              {gas_inflow_bc, std::make_shared<Functions::ConstantFunction<dim>>(T_initial_bottom)},
+              "dirichlet",
+              "heat_transfer");
+            this->attach_boundary_condition({substrate_inflow_wall_bc,
+                                             std::make_shared<Functions::ConstantFunction<dim>>(
+                                               T_initial_bottom)},
+                                            "dirichlet",
+                                            "heat_transfer");
+            // !!! Note: there is a switch in the BC between dirichlet and hom. Neumann for the
+            // level set
+            this->attach_boundary_condition({gas_inflow_bc,
+                                             std::make_shared<InitialLevelSet<dim>>(eps)},
+                                            "dirichlet",
+                                            "level_set");
+            this->attach_boundary_condition(
+              {gas_inflow_bc, std::make_shared<dealii::Functions::ZeroFunction<dim>>()},
+              "dirichlet",
+              "reinitialization");
           }
       }
 
