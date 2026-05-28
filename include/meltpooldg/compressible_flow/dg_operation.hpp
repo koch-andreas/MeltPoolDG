@@ -136,8 +136,7 @@ namespace MeltPoolDG::CompressibleFlow
      * @return A vector of complex eigenvalues.
      */
     std::vector<std::complex<number>>
-    estimate_jacobian_eigenvalues(const number       time_step,
-                                  const unsigned int max_eigenvalues = 100) const;
+    estimate_jacobian_eigenvalues(const number time_step) const;
 
     /**
      * @brief Set the solution vector to the passed initial flow field state.

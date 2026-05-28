@@ -46,8 +46,7 @@
       "filename": "solution_generic_hyper_rectangle_domain",
       "enable": true
     },
-    "eigenvalues":
-    {
+    "eigenvalues": {
       "enable": true,
       "file name": "eigenvalues_cfl2.csv"
     }
@@ -74,7 +73,7 @@
       "reference density": 1.0,
       "gamma": 1.4,
       "eos type": "ideal_gas",
-      "reference dynamic viscosity": 2e-5
+      "reference dynamic viscosity": 2e-05
     }
   }
 }

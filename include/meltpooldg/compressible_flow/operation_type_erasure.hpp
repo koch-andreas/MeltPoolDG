@@ -81,10 +81,9 @@ namespace MeltPoolDG::CompressibleFlow
      * @return A vector of complex eigenvalues.
      */
     std::vector<std::complex<number>>
-    estimate_jacobian_eigenvalues(const number       time_step,
-                                  const unsigned int max_eigenvalues = 100) const
+    estimate_jacobian_eigenvalues(const number time_step) const
     {
-      return operation_pimpl->estimate_jacobian_eigenvalues(time_step, max_eigenvalues);
+      return operation_pimpl->estimate_jacobian_eigenvalues(time_step);
     }
 
     /**
@@ -260,8 +259,7 @@ namespace MeltPoolDG::CompressibleFlow
       get_dof_handler() const = 0;
 
       virtual std::vector<std::complex<number>>
-      estimate_jacobian_eigenvalues(const number       time_step,
-                                    const unsigned int max_eigenvalues = 100) const = 0;
+      estimate_jacobian_eigenvalues(const number time_step) const = 0;
     };
 
     /**
@@ -351,10 +349,9 @@ namespace MeltPoolDG::CompressibleFlow
         return operation->get_dof_handler();
       }
       std::vector<std::complex<number>>
-      estimate_jacobian_eigenvalues(const number       time_step,
-                                    const unsigned int max_eigenvalues = 100) const override
+      estimate_jacobian_eigenvalues(const number time_step) const override
       {
-        return operation->estimate_jacobian_eigenvalues(time_step, max_eigenvalues);
+        return operation->estimate_jacobian_eigenvalues(time_step);
       }
 
     private:

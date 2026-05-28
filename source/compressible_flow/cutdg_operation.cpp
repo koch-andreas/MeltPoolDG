@@ -100,9 +100,8 @@ namespace MeltPoolDG::CompressibleFlow
     // configure the output
     using OutputView = DofStateView<dim, number, ConservedVariablesType<dim, number, 1, number>>;
 
-    const auto create_output_view = [&material_data_in](
-      ConservedVariablesType<dim, number, 1, number> & value) -> auto
-    {
+    const auto create_output_view =
+      [&material_data_in](ConservedVariablesType<dim, number, 1, number> &value) -> auto {
       return DofStateView<dim, number, ConservedVariablesType<dim, number, 1, number>>(
         value, material_data_in);
     };

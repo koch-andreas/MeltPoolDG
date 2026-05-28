@@ -384,8 +384,18 @@
             },
             "file name": {
               "type": "string",
-              "description": "Name of the file to which eigenvalues are written.",
-              "default": "eigenvalues.csv"
+              "description": "Name of the file to which eigenvalues are written. A file ending is not required and will be added automatically.",
+              "default": "eigenvalues"
+            },
+            "print summary": {
+              "type": "boolean",
+              "description": "Whether to print a summary of the eigenvalues to the console on output time steps.",
+              "default": false
+            },
+            "number of eigenvalues": {
+              "type": "integer",
+              "description": "Number of eigenvalues to compute if output_eigenvalues is true.",
+              "default": 100
             }
           },
           "additionalProperties": false

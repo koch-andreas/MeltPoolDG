@@ -31,13 +31,14 @@ namespace MeltPoolDG::Multiphase
         // use CFL condition to compute time step size if required
         if (simulation_case->parameters.flow.do_cfl_time_stepping)
           time_iterator->set_current_time_increment(
-            comp_multiphase_operation->compute_time_step_size(), std::numeric_limits<number>::max());
+            comp_multiphase_operation->compute_time_step_size(),
+            std::numeric_limits<number>::max());
 
         time_iterator->compute_next_time_increment();
         time_iterator->print_me(scratch_data->get_pcout(1));
 
         comp_multiphase_operation->solve(time_iterator->get_current_time(),
-                                        time_iterator->get_current_time_increment());
+                                         time_iterator->get_current_time_increment());
 
         // do level-set advection and reinitialization
         update_level_set(time_iterator->get_current_time_increment());
@@ -170,22 +171,21 @@ namespace MeltPoolDG::Multiphase
       simulation_case->parameters.time_stepping);
 
     // initialize compressible multiphase operation
-    comp_multiphase_operation =
-      std::make_unique<CompressibleMultiphaseOperation<dim, number>>(
-        *scratch_data,
-        simulation_case->parameters.flow,
-        simulation_case->parameters.material_gas,
-        simulation_case->parameters.material_liquid,
-        simulation_case->parameters.phase_change,
-        simulation_case->parameters.cut,
-        simulation_case->parameters.phase_coupling,
-        simulation_case->parameters.darcy_damping,
-        *time_iterator,
-        [this]() { this->setup_dof_system(); },
-        level_set,
-        comp_multiphase_dof_idx,
-        level_set_dof_idx,
-        comp_multiphase_quad_idx);
+    comp_multiphase_operation = std::make_unique<CompressibleMultiphaseOperation<dim, number>>(
+      *scratch_data,
+      simulation_case->parameters.flow,
+      simulation_case->parameters.material_gas,
+      simulation_case->parameters.material_liquid,
+      simulation_case->parameters.phase_change,
+      simulation_case->parameters.cut,
+      simulation_case->parameters.phase_coupling,
+      simulation_case->parameters.darcy_damping,
+      *time_iterator,
+      [this]() { this->setup_dof_system(); },
+      level_set,
+      comp_multiphase_dof_idx,
+      level_set_dof_idx,
+      comp_multiphase_quad_idx);
 
     // set up level-set for cutDG
     // currently, we use a continuous level-set field with same element degree as the flow field

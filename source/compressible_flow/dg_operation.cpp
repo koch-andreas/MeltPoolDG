@@ -13,15 +13,15 @@
 #include <meltpooldg/compressible_flow/dg_operator_implicit_explicit.hpp>
 #include <meltpooldg/compressible_flow/operation_scratch_data.hpp>
 #include <meltpooldg/compressible_flow/state_views_n_species.hpp>
+#include <meltpooldg/linear_algebra/utilities_matrixfree.hpp>
 #include <meltpooldg/species_transport/output_post_processor.hpp>
+#include <meltpooldg/utilities/eigenvalues.hpp>
 #include <meltpooldg/utilities/fe_integrator.hpp>
 #include <meltpooldg/utilities/fe_util.hpp>
-#include <meltpooldg/utilities/vector_tools.templates.hpp>
-#include <meltpooldg/utilities/matrix_type_wrapper.h>
 #include <meltpooldg/utilities/preprocessor_directives.hpp>
-#include <meltpooldg/utilities/eigenvalues.hpp>
-#include <meltpooldg/linear_algebra/utilities_matrixfree.hpp>
+#include <meltpooldg/utilities/vector_tools.templates.hpp>
 
+#include <meltpooldg/utilities/matrix_type_wrapper.h>
 
 #include <algorithm>
 #include <cmath>
@@ -53,9 +53,8 @@ namespace MeltPoolDG::CompressibleFlow
                                             number,
                                             ConservedVariablesType<dim, number, n_species, number>>;
 
-    const auto create_output_view = [&material_data](
-      ConservedVariablesType<dim, number, n_species, number> & value) -> auto
-    {
+    const auto create_output_view =
+      [&material_data](ConservedVariablesType<dim, number, n_species, number> &value) -> auto {
       return OutputView(value, material_data);
     };
 
@@ -171,387 +170,377 @@ namespace MeltPoolDG::CompressibleFlow
                                            std::move(external_force_jacobian));
   }
 
-  template <int dim, typename number, int n_species> 
-  std::vector<std::complex<number>> 
-  DGOperation<dim, number, n_species>::estimate_jacobian_eigenvalues(
-    const number       time_step, // delta t
-    const unsigned int max_eigenvalues) const // eventuell noch hardcoden
+  template <int dim, typename number, int n_species>
+  std::vector<std::complex<number>>
+  DGOperation<dim, number, n_species>::estimate_jacobian_eigenvalues(const number time_step) const
   {
     AssertThrow(flow_scratch_data.material.data.number_of_species == 1,
                 ExcMessage(
-                  "Eigenvalue estimation is currently only implemented for single species flow.")); // runtime guard
+                  "Eigenvalue estimation is currently only implemented for single species flow."));
 
-    // The Jacobi functions and other stuff live in DGOperatorImplicit but we are in DGOperation and comp_flow_operator even
-    // points to a DGOperatorBase which doesn't expose them. Thus we need to copy them into this DGOperator. 
+    // General variables, aliases and missing functions
 
-    const bool is_viscous = flow_scratch_data.is_viscous; 
-    
+    const bool         is_viscous = flow_scratch_data.is_viscous;
+    const bool         is_test    = flow_scratch_data.flow_data.eigenvalues_data.print_summary;
+    const unsigned int n_eigenvalues =
+      flow_scratch_data.flow_data.eigenvalues_data.n_eigenvalues_to_compute;
+
     using ConservedVariables         = ConservedVariablesType<dim, number>;
     using ConservedVariablesGradient = ConservedVariablesGradientType<dim, number>;
-    
 
-    ConvectiveKernels<dim, number> convective_terms(flow_scratch_data.flow_data, flow_scratch_data.material);
+    ConvectiveKernels<dim, number> convective_terms(flow_scratch_data.flow_data,
+                                                    flow_scratch_data.material);
     ViscousKernels<dim, number>    viscous_terms(flow_scratch_data.material);
 
-    
-    auto local_boundary_face_jacobian_kernel = [&](          
-          FEFaceIntegrator<dim, dim + 2, number>       &delta_phi_m,
+    auto local_boundary_face_jacobian_kernel =
+      [&](FEFaceIntegrator<dim, dim + 2, number>       &delta_phi_m,
           const FEFaceIntegrator<dim, dim + 2, number> &phi_m,
-          const unsigned                                q_index) 
+          const unsigned                                q_index) {
+        const auto w_m            = phi_m.get_value(q_index);
+        const auto grad_w_m       = phi_m.get_gradient(q_index);
+        const auto delta_w_m      = delta_phi_m.get_value(q_index);
+        const auto grad_delta_w_m = delta_phi_m.get_gradient(q_index);
+        const auto normal         = phi_m.normal_vector(q_index);
+
+        const auto [w_p, grad_w_p, delta_w_p, grad_delta_w_p] =
+          flow_scratch_data.boundary_conditions.get_jacobian_boundary_face_value_and_gradient(
+            phi_m.quadrature_point(q_index),
+            normal,
+            phi_m.boundary_id(),
+            w_m,
+            delta_w_m,
+            grad_w_m,
+            grad_delta_w_m,
+            flow_scratch_data.material.data.gamma);
+
+        ConservedVariablesGradient numerical_flux =
+          convective_terms.calculate_jacobian_convective_numerical_flux({w_m, w_p},
+                                                                        {delta_w_m, delta_w_p},
+                                                                        normal);
+
+        if (is_viscous)
+          numerical_flux -= viscous_terms.calculate_jacobian_viscous_numerical_flux(
+            {w_m, w_p},
+            {grad_w_m, grad_w_p},
+            {delta_w_m, delta_w_p},
+            {grad_delta_w_m, grad_delta_w_p},
+            phi_m.normal_vector(q_index),
+            phi_m.read_cell_data(flow_scratch_data.interior_penalty_parameter));
+        ConservedVariables flux;
+        for (unsigned int i = 0; i < dim + 2; ++i)
+          {
+            flux[i] = numerical_flux[i] * phi_m.normal_vector(q_index);
+          }
+
+        if (is_viscous)
+          {
+            const ConservedVariablesGradient jump =
+              dyadic_product(w_m - w_p, phi_m.normal_vector(q_index));
+            const ConservedVariablesGradient delta_jump =
+              dyadic_product(delta_w_m - delta_w_p, phi_m.normal_vector(q_index));
+            const ConservedVariablesGradient grad_flux_m =
+              viscous_terms.calculate_jacobian_viscous_flux(w_m, jump, delta_w_m, delta_jump);
+            delta_phi_m.submit_gradient(-0.5 * grad_flux_m, q_index);
+          }
+        delta_phi_m.submit_value(flux, q_index);
+      };
+
+    auto local_cell_jacobian_kernel = [&](FECellIntegrator<dim, dim + 2, number>       &delta_phi,
+                                          const FECellIntegrator<dim, dim + 2, number> &phi,
+                                          const unsigned int                            q_index)
+
+    {
+      const auto w_q       = phi.get_value(q_index);
+      const auto delta_w_q = delta_phi.get_value(q_index);
+
+      // Removed the time-dependent part of the Jacobian as we are only interested in the spatial
+      // part
+      /*
+      dealii::Tensor<1, dim + 2, dealii::VectorizedArray<number>> forcing;
+      if (flow_scratch_data.body_force.get() != nullptr)
         {
-          const auto w_m            = phi_m.get_value(q_index);
-          const auto grad_w_m       = phi_m.get_gradient(q_index);
-          const auto delta_w_m      = delta_phi_m.get_value(q_index);
-          const auto grad_delta_w_m = delta_phi_m.get_gradient(q_index);
-          const auto normal         = phi_m.normal_vector(q_index);
+          const Tensor<1, dim, VectorizedArray<number>> force =
+            VectorTools::evaluate_function_at_vectorized_points(*flow_scratch_data.body_force,
+                                                                phi.quadrature_point(q_index));
+          for (unsigned int d = 0; d < dim; ++d)
+            forcing[dim + 1] +=
+              force[d] * (delta_w_q[d + 1] * 1. / w_q[0] - w_q[d + 1] * delta_w_q[0]);
+        } // this is not needed as bodyforce = 0, since this is if flagged we can leave it in for
+      later use
+      */
+      ConservedVariablesGradient differential_change_flux =
+        -1.0 * convective_terms.calculate_jacobian_convective_flux(w_q, delta_w_q);
 
-          const auto [w_p, grad_w_p, delta_w_p, grad_delta_w_p] =
-            flow_scratch_data.boundary_conditions.get_jacobian_boundary_face_value_and_gradient(
-              phi_m.quadrature_point(q_index),
-              normal,
-              phi_m.boundary_id(),
-              w_m,
-              delta_w_m,
-              grad_w_m,
-              grad_delta_w_m,
-              flow_scratch_data.material.data.gamma);
-
-          ConservedVariablesGradient numerical_flux =
-            convective_terms.calculate_jacobian_convective_numerical_flux({w_m, w_p},
-                                                                          {delta_w_m, delta_w_p},
-                                                                          normal);
-
-          if (is_viscous)
-            numerical_flux -= viscous_terms.calculate_jacobian_viscous_numerical_flux(
-              {w_m, w_p},
-              {grad_w_m, grad_w_p},
-              {delta_w_m, delta_w_p},
-              {grad_delta_w_m, grad_delta_w_p},
-              phi_m.normal_vector(q_index),
-              phi_m.read_cell_data(flow_scratch_data.interior_penalty_parameter));
-          ConservedVariables flux;
-          for (unsigned int i = 0; i < dim + 2; ++i)
-            {
-              flux[i] = numerical_flux[i] * phi_m.normal_vector(q_index);
-            }
-
-          if (is_viscous)
-            {
-              const ConservedVariablesGradient jump =
-                dyadic_product(w_m - w_p, phi_m.normal_vector(q_index));
-              const ConservedVariablesGradient delta_jump =
-                dyadic_product(delta_w_m - delta_w_p, phi_m.normal_vector(q_index));
-              const ConservedVariablesGradient grad_flux_m =
-                viscous_terms.calculate_jacobian_viscous_flux(w_m, jump, delta_w_m, delta_jump);
-              delta_phi_m.submit_gradient(-0.5 * grad_flux_m, q_index);
-            }
-          delta_phi_m.submit_value(flux, q_index);
-  
-
-        };
-
-        // hier stand voher "std::vector<dealii::TriaIterator<dealii::CellAccessor<dim>>> cell_iterators" im Argument, nicht nötig ohne body force
-    auto local_cell_jacobian_kernel    = [&](                
-          FECellIntegrator<dim, dim + 2, number>                      &delta_phi,
-          const FECellIntegrator<dim, dim + 2, number>                &phi,
-          const unsigned int                                           q_index)      
-        
+      if (is_viscous)
         {
-          const auto w_q       = phi.get_value(q_index); // current (interpolated) solution at quadpoint
-          const auto delta_w_q = delta_phi.get_value(q_index); // pertubation direction 
+          const auto grad_w_q       = phi.get_gradient(q_index);
+          const auto grad_delta_w_q = delta_phi.get_gradient(q_index);
+          differential_change_flux +=
+            viscous_terms.calculate_jacobian_viscous_flux(w_q, grad_w_q, delta_w_q, grad_delta_w_q);
+        }
+      delta_phi.submit_gradient(differential_change_flux, q_index);
+    };
 
-          // Hier war der Zeitanteil 
-          
-          /* J_t = d/dt(M*u_{n+1}/delta_t) weil u_n Term entfällt (konstant), -> J_t * delta_w_q = d/dt(M*u_{n+1}/delta_t) * delta_w_q
-          ConservedVariables value_q = 1. / current_time_step * delta_w_q;
-          for (auto &external_force : external_forces_jacobian)
-            value_q -= external_force->value(
-              current_time_step, cell_iterators, phi.quadrature_point(q_index), w_q, delta_w_q);
-          
-          delta_phi.submit_value(value_q, q_index);
-          */
-          // not needed but useful for understanding. without the mass matrix as this is what integrate_scatter does. Mass Matrix comes from
-          // phi_j (the interpolation by gather_evaluate) and the integration via gauss points with phi_i(x_q)
+    auto local_face_jacobian_kernel = [&](FEFaceIntegrator<dim, dim + 2, number>       &delta_phi_m,
+                                          FEFaceIntegrator<dim, dim + 2, number>       &delta_phi_p,
+                                          const FEFaceIntegrator<dim, dim + 2, number> &phi_m,
+                                          const FEFaceIntegrator<dim, dim + 2, number> &phi_p,
+                                          const unsigned                                q_index) {
+      const std::pair<ConservedVariables, ConservedVariables> w_q       = {phi_m.get_value(q_index),
+                                                                           phi_p.get_value(q_index)};
+      const std::pair<ConservedVariables, ConservedVariables> delta_w_q = {
+        delta_phi_m.get_value(q_index), delta_phi_p.get_value(q_index)};
 
-          dealii::Tensor<1, dim + 2, dealii::VectorizedArray<number>> forcing;
-          if (flow_scratch_data.body_force.get() != nullptr)
-            {
-              const Tensor<1, dim, VectorizedArray<number>> force =
-                VectorTools::evaluate_function_at_vectorized_points(*flow_scratch_data.body_force,
-                                                                    phi.quadrature_point(q_index));
-              for (unsigned int d = 0; d < dim; ++d)
-                forcing[dim + 1] +=
-                  force[d] * (delta_w_q[d + 1] * 1. / w_q[0] - w_q[d + 1] * delta_w_q[0]);
-            } // this is not needed as bodyforce = 0, since this is if flagged we can leave it in for later use
+      ConservedVariablesGradient numerical_flux =
+        convective_terms.calculate_jacobian_convective_numerical_flux(w_q,
+                                                                      delta_w_q,
+                                                                      phi_m.normal_vector(q_index));
 
-          // convective flux
-          ConservedVariablesGradient differential_change_flux =
-            -1.0 * convective_terms.calculate_jacobian_convective_flux(w_q, delta_w_q);
-
-          // viscous flux
-          if (is_viscous)
-            {
-              const auto grad_w_q       = phi.get_gradient(q_index);
-              const auto grad_delta_w_q = delta_phi.get_gradient(q_index);
-              differential_change_flux +=
-                viscous_terms.calculate_jacobian_viscous_flux(w_q, grad_w_q, delta_w_q, grad_delta_w_q);
-            }
-          delta_phi.submit_gradient(differential_change_flux, q_index); // hier passiert schon Gauss Quadratur, nur submit gradient weil nur body force testfunktionen ohne gradient benutzt 
-        }; 
-    auto local_face_jacobian_kernel     = [&](      
-          FEFaceIntegrator<dim, dim + 2, number>       &delta_phi_m,
-          FEFaceIntegrator<dim, dim + 2, number>       &delta_phi_p,
-          const FEFaceIntegrator<dim, dim + 2, number> &phi_m,
-          const FEFaceIntegrator<dim, dim + 2, number> &phi_p,
-          const unsigned                                q_index) 
+      if (is_viscous)
+        numerical_flux -= viscous_terms.calculate_jacobian_viscous_numerical_flux(
+          {phi_m.get_value(q_index), phi_p.get_value(q_index)},
+          {phi_m.get_gradient(q_index), phi_p.get_gradient(q_index)},
+          {delta_phi_m.get_value(q_index), delta_phi_p.get_value(q_index)},
+          {delta_phi_m.get_gradient(q_index), delta_phi_p.get_gradient(q_index)},
+          phi_m.normal_vector(q_index),
+          std::max(phi_m.read_cell_data(flow_scratch_data.interior_penalty_parameter),
+                   phi_p.read_cell_data(flow_scratch_data.interior_penalty_parameter)));
+      ConservedVariables flux;
+      for (unsigned int i = 0; i < dim + 2; ++i)
         {
-          const std::pair<ConservedVariables, ConservedVariables> w_q       = {phi_m.get_value(q_index),
-                                                                              phi_p.get_value(q_index)};
-          const std::pair<ConservedVariables, ConservedVariables> delta_w_q = {
-            delta_phi_m.get_value(q_index), delta_phi_p.get_value(q_index)};
+          flux[i] = numerical_flux[i] * phi_m.normal_vector(q_index);
+        }
 
-          ConservedVariablesGradient numerical_flux =
-            convective_terms.calculate_jacobian_convective_numerical_flux(w_q,
-                                                                          delta_w_q,
-                                                                          phi_m.normal_vector(q_index));
-
-          if (is_viscous)
-            numerical_flux -= viscous_terms.calculate_jacobian_viscous_numerical_flux(
-              {phi_m.get_value(q_index), phi_p.get_value(q_index)},
-              {phi_m.get_gradient(q_index), phi_p.get_gradient(q_index)},
-              {delta_phi_m.get_value(q_index), delta_phi_p.get_value(q_index)},
-              {delta_phi_m.get_gradient(q_index), delta_phi_p.get_gradient(q_index)},
-              phi_m.normal_vector(q_index),
-              std::max(phi_m.read_cell_data(flow_scratch_data.interior_penalty_parameter),
-                      phi_p.read_cell_data(flow_scratch_data.interior_penalty_parameter)));
-          ConservedVariables flux;
-          for (unsigned int i = 0; i < dim + 2; ++i)
-            {
-              flux[i] = numerical_flux[i] * phi_m.normal_vector(q_index);
-            }
-
-          if (is_viscous)
-            {
-              const ConservedVariablesGradient jump =
-                dyadic_product(phi_m.get_value(q_index) - phi_p.get_value(q_index),
-                              phi_m.normal_vector(q_index));
-              const ConservedVariablesGradient delta_jump =
-                dyadic_product(delta_phi_m.get_value(q_index) - delta_phi_p.get_value(q_index),
-                              phi_m.normal_vector(q_index));
-              const ConservedVariablesGradient grad_flux_m =
-                viscous_terms.calculate_jacobian_viscous_flux(phi_m.get_value(q_index),
-                                                              jump,
-                                                              delta_phi_m.get_value(q_index),
-                                                              delta_jump);
-              const ConservedVariablesGradient grad_flux_p =
-                viscous_terms.calculate_jacobian_viscous_flux(phi_p.get_value(q_index),
-                                                              jump,
-                                                              delta_phi_p.get_value(q_index),
-                                                              delta_jump);
-              delta_phi_m.submit_gradient(-0.5 * grad_flux_m, q_index);
-              delta_phi_p.submit_gradient(-0.5 * grad_flux_p, q_index);
-            }
-          delta_phi_m.submit_value(flux, q_index);
-          delta_phi_p.submit_value(-flux, q_index);
-        };              
-
-    auto local_boundary_face_jacobian = [&](
-          const MatrixFree<dim, number> &,
-          LinearAlgebra::distributed::Vector<number>       &dst,
-          const LinearAlgebra::distributed::Vector<number> &src,
-          const std::pair<unsigned, unsigned>              &face_range)
+      if (is_viscous)
         {
-          FEFaceIntegrator<dim, dim + 2, number> phi_m(flow_scratch_data.scratch_data.get_matrix_free(),
-                                                      true /*is_interior_face*/,
-                                                      flow_scratch_data.dof_idx,
-                                                      flow_scratch_data.quad_idx);
-          FEFaceIntegrator<dim, dim + 2, number> delta_phi_m(
-            flow_scratch_data.scratch_data.get_matrix_free(),
-            true /*is_interior_face*/,
-            flow_scratch_data.dof_idx,
-            flow_scratch_data.quad_idx);
+          const ConservedVariablesGradient jump =
+            dyadic_product(phi_m.get_value(q_index) - phi_p.get_value(q_index),
+                           phi_m.normal_vector(q_index));
+          const ConservedVariablesGradient delta_jump =
+            dyadic_product(delta_phi_m.get_value(q_index) - delta_phi_p.get_value(q_index),
+                           phi_m.normal_vector(q_index));
+          const ConservedVariablesGradient grad_flux_m =
+            viscous_terms.calculate_jacobian_viscous_flux(phi_m.get_value(q_index),
+                                                          jump,
+                                                          delta_phi_m.get_value(q_index),
+                                                          delta_jump);
+          const ConservedVariablesGradient grad_flux_p =
+            viscous_terms.calculate_jacobian_viscous_flux(phi_p.get_value(q_index),
+                                                          jump,
+                                                          delta_phi_p.get_value(q_index),
+                                                          delta_jump);
+          delta_phi_m.submit_gradient(-0.5 * grad_flux_m, q_index);
+          delta_phi_p.submit_gradient(-0.5 * grad_flux_p, q_index);
+        }
+      delta_phi_m.submit_value(flux, q_index);
+      delta_phi_p.submit_value(-flux, q_index);
+    };
 
-          for (unsigned int face = face_range.first; face < face_range.second; ++face)
-            {
-              phi_m.reinit(face);
+    auto local_boundary_face_jacobian = [&](const MatrixFree<dim, number> &,
+                                            LinearAlgebra::distributed::Vector<number>       &dst,
+                                            const LinearAlgebra::distributed::Vector<number> &src,
+                                            const std::pair<unsigned, unsigned> &face_range) {
+      FEFaceIntegrator<dim, dim + 2, number> phi_m(flow_scratch_data.scratch_data.get_matrix_free(),
+                                                   true /*is_interior_face*/,
+                                                   flow_scratch_data.dof_idx,
+                                                   flow_scratch_data.quad_idx);
+      FEFaceIntegrator<dim, dim + 2, number> delta_phi_m(
+        flow_scratch_data.scratch_data.get_matrix_free(),
+        true /*is_interior_face*/,
+        flow_scratch_data.dof_idx,
+        flow_scratch_data.quad_idx);
 
-              phi_m.gather_evaluate(flow_scratch_data.solution_history.get_current_solution(),
-                                    EvaluationFlags::values | EvaluationFlags::gradients);
-
-              delta_phi_m.reinit(face);
-              delta_phi_m.gather_evaluate(src, EvaluationFlags::values | EvaluationFlags::gradients);
-
-
-              for (const unsigned int q_index : phi_m.quadrature_point_indices())
-                {
-                  local_boundary_face_jacobian_kernel(delta_phi_m, phi_m, q_index);
-                }
-
-              delta_phi_m.integrate_scatter(EvaluationFlags::values |
-                                              (is_viscous ? EvaluationFlags::gradients :
-                                                            EvaluationFlags::nothing),
-                                            dst);
-            }
-        };
-
-    auto local_face_jacobian   = [&](
-          const MatrixFree<dim, number> &,
-          VectorType                          &dst,
-          const VectorType                    &src,
-          const std::pair<unsigned, unsigned> &face_range)      
-        { 
-          FEFaceIntegrator<dim, dim + 2, number> phi_m(flow_scratch_data.scratch_data.get_matrix_free(),
-                                                    true /*is_interior_face*/,
-                                                    flow_scratch_data.dof_idx,
-                                                    flow_scratch_data.quad_idx);
-          FEFaceIntegrator<dim, dim + 2, number> phi_p(flow_scratch_data.scratch_data.get_matrix_free(),
-                                                      false /*is_interior_face*/,
-                                                      flow_scratch_data.dof_idx,
-                                                      flow_scratch_data.quad_idx);
-          FEFaceIntegrator<dim, dim + 2, number> delta_phi_m(
-            flow_scratch_data.scratch_data.get_matrix_free(),
-            true /*is_interior_face*/,
-            flow_scratch_data.dof_idx,
-            flow_scratch_data.quad_idx);
-          FEFaceIntegrator<dim, dim + 2, number> delta_phi_p(
-            flow_scratch_data.scratch_data.get_matrix_free(),
-            false /*is_interior_face*/,
-            flow_scratch_data.dof_idx,
-            flow_scratch_data.quad_idx);
-
-
-          for (unsigned int face = face_range.first; face < face_range.second; ++face)
-            {
-              phi_p.reinit(face);
-              phi_p.gather_evaluate(flow_scratch_data.solution_history.get_current_solution(),
-                                    EvaluationFlags::values | (is_viscous ? EvaluationFlags::gradients :
-                                                                            EvaluationFlags::nothing));
-
-              phi_m.reinit(face);
-              phi_m.gather_evaluate(flow_scratch_data.solution_history.get_current_solution(),
-                                    EvaluationFlags::values | (is_viscous ? EvaluationFlags::gradients :
-                                                                            EvaluationFlags::nothing));
-
-              delta_phi_p.reinit(face);
-              delta_phi_p.gather_evaluate(src,
-                                          EvaluationFlags::values |
-                                            (is_viscous ? EvaluationFlags::gradients :
-                                                          EvaluationFlags::nothing));
-
-              delta_phi_m.reinit(face);
-              delta_phi_m.gather_evaluate(src,
-                                          EvaluationFlags::values |
-                                            (is_viscous ? EvaluationFlags::gradients :
-                                                          EvaluationFlags::nothing));
-
-
-              for (const unsigned int q_index : phi_m.quadrature_point_indices())
-                {
-                  local_face_jacobian_kernel(delta_phi_m, delta_phi_p, phi_m, phi_p, q_index);
-                }
-
-              delta_phi_p.integrate_scatter(EvaluationFlags::values |
-                                              (is_viscous ? EvaluationFlags::gradients :
-                                                            EvaluationFlags::nothing),
-                                            dst);
-              delta_phi_m.integrate_scatter(EvaluationFlags::values |
-                                              (is_viscous ? EvaluationFlags::gradients :
-                                                            EvaluationFlags::nothing),
-                                            dst);
-            }
-        };
-    auto local_cell_jacobian             = [&](      
-          const MatrixFree<dim, number> &, // not used thus no name
-          VectorType                          &dst,
-          const VectorType                    &src,
-          const std::pair<unsigned, unsigned> &cell_range)
+      for (unsigned int face = face_range.first; face < face_range.second; ++face)
         {
-          FECellIntegrator<dim, dim + 2, number> phi(flow_scratch_data.scratch_data.get_matrix_free(),
-                                                    flow_scratch_data.dof_idx,
-                                                    flow_scratch_data.quad_idx); // current solution
-          FECellIntegrator<dim, dim + 2, number> delta_phi(flow_scratch_data.scratch_data.get_matrix_free(),
-                                                    flow_scratch_data.dof_idx,
-                                                    flow_scratch_data.quad_idx); // pertubation
+          phi_m.reinit(face);
 
-//        Hier war der Body Force Teil (für konstante Bodyforce), entfernt da nicht nötig für diese Aufgabe per Instruktion      
+          phi_m.gather_evaluate(flow_scratch_data.solution_history.get_current_solution(),
+                                EvaluationFlags::values | EvaluationFlags::gradients);
 
-          for (unsigned int cell = cell_range.first; cell < cell_range.second; ++cell)
+          delta_phi_m.reinit(face);
+          delta_phi_m.gather_evaluate(src, EvaluationFlags::values | EvaluationFlags::gradients);
+
+          for (const unsigned int q_index : phi_m.quadrature_point_indices())
             {
-              phi.reinit(cell);
-              phi.gather_evaluate(flow_scratch_data.solution_history.get_current_solution(), // phi ist aktuelle Lösung
-                                  EvaluationFlags::values | EvaluationFlags::gradients);
-                                  
-              delta_phi.reinit(cell);
-              delta_phi.gather_evaluate(src, EvaluationFlags::values | EvaluationFlags::gradients); // input vektor src
-                                     
-              for (const unsigned int q_index : phi.quadrature_point_indices())
-                {
-                  local_cell_jacobian_kernel(delta_phi, phi, q_index);
-                }
+              local_boundary_face_jacobian_kernel(delta_phi_m, phi_m, q_index);
+            }
 
-              delta_phi.integrate_scatter(EvaluationFlags::gradients, dst); // here is where the integration over the cell happens
-            } 
-        };  
+          delta_phi_m.integrate_scatter(EvaluationFlags::values |
+                                          (is_viscous ? EvaluationFlags::gradients :
+                                                        EvaluationFlags::nothing),
+                                        dst);
+        }
+    };
 
-    // we need to implement vmult as GMRES needs it to know the A for A*x = b            
-    auto vmult = [&](VectorType &dst, const VectorType &src)    
-        {            
-          using local_applier_type = std::function<void(const dealii::MatrixFree<dim, number> &,
-                                            VectorType       &dst,
-                                            const VectorType &src,
-                                            const std::pair<unsigned int, unsigned int> &)>;
+    auto local_face_jacobian = [&](const MatrixFree<dim, number> &,
+                                   VectorType                          &dst,
+                                   const VectorType                    &src,
+                                   const std::pair<unsigned, unsigned> &face_range) {
+      FEFaceIntegrator<dim, dim + 2, number> phi_m(flow_scratch_data.scratch_data.get_matrix_free(),
+                                                   true /*is_interior_face*/,
+                                                   flow_scratch_data.dof_idx,
+                                                   flow_scratch_data.quad_idx);
+      FEFaceIntegrator<dim, dim + 2, number> phi_p(flow_scratch_data.scratch_data.get_matrix_free(),
+                                                   false /*is_interior_face*/,
+                                                   flow_scratch_data.dof_idx,
+                                                   flow_scratch_data.quad_idx);
+      FEFaceIntegrator<dim, dim + 2, number> delta_phi_m(
+        flow_scratch_data.scratch_data.get_matrix_free(),
+        true /*is_interior_face*/,
+        flow_scratch_data.dof_idx,
+        flow_scratch_data.quad_idx);
+      FEFaceIntegrator<dim, dim + 2, number> delta_phi_p(
+        flow_scratch_data.scratch_data.get_matrix_free(),
+        false /*is_interior_face*/,
+        flow_scratch_data.dof_idx,
+        flow_scratch_data.quad_idx);
 
-          local_applier_type cell          = MPDG_LAMBDA_WRAPPER(local_cell_jacobian);
-          local_applier_type face          = MPDG_LAMBDA_WRAPPER(local_face_jacobian);
-          local_applier_type boundary_face = MPDG_LAMBDA_WRAPPER(local_boundary_face_jacobian);
-          flow_scratch_data.scratch_data.get_matrix_free().loop(cell, face, boundary_face, dst, src, true);
+      for (unsigned int face = face_range.first; face < face_range.second; ++face)
+        {
+          phi_p.reinit(face);
+          phi_p.gather_evaluate(flow_scratch_data.solution_history.get_current_solution(),
+                                EvaluationFlags::values | (is_viscous ? EvaluationFlags::gradients :
+                                                                        EvaluationFlags::nothing));
 
-          local_applier_type inverse = [dof_idx = flow_scratch_data.dof_idx,
-                                        quad_idx = flow_scratch_data.quad_idx]
-          (const MatrixFree<dim, number>               &matrix_free,
-           VectorType                                  &dst,
-           const VectorType                            &src,
-           const std::pair<unsigned int, unsigned int> &cell_range) {
-              MeltPoolDG::Utilities::MatrixFree::
-              local_apply_inverse_mass_matrix<dim, n_conserved_variables<dim, 1>, number>(
+          phi_m.reinit(face);
+          phi_m.gather_evaluate(flow_scratch_data.solution_history.get_current_solution(),
+                                EvaluationFlags::values | (is_viscous ? EvaluationFlags::gradients :
+                                                                        EvaluationFlags::nothing));
+
+          delta_phi_p.reinit(face);
+          delta_phi_p.gather_evaluate(src,
+                                      EvaluationFlags::values |
+                                        (is_viscous ? EvaluationFlags::gradients :
+                                                      EvaluationFlags::nothing));
+
+          delta_phi_m.reinit(face);
+          delta_phi_m.gather_evaluate(src,
+                                      EvaluationFlags::values |
+                                        (is_viscous ? EvaluationFlags::gradients :
+                                                      EvaluationFlags::nothing));
+
+
+          for (const unsigned int q_index : phi_m.quadrature_point_indices())
+            {
+              local_face_jacobian_kernel(delta_phi_m, delta_phi_p, phi_m, phi_p, q_index);
+            }
+
+          delta_phi_p.integrate_scatter(EvaluationFlags::values |
+                                          (is_viscous ? EvaluationFlags::gradients :
+                                                        EvaluationFlags::nothing),
+                                        dst);
+          delta_phi_m.integrate_scatter(EvaluationFlags::values |
+                                          (is_viscous ? EvaluationFlags::gradients :
+                                                        EvaluationFlags::nothing),
+                                        dst);
+        }
+    };
+
+    auto local_cell_jacobian = [&](const MatrixFree<dim, number> &,
+                                   VectorType                          &dst,
+                                   const VectorType                    &src,
+                                   const std::pair<unsigned, unsigned> &cell_range) {
+      FECellIntegrator<dim, dim + 2, number> phi(flow_scratch_data.scratch_data.get_matrix_free(),
+                                                 flow_scratch_data.dof_idx,
+                                                 flow_scratch_data.quad_idx);
+      FECellIntegrator<dim, dim + 2, number> delta_phi(
+        flow_scratch_data.scratch_data.get_matrix_free(),
+        flow_scratch_data.dof_idx,
+        flow_scratch_data.quad_idx);
+
+      // Removed body force part
+
+      for (unsigned int cell = cell_range.first; cell < cell_range.second; ++cell)
+        {
+          phi.reinit(cell);
+          phi.gather_evaluate(flow_scratch_data.solution_history.get_current_solution(),
+                              EvaluationFlags::values | EvaluationFlags::gradients);
+
+          delta_phi.reinit(cell);
+          delta_phi.gather_evaluate(src, EvaluationFlags::values | EvaluationFlags::gradients);
+
+          for (const unsigned int q_index : phi.quadrature_point_indices())
+            {
+              local_cell_jacobian_kernel(delta_phi, phi, q_index);
+            }
+
+          delta_phi.integrate_scatter(EvaluationFlags::gradients, dst);
+        }
+    };
+
+    auto vmult = [&](VectorType &dst, const VectorType &src) {
+      using local_applier_type = std::function<void(const dealii::MatrixFree<dim, number> &,
+                                                    VectorType       &dst,
+                                                    const VectorType &src,
+                                                    const std::pair<unsigned int, unsigned int> &)>;
+
+      local_applier_type cell          = MPDG_LAMBDA_WRAPPER(local_cell_jacobian);
+      local_applier_type face          = MPDG_LAMBDA_WRAPPER(local_face_jacobian);
+      local_applier_type boundary_face = MPDG_LAMBDA_WRAPPER(local_boundary_face_jacobian);
+      flow_scratch_data.scratch_data.get_matrix_free().loop(
+        cell, face, boundary_face, dst, src, true);
+
+      local_applier_type inverse =
+        [dof_idx = flow_scratch_data.dof_idx,
+         quad_idx =
+           flow_scratch_data.quad_idx](const MatrixFree<dim, number>               &matrix_free,
+                                       VectorType                                  &dst,
+                                       const VectorType                            &src,
+                                       const std::pair<unsigned int, unsigned int> &cell_range) {
+          MeltPoolDG::Utilities::MatrixFree::
+            local_apply_inverse_mass_matrix<dim, n_conserved_variables<dim, 1>, number>(
               matrix_free, dst, src, cell_range, dof_idx, quad_idx);
-           };
+        };
 
-          // Step 1: dst = J * src, loop iterates over all parts of the cell applying. This is what apply_jacobian_analytic would do 
-          flow_scratch_data.scratch_data.get_matrix_free().loop(
-              cell,
-              face,
-              boundary_face,
-              dst, src, true);
+      flow_scratch_data.scratch_data.get_matrix_free().loop(
+        cell, face, boundary_face, dst, src, true);
 
-          /* Step 2: dst = M⁻¹ * dst
-          flow_scratch_data.scratch_data.get_matrix_free().cell_loop(  // cell loop only iterates over the cell, for *M^-1 only that is needed as in DG, M is block-diagonal (independent cells)
-          inverse, dst, dst, // here, dst is both src and dst, the second one is const &src in the cell_loop signature
-          std::function<void(unsigned int, unsigned int)>(), std::function<void(unsigned int, unsigned int)>()); // two callbacks not needed,  evtl void noch übergeben
-          */
-          flow_scratch_data.scratch_data.get_matrix_free().cell_loop(
-              inverse, dst, dst, 
-              std::function<void(unsigned int, unsigned int)>(), std::function<void(unsigned int, unsigned int)>());
+      flow_scratch_data.scratch_data.get_matrix_free().cell_loop(
+        inverse,
+        dst,
+        dst,
+        std::function<void(unsigned int, unsigned int)>(),
+        std::function<void(unsigned int, unsigned int)>());
 
-          dst *= time_step; // damit dst = z ist statt lambda
-        }; 
+      dst *= time_step;
+    };
 
-    const MatrixTypeObject<VectorType> op(vmult); // wraps vmult in MatrixTypeObject, i.e. we copy vmult into an Object "op" of type MatrixTypeObject
+    if (time_step == 0.0) // this is added to prevent estimate_eigenvalues_gmres from crashing
+      return {};
 
-    const VectorType &rhs = flow_scratch_data.solution_history.get_current_solution(); // returns the solution at the current time step, will be our src i.e. pertubation direction
-
-    // GMRES solves A*x=b but we are not actually interested in the solution but just the Hessenbergmatrix.
-
-    std::vector<std::complex<double>> eigenvalues =  estimate_eigenvalues_gmres(op, rhs, 100);
+    const MatrixTypeObject<VectorType> op(vmult);
+    const VectorType &rhs = flow_scratch_data.solution_history.get_current_solution();
+    std::vector<std::complex<number>> eigenvalues =
+      estimate_eigenvalues_gmres<number>(op, rhs, n_eigenvalues);
 
     for (auto &eig : eigenvalues)
       {
         eig = -eig;
       };
 
-    return eigenvalues;// Estimates M^-1*J Evs
-  }           
-    
+    // Terminal output for the test case
+    if (is_test)
+      {
+        const auto min_ev =
+          *std::min_element(eigenvalues.begin(),
+                            eigenvalues.end(),
+                            [](const auto &a, const auto &b) { return a.real() < b.real(); });
+        const auto max_ev =
+          *std::max_element(eigenvalues.begin(),
+                            eigenvalues.end(),
+                            [](const auto &a, const auto &b) { return a.real() < b.real(); });
+        const auto avg_ev =
+          std::accumulate(eigenvalues.begin(), eigenvalues.end(), std::complex<double>(0.0)) /
+          static_cast<double>(eigenvalues.size());
+
+        flow_scratch_data.scratch_data.get_pcout()
+          << "\nEigenvalues:"
+          << " min = " << min_ev << ", max = " << max_ev << ", avg = " << avg_ev << "\n";
+      }
+
+    return eigenvalues;
+  }
+
 
   template <int dim, typename number, int n_species>
   number
@@ -585,7 +574,8 @@ namespace MeltPoolDG::CompressibleFlow
           }
       }
 
-    min_density = dealii::Utilities::MPI::min(min_density, flow_scratch_data.scratch_data.get_mpi_comm());
+    min_density =
+      dealii::Utilities::MPI::min(min_density, flow_scratch_data.scratch_data.get_mpi_comm());
 
     return min_density;
   }
