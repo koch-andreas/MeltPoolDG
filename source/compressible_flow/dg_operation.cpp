@@ -499,6 +499,7 @@ namespace MeltPoolDG::CompressibleFlow
       return {};
 
     const MatrixTypeObject<VectorType> op(vmult);
+    flow_scratch_data.solution_history.get_current_solution().update_ghost_values();
     const VectorType &rhs = flow_scratch_data.solution_history.get_current_solution();
     std::vector<std::complex<number>> eigenvalues =
       estimate_eigenvalues_gmres<number>(op, rhs, n_eigenvalues);
