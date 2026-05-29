@@ -1,0 +1,79 @@
+{
+  "base": {
+    "problem name": "compressible_flow",
+    "case name": "generic_hyper_rectangle_domain",
+    "dimension": 2,
+    "do print parameters": false,
+    "verbosity level": 1,
+    "global refinements": 0
+  },
+  "case setup": {
+    "boundary x min": {
+      "type": "inflow",
+      "density": 1.177,
+      "velocity": "1; 0",
+      "energy": 212404,
+      "inflow ramp-up type": "none"
+    },
+    "boundary x max": {
+      "type": "subsonic_outflow_fixed_energy",
+      "energy": 212404
+    },
+    "boundary y min": {
+      "type": "no_slip_wall"
+    },
+    "boundary y max": {
+      "type": "no_slip_wall"
+    },
+    "initial conditions": {
+      "density": 1.177,
+      "velocity": "1; 0.0",
+      "energy": 212404
+    },
+    "domain": {
+      "size": "0.25, 0.05",
+      "base grid resolution": "50, 10"
+    }
+  },
+  "time stepping": {
+    "start time": 0.0,
+    "end time": 2e-06
+  },
+  "output": {
+    "write frequency": 1,
+    "do user defined postprocessing": true,
+    "paraview": {
+      "filename": "generic_hyper_rectangle_domain",
+      "enable": false
+    },
+    "eigenvalues": {
+      "enable": false,
+      "print summary": true
+    }
+  },
+  "compressible navier stokes": {
+    "numerical flux type": "lax_friedrichs_modified",
+    "use cfl criteria": true,
+    "courant number": 0.05,
+    "viscous courant number": 1,
+    "gravity constant": 0,
+    "time integration": {
+      "type": "LSRK_stage_1_order_1"
+    },
+    "fe": {
+      "degree": 1,
+      "type": "FE_DGQ"
+    }
+  },
+  "material": {
+    "gas": {
+      "dynamic viscosity": 2e-05,
+      "specific isobaric heat": 1004.85,
+      "specific gas constant": 287.1,
+      "reference density": 1.0,
+      "gamma": 1.4,
+      "eos type": "ideal_gas",
+      "reference dynamic viscosity": 2e-05
+    }
+  }
+}

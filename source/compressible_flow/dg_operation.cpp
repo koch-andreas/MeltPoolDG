@@ -255,19 +255,7 @@ namespace MeltPoolDG::CompressibleFlow
 
       // Removed the time-dependent part of the Jacobian as we are only interested in the spatial
       // part
-      /*
-      dealii::Tensor<1, dim + 2, dealii::VectorizedArray<number>> forcing;
-      if (flow_scratch_data.body_force.get() != nullptr)
-        {
-          const Tensor<1, dim, VectorizedArray<number>> force =
-            VectorTools::evaluate_function_at_vectorized_points(*flow_scratch_data.body_force,
-                                                                phi.quadrature_point(q_index));
-          for (unsigned int d = 0; d < dim; ++d)
-            forcing[dim + 1] +=
-              force[d] * (delta_w_q[d + 1] * 1. / w_q[0] - w_q[d + 1] * delta_w_q[0]);
-        } // this is not needed as bodyforce = 0, since this is if flagged we can leave it in for
-      later use
-      */
+
       ConservedVariablesGradient differential_change_flux =
         -1.0 * convective_terms.calculate_jacobian_convective_flux(w_q, delta_w_q);
 
@@ -492,9 +480,11 @@ namespace MeltPoolDG::CompressibleFlow
               matrix_free, dst, src, cell_range, dof_idx, quad_idx);
         };
 
+      // Step 1: dst = J * src
       flow_scratch_data.scratch_data.get_matrix_free().loop(
         cell, face, boundary_face, dst, src, true);
 
+      // Step 2: dst = M⁻¹ * dst
       flow_scratch_data.scratch_data.get_matrix_free().cell_loop(
         inverse,
         dst,
@@ -505,7 +495,7 @@ namespace MeltPoolDG::CompressibleFlow
       dst *= time_step;
     };
 
-    if (time_step == 0.0) // this is added to prevent estimate_eigenvalues_gmres from crashing
+    if (time_step == 0.0)
       return {};
 
     const MatrixTypeObject<VectorType> op(vmult);

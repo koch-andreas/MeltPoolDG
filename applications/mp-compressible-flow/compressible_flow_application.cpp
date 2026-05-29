@@ -356,12 +356,16 @@ namespace MeltPoolDG::CompressibleFlow
       {
         const auto eigenvalues = comp_flow_operation.estimate_jacobian_eigenvalues(
           time_iterator->get_current_time_increment());
-        post_processor->output_complex_valued_vector_to_csv(
-          time_step,
-          current_time,
-          eigenvalues,
-          simulation_case->parameters.flow.eigenvalues_data.output_filename,
-          force_output);
+
+        if (simulation_case->parameters.flow.eigenvalues_data.do_output)
+          {
+            post_processor->output_complex_valued_vector_to_csv(
+              time_step,
+              current_time,
+              eigenvalues,
+              simulation_case->parameters.flow.eigenvalues_data.output_filename,
+              force_output);
+          };
       }
 
     const auto attach_output_vectors = [&](GenericDataOut<dim, number> &data_out) {
