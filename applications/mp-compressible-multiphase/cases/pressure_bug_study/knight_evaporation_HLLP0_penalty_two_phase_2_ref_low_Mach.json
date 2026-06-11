@@ -9,15 +9,16 @@
   },
   "time stepping": {
     "start time": "0.0",
-    "end time": "1.0e-5",
+    "end time": "2.0e-5",
     "time step size": "1.0e-10",
     "max n steps": "100000000"
   },
   "output": {
     "write time step size": "1.0e-7",
     "do user defined postprocessing": "true",
+    "directory": "./pressure_bug_study/NASG_knight_evap_2_ref_low_Mach",
     "paraview": {
-      "filename": "Ti6Al4V_evaporation_1_bar_320_elem_surface_source",
+      "filename": "NASG_knight_evap_2_ref_low_Mach",
       "enable": "true"
     }
   },
@@ -105,8 +106,9 @@
   "cut": {
     "stabilization": {
       "ghost-penalty": {
-        "gamma M degree 0": "1.0",
-        "gamma M degree 1": "1.0"
+        "gamma M degree 0": "0.1",
+        "gamma M degree 1": "0.01",
+        "gamma M degree 2": "0.001"
       }
     }
   },

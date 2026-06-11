@@ -895,7 +895,7 @@ namespace MeltPoolDG::Multiphase
     J_Rob[Idx::energy] =
       m_dot_evap * (u_liquid[Idx::energy] / u_liquid[Idx::density] -
                     u_gas[Idx::energy] / u_gas[Idx::density]) +
-      (pressure_liquid * vel_n_liquid - pressure_gas * vel_n_gas) /*+ laser_heat_source*/ -
+      (pressure_liquid * vel_n_liquid - pressure_gas * vel_n_gas) + laser_heat_source -
       m_dot_evap * multiphase_scratch_data.phase_change.liquid_gas.latent_heat_of_vaporization;
 
     const ConservedVariablesGradType viscous_flux_liquid =

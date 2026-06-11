@@ -107,7 +107,8 @@ namespace MeltPoolDG::Flow
       const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> *constant_body_force,
       const CompressibleFlowConvectiveKernels<dim, number>          &convective_terms,
       const CompressibleFlowViscousKernels<dim, number>             &viscous_terms,
-      const std::unique_ptr<dealii::Function<dim>>                  &body_force)
+      const std::unique_ptr<dealii::Function<dim>>                  &body_force,
+      const dealii::VectorizedArray<number>                         &mean_pressure=dealii::make_vectorized_array(0.))
   {
     const auto w_q = evaluator.get_value(q);
 
@@ -172,12 +173,16 @@ namespace MeltPoolDG::Flow
                              const unsigned int              q,
                              dealii::VectorizedArray<number> penalty_parameter,
                              const CompressibleFlowConvectiveKernels<dim, number> &convective_terms,
-                             const CompressibleFlowViscousKernels<dim, number>    &viscous_terms)
+                             const CompressibleFlowViscousKernels<dim, number>    &viscous_terms,
+                             const dealii::VectorizedArray<number> &pressure_mean_m = dealii::make_vectorized_array(0.),
+                             const dealii::VectorizedArray<number> &pressure_mean_p = dealii::make_vectorized_array(0.))
   {
     auto numerical_flux =
       convective_terms.calculate_convective_numerical_flux(evaluator_m.get_value(q),
                                                            evaluator_p.get_value(q),
                                                            evaluator_m.normal_vector(q),
+                                                           pressure_mean_m,
+                                                           pressure_mean_p,
                                                            evaluator_m.quadrature_point(q)[0]);
 
     if (is_viscous)
@@ -245,7 +250,8 @@ namespace MeltPoolDG::Flow
       const CompressibleFlowConvectiveKernels<dim, number>  &convective_terms,
       const CompressibleFlowViscousKernels<dim, number>     &viscous_terms,
       const CompressibleFlowMaterial<dim, number>           &material,
-      const CompressibleFlowBoundaryConditions<dim, number> &boundary_conditions)
+      const CompressibleFlowBoundaryConditions<dim, number> &boundary_conditions,
+      const dealii::VectorizedArray<number> &mean_pressure_m = dealii::make_vectorized_array(0.))
   {
     const auto w_m      = evaluator_m.get_value(q);
     const auto normal   = evaluator_m.normal_vector(q);
@@ -254,7 +260,9 @@ namespace MeltPoolDG::Flow
     const auto [w_p, grad_w_p] = boundary_conditions.get_boundary_face_value_and_gradient(
       evaluator_m.quadrature_point(q), normal, boundary_id, w_m, grad_w_m, material, is_gas_phase);
 
-    auto flux = convective_terms.calculate_convective_numerical_flux(w_m, w_p, normal, evaluator_m.quadrature_point(q)[0]);
+    const dealii::VectorizedArray<number> mean_pressure_p = material.eos_utils->calculate_thermodynamic_pressure(w_p);
+
+    auto flux = convective_terms.calculate_convective_numerical_flux(w_m, w_p, normal, mean_pressure_m, mean_pressure_p, evaluator_m.quadrature_point(q)[0]);
 
     if (is_viscous)
       flux -= viscous_terms.calculate_viscous_numerical_flux(

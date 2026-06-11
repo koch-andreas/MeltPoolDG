@@ -5,7 +5,7 @@
     "dimension": "1",
     "verbosity level": "0",
     "do print parameters": "false",
-    "global refinements": "2"
+    "global refinements": "3"
   },
   "time stepping": {
     "start time": "0.0",
@@ -16,13 +16,14 @@
   "output": {
     "write time step size": "1.0e-7",
     "do user defined postprocessing": "true",
+    "directory": "./pressure_bug_study/NASG_knight_evap_3_ref_default_ramp",
     "paraview": {
-      "filename": "Ti6Al4V_evaporation_1_bar_320_elem_surface_source",
+      "filename": "NASG_knight_evap_3_ref_default_ramp",
       "enable": "true"
     }
   },
   "simulation specific parameters": {
-    "left boundary condition": "outflow_fixed_pressure",
+    "left boundary condition": "no_slip_wall",
     "right boundary condition": "outflow_fixed_pressure",
     "initial conditions": {
       "gas": "1.14979854471105; 0.0; 1.5e5",
@@ -32,8 +33,8 @@
   },
   "compressible navier stokes": {
     "numerical flux type": "lax_friedrichs_modified",
-    "courant number": "0.02",
-    "viscous courant number": "0.02",
+    "courant number": "0.04",
+    "viscous courant number": "0.04",
     "use cfl criteria": "true",
     "gravity constant": "0.0",
     "domain representation type": "cut",
@@ -42,8 +43,8 @@
         "preconditioner type": "Identity",
         "solver type": "CG",
         "max iterations": "10000",
-        "rel tolerance": "1e-20",
-        "abs tolerance": "1e-20"
+        "rel tolerance": "1e-12",
+        "abs tolerance": "1e-12"
       }
     },
     "fe": {
@@ -60,7 +61,7 @@
       "laser power density": "2.0e9"
     },
     "HLLP0 and penalty": {
-      "penalty parameter temperature jump": "0.5"
+      "penalty parameter temperature jump": "0.25"
     }
   },
   "material": {
@@ -106,7 +107,8 @@
     "stabilization": {
       "ghost-penalty": {
         "gamma M degree 0": "1.0",
-        "gamma M degree 1": "1.0"
+        "gamma M degree 1": "1.0",
+        "gamma M degree 2": "1.0"
       }
     }
   },

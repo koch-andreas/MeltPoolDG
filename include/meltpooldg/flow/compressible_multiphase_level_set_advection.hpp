@@ -119,10 +119,10 @@ namespace MeltPoolDG::Multiphase
       else if (case_name == "two_phase")
         {
           // one phase boundary
-         // for (unsigned int i = 0; i < level_set.size(); i++)
-            //level_set[i] += time_step * interface_velocity[0];
+         for (unsigned int i = 0; i < level_set.size(); i++)
+           level_set[i] += time_step * interface_velocity[0];
 
-          //interface_position += time_step * interface_velocity[0];
+          interface_position += time_step * interface_velocity[0];
         }
       else
         AssertThrow(false,

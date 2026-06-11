@@ -17,7 +17,7 @@ namespace MeltPoolDG::Evaporation
     const number specific_gas_constant,
     const number specific_heat_ratio_vapor)
     : atmospheric_pressure(atmospheric_pressure)
-    , boiling_temperature_at_atmospheric_pressure(boiling_temperature_at_atmospheric_pressure)
+    , boiling_temperature_at_atmospheric_pressure(3133.0)
     , latent_heat_of_evaporation(latent_heat_of_evaporation)
     , specific_gas_constant(specific_gas_constant)
     , specific_heat_ratio_vapor(specific_heat_ratio_vapor)
@@ -42,7 +42,7 @@ namespace MeltPoolDG::Evaporation
 
     // Correct potentially slightly negative Ma numbers at interface position due to numerical
     // inaccuracies
-    const number Ma_gas_corrected = std::max(Ma_gas, 0.);
+    const number Ma_gas_corrected = std::max(Ma_gas, 1.e-4);
 
     // Dimensionless velocity
     const number m = Ma_gas_corrected * std::sqrt(0.5 * specific_heat_ratio_vapor);

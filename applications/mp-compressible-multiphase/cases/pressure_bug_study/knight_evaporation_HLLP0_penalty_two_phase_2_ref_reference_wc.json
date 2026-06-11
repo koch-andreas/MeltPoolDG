@@ -9,20 +9,21 @@
   },
   "time stepping": {
     "start time": "0.0",
-    "end time": "1.0e-5",
+    "end time": "1.0e-3",
     "time step size": "1.0e-10",
     "max n steps": "100000000"
   },
   "output": {
-    "write time step size": "1.0e-7",
+    "write time step size": "1.0e-6",
     "do user defined postprocessing": "true",
+    "directory": "./pressure_bug_study/NASG_knight_evap_2_ref_reference_wc",
     "paraview": {
-      "filename": "Ti6Al4V_evaporation_1_bar_320_elem_surface_source",
+      "filename": "NASG_knight_evap_2_ref_reference_wc",
       "enable": "true"
     }
   },
   "simulation specific parameters": {
-    "left boundary condition": "outflow_fixed_pressure",
+    "left boundary condition": "no_slip_wall",
     "right boundary condition": "outflow_fixed_pressure",
     "initial conditions": {
       "gas": "1.14979854471105; 0.0; 1.5e5",
@@ -42,8 +43,8 @@
         "preconditioner type": "Identity",
         "solver type": "CG",
         "max iterations": "10000",
-        "rel tolerance": "1e-20",
-        "abs tolerance": "1e-20"
+        "rel tolerance": "1e-12",
+        "abs tolerance": "1e-12"
       }
     },
     "fe": {
@@ -60,7 +61,7 @@
       "laser power density": "2.0e9"
     },
     "HLLP0 and penalty": {
-      "penalty parameter temperature jump": "0.5"
+      "penalty parameter temperature jump": "0.25"
     }
   },
   "material": {
@@ -106,7 +107,8 @@
     "stabilization": {
       "ghost-penalty": {
         "gamma M degree 0": "1.0",
-        "gamma M degree 1": "1.0"
+        "gamma M degree 1": "1.0",
+        "gamma M degree 2": "1.0"
       }
     }
   },

@@ -106,7 +106,7 @@ using local_applier_type =
                          LinearAlgebra::distributed::Vector<number> &,
                          const LinearAlgebra::distributed::Vector<number> &,
                          const std::pair<unsigned int, unsigned int> &)>;
-    if (time+time_step>(1e-4-1e-11))
+    /*if (time+time_step>(1e-4-1e-11))
     //if (time>(0.05e-5-0.48*time_step) and time<(0.05e-5+0.48*time_step))
       {
         local_applier_type cell_quad          = MPDG_LAMBDA_WRAPPER(output_at_quad_points);
@@ -127,9 +127,9 @@ using local_applier_type =
           src,
           true,
           MatrixFree<dim, number>::DataAccessOnFaces::gradients,
-          MatrixFree<dim, number>::DataAccessOnFaces::gradients);*/
+          MatrixFree<dim, number>::DataAccessOnFaces::gradients);*//*
 
-      }
+      }*/
 
 
 
@@ -209,6 +209,67 @@ using local_applier_type =
       [&]<bool is_gas_phase, bool is_viscous, typename IntegratorType>(IntegratorType &eval,
                                                                        const auto &convective_terms,
                                                                        const auto &viscous_terms) {
+
+        /*const auto *dofs_m = eval.begin_dof_values();
+
+         ConservedVariablesType u_m_1{};
+         u_m_1[0] = dofs_m[0];
+         u_m_1[1] = dofs_m[2];
+         u_m_1[2] = dofs_m[4];
+
+         ConservedVariablesType u_m_2{};
+         u_m_2[0] = dofs_m[1];
+         u_m_2[1] = dofs_m[3];
+         u_m_2[2] = dofs_m[5];
+
+        std::vector<number> quad_points = {0.0198550717512319, 0.1016667612931866, 0.2372337950418355, 0.4082826787521751,
+         	0.5917173212478248, 0.7627662049581645, 0.8983332387068134, 0.9801449282487681};
+        std::vector<number> quad_weights = {0.0506142681451885, 0.1111905172266872, 0.1568533229389434, 0.1813418916891808,
+            0.1813418916891808, 0.1568533229389434, 0.1111905172266872, 0.0506142681451885};
+        std::vector<dealii::VectorizedArray<number>> p{};
+        for (const auto &quad_point : quad_points) {
+            p.push_back(multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_m_1 * (1.- quad_point) +
+                          u_m_2 * quad_point));
+        }
+
+        dealii::VectorizedArray<number> b_0{};
+        dealii::VectorizedArray<number> b_1{};
+        for (unsigned int i=0; i<8; ++i) {
+            b_0 += quad_weights[i] * (1. - quad_points[i]) * p[i];
+            b_1 += quad_weights[i] * quad_points[i] * p[i];
+        }
+
+        const number zeta_1 = 0.5 * (1. - 1. / std::sqrt(3.));
+        const number zeta_2 = 0.5 * (1. + 1. / std::sqrt(3.));
+        const number phi_a_zeta_1 = 1. - zeta_1;
+        const number phi_a_zeta_2 = 1. - zeta_2;
+        const number phi_b_zeta_1 = zeta_1;
+        const number phi_b_zeta_2 = zeta_2;
+        const dealii::VectorizedArray<number> p_0_fit = 4. * b_0 - 2. * b_1;
+        const dealii::VectorizedArray<number> p_1_fit = -2. * b_0 + 4. * b_1;
+
+        std::vector<dealii::VectorizedArray<number>> p_q_reconstructed{};
+        p_q_reconstructed.push_back(phi_a_zeta_1 * p_0_fit + phi_b_zeta_1 * p_1_fit);
+        p_q_reconstructed.push_back(phi_b_zeta_1 * p_0_fit + phi_b_zeta_2 * p_1_fit);*/
+
+        //const dealii::VectorizedArray<number> p_0 = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(eval.get_value(0));
+        //const dealii::VectorizedArray<number> p_1 = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(eval.get_value(1));
+
+        /*std::cout << std::setprecision(16);
+        std::cout << "original p: " << std::endl;
+        std::cout << p_0 << std::endl;
+        std::cout << p_1 << std::endl;
+        std::cout << "projected p: " << std::endl;
+        std::cout << p_0_fit << std::endl;
+        std::cout << p_1_fit << std::endl;
+        std::cout << "reevaluated p: " << std::endl;
+        std::cout << p_q0_reconstructed << std::endl;
+        std::cout << p_q1_reconstructed << std::endl;
+        std::cout << "difference:\n";
+		std::cout << (p_q0_reconstructed - p_0) << '\n';
+		std::cout << (p_q1_reconstructed - p_1) << '\n';*/
+
+
         for (const unsigned int q : eval.quadrature_point_indices())
           {
             const auto [force, grad_flux] =
@@ -218,7 +279,8 @@ using local_applier_type =
                 constant_function ? &constant_body_force : nullptr,
                 convective_terms,
                 viscous_terms,
-                multiphase_scratch_data.body_force);
+                multiphase_scratch_data.body_force/*,
+                p_q_reconstructed[q]*/);
 
             ConservedVariablesType darcy_damping{};
 
@@ -253,11 +315,11 @@ using local_applier_type =
                   (liquid_fraction * liquid_fraction * liquid_fraction +
                    multiphase_scratch_data.darcy_damping.avoid_div_zero_constant);
 
-                darcy_damping_coefficient = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                /*darcy_damping_coefficient = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
                       eval.quadrature_point(q)[0],
-                      dealii::make_vectorized_array(-3.e-4),
+                      dealii::make_vectorized_array(-1.e-4),
                       darcy_damping_coefficient,
-                      0. * darcy_damping_coefficient);
+                      0. * darcy_damping_coefficient);*/
 
                 // contribution to momentum equation
                 darcy_damping[1] = darcy_damping_coefficient * velocity[0];
@@ -272,7 +334,7 @@ using local_applier_type =
             if (multiphase_scratch_data.phase_change.solid_liquid.use_darcy_damping)
               flux += darcy_damping;
 
-            if (not is_gas_phase)
+            /*if (not is_gas_phase)
               {
                 ConservedVariablesType regularized_heat_source{};
                 double epsilon = 2. * 3.125e-6;
@@ -305,12 +367,12 @@ using local_applier_type =
                                       x,
                                       dealii::make_vectorized_array(epsilon),
                                       0. * delta,
-                                      delta);*/
+                                      delta);*//*
 
 
                 regularized_heat_source[2] = delta * laser_heat_source;
                 flux += regularized_heat_source;
-              }
+              }*/
 
             if (multiphase_scratch_data.body_force.get() != nullptr)
               flux += force;
@@ -864,6 +926,116 @@ using local_applier_type =
           eval_m.gather_evaluate(src, eval_flags);
           eval_p.gather_evaluate(src, eval_flags);
 
+          /*const auto *dofs_m = eval_m.begin_dof_values();
+
+          ConservedVariablesType u_m_1{};
+          u_m_1[0] = dofs_m[0];
+          u_m_1[1] = dofs_m[2];
+          u_m_1[2] = dofs_m[4];
+
+          ConservedVariablesType u_m_2{};
+          u_m_2[0] = dofs_m[1];
+          u_m_2[1] = dofs_m[3];
+          u_m_2[2] = dofs_m[5];
+
+          const dealii::VectorizedArray<number> p_m_1 = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_m_1);
+          const dealii::VectorizedArray<number> p_m_2 = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_m_2);
+          const dealii::VectorizedArray<number> pressure_mean_m = 0.5 * (p_m_1 + p_m_2);
+
+          const auto *dofs_p = eval_p.begin_dof_values();
+
+          ConservedVariablesType u_p_1{};
+          u_p_1[0] = dofs_p[0];
+          u_p_1[1] = dofs_p[2];
+          u_p_1[2] = dofs_p[4];
+
+          ConservedVariablesType u_p_2{};
+          u_p_2[0] = dofs_p[1];
+          u_p_2[1] = dofs_p[3];
+          u_p_2[2] = dofs_p[5];
+
+          const dealii::VectorizedArray<number> p_p_1 = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_p_1);
+          const dealii::VectorizedArray<number> p_p_2 = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_p_2);
+          const dealii::VectorizedArray<number> pressure_mean_p = 0.5 * (p_p_1 + p_p_2);*/
+
+         /*const auto *dofs_m = eval_m.begin_dof_values();
+
+         ConservedVariablesType u_m_1{};
+         u_m_1[0] = dofs_m[0];
+         u_m_1[1] = dofs_m[2];
+         u_m_1[2] = dofs_m[4];
+
+         ConservedVariablesType u_m_2{};
+         u_m_2[0] = dofs_m[1];
+         u_m_2[1] = dofs_m[3];
+         u_m_2[2] = dofs_m[5];
+
+         const auto *dofs_p = eval_p.begin_dof_values();
+
+         ConservedVariablesType u_p_1{};
+         u_p_1[0] = dofs_p[0];
+         u_p_1[1] = dofs_p[2];
+         u_p_1[2] = dofs_p[4];
+
+         ConservedVariablesType u_p_2{};
+         u_p_2[0] = dofs_p[1];
+         u_p_2[1] = dofs_p[3];
+         u_p_2[2] = dofs_p[5];
+
+        std::vector<number> quad_points = {0.0198550717512319, 0.1016667612931866, 0.2372337950418355, 0.4082826787521751,
+         	0.5917173212478248, 0.7627662049581645, 0.8983332387068134, 0.9801449282487681};
+        std::vector<number> quad_weights = {0.0506142681451885, 0.1111905172266872, 0.1568533229389434, 0.1813418916891808,
+            0.1813418916891808, 0.1568533229389434, 0.1111905172266872, 0.0506142681451885};
+
+        std::vector<dealii::VectorizedArray<number>> p_m{};
+        for (const auto &quad_point : quad_points) {
+            p_m.push_back(multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_m_1 * (1.- quad_point) +
+                          u_m_2 * quad_point));
+        }
+
+        std::vector<dealii::VectorizedArray<number>> p_p{};
+        for (const auto &quad_point : quad_points) {
+            p_p.push_back(multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_p_1 * (1.- quad_point) +
+                          u_p_2 * quad_point));
+        }
+
+        dealii::VectorizedArray<number> b_0_m{};
+        dealii::VectorizedArray<number> b_1_m{};
+        for (unsigned int i=0; i<8; ++i) {
+            b_0_m += quad_weights[i] * (1. - quad_points[i]) * p_m[i];
+            b_1_m += quad_weights[i] * quad_points[i] * p_m[i];
+        }
+
+        dealii::VectorizedArray<number> b_0_p{};
+        dealii::VectorizedArray<number> b_1_p{};
+        for (unsigned int i=0; i<8; ++i) {
+            b_0_p += quad_weights[i] * (1. - quad_points[i]) * p_p[i];
+            b_1_p += quad_weights[i] * quad_points[i] * p_p[i];
+        }
+
+        const number zeta_1 = 0.5 * (1. - 1. / std::sqrt(3.));
+        const number zeta_2 = 0.5 * (1. + 1. / std::sqrt(3.));
+        const number phi_a_zeta_1 = 1. - zeta_1;
+        const number phi_a_zeta_2 = 1. - zeta_2;
+        const number phi_b_zeta_1 = zeta_1;
+        const number phi_b_zeta_2 = zeta_2;
+        const dealii::VectorizedArray<number> p_0_fit_m = 4. * b_0_m - 2. * b_1_m;
+        const dealii::VectorizedArray<number> p_1_fit_m = -2. * b_0_m + 4. * b_1_m;
+        const dealii::VectorizedArray<number> p_0_fit_p = 4. * b_0_p - 2. * b_1_p;
+        const dealii::VectorizedArray<number> p_1_fit_p = -2. * b_0_p + 4. * b_1_p;
+
+        dealii::VectorizedArray<number> p_q_reconstructed_m = dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(
+                                          eval_m.normal_vector(0)[0],
+                                          dealii::make_vectorized_array(0.),
+                                          p_1_fit_m,
+                                          p_0_fit_m);
+
+        dealii::VectorizedArray<number> p_q_reconstructed_p = dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(
+                                          eval_m.normal_vector(0)[0],
+                                          dealii::make_vectorized_array(0.),
+                                          p_0_fit_p,
+                                          p_1_fit_p);*/
+
           const auto interior_penalty_parameter =
             is_viscous ?
               0.5 *
@@ -1103,6 +1275,67 @@ using local_applier_type =
                                  dealii::EvaluationFlags::values |
                                    dealii::EvaluationFlags::gradients);
 
+          /*const auto *dofs_m = eval_m.begin_dof_values();
+
+          ConservedVariablesType u_m_1{};
+          u_m_1[0] = dofs_m[0];
+          u_m_1[1] = dofs_m[2];
+          u_m_1[2] = dofs_m[4];
+
+          ConservedVariablesType u_m_2{};
+          u_m_2[0] = dofs_m[1];
+          u_m_2[1] = dofs_m[3];
+          u_m_2[2] = dofs_m[5];
+
+          const dealii::VectorizedArray<number> p_m_1 = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_m_1);
+          const dealii::VectorizedArray<number> p_m_2 = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_m_2);
+          const dealii::VectorizedArray<number> pressure_mean_m = 0.5 * (p_m_1 + p_m_2);*/
+
+          /*const auto *dofs_m = eval_m.begin_dof_values();
+
+         ConservedVariablesType u_m_1{};
+         u_m_1[0] = dofs_m[0];
+         u_m_1[1] = dofs_m[2];
+         u_m_1[2] = dofs_m[4];
+
+         ConservedVariablesType u_m_2{};
+         u_m_2[0] = dofs_m[1];
+         u_m_2[1] = dofs_m[3];
+         u_m_2[2] = dofs_m[5];
+
+        std::vector<number> quad_points = {0.0198550717512319, 0.1016667612931866, 0.2372337950418355, 0.4082826787521751,
+         	0.5917173212478248, 0.7627662049581645, 0.8983332387068134, 0.9801449282487681};
+        std::vector<number> quad_weights = {0.0506142681451885, 0.1111905172266872, 0.1568533229389434, 0.1813418916891808,
+            0.1813418916891808, 0.1568533229389434, 0.1111905172266872, 0.0506142681451885};
+
+        std::vector<dealii::VectorizedArray<number>> p_m{};
+        for (const auto &quad_point : quad_points) {
+            p_m.push_back(multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_m_1 * (1.- quad_point) +
+                          u_m_2 * quad_point));
+        }
+
+        dealii::VectorizedArray<number> b_0_m{};
+        dealii::VectorizedArray<number> b_1_m{};
+        for (unsigned int i=0; i<8; ++i) {
+            b_0_m += quad_weights[i] * (1. - quad_points[i]) * p_m[i];
+            b_1_m += quad_weights[i] * quad_points[i] * p_m[i];
+        }
+
+        const number zeta_1 = 0.5 * (1. - 1. / std::sqrt(3.));
+        const number zeta_2 = 0.5 * (1. + 1. / std::sqrt(3.));
+        const number phi_a_zeta_1 = 1. - zeta_1;
+        const number phi_a_zeta_2 = 1. - zeta_2;
+        const number phi_b_zeta_1 = zeta_1;
+        const number phi_b_zeta_2 = zeta_2;
+        const dealii::VectorizedArray<number> p_0_fit_m = 4. * b_0_m - 2. * b_1_m;
+        const dealii::VectorizedArray<number> p_1_fit_m = -2. * b_0_m + 4. * b_1_m;
+
+        dealii::VectorizedArray<number> p_q_reconstructed_m = dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(
+                                          eval_m.normal_vector(0)[0],
+                                          dealii::make_vectorized_array(0.),
+                                          p_1_fit_m,
+                                          p_0_fit_m);*/
+
           const dealii::VectorizedArray<number> interior_penalty_parameter =
             is_viscous ? eval_m.read_cell_data(multiphase_scratch_data.interior_penalty_parameter) :
                          0.;
@@ -1131,7 +1364,8 @@ using local_applier_type =
                   convective_terms,
                   viscous_terms,
                   material,
-                  multiphase_scratch_data.boundary_conditions);
+                  multiphase_scratch_data.boundary_conditions/*,
+                  p_q_reconstructed_m*/);
               eval_m.submit_value(flux_m, q);
               if (is_viscous)
                 eval_m.submit_gradient(grad_flux_m, q);
@@ -1506,66 +1740,7 @@ local_apply_cell_p(const dealii::MatrixFree<dim, number> &,
                          const VectorType                            &src,
                          const std::pair<unsigned int, unsigned int> &face_range) const
   {
-    auto eval_m = create_face_integrator(true, CutUtil::CellCategory::liquid, 0);
-    auto eval_p = create_face_integrator(false, CutUtil::CellCategory::liquid, 0);
 
-      EvaluationFlags::EvaluationFlags evaluation_flags =
-        dealii::EvaluationFlags::values;
-
-      for (unsigned int face = face_range.first; face < face_range.second; ++face)
-        {
-          eval_m.reinit(face);
-          eval_m.read_dof_values(src);
-
-          eval_p.reinit(face);
-          eval_p.read_dof_values(src);
-
-          //std::cout << "------" << std::endl;
-          for (unsigned int dof_number = 0; dof_number < 1; ++dof_number)
-            {
-              const auto u_m = eval_m.get_dof_value(dof_number);
-              const auto u_p = eval_p.get_dof_value(dof_number);
-
-              const auto &mat = multiphase_scratch_data.material_liquid.data;
-              const dealii::VectorizedArray<number> p_m = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_m);
-              const dealii::VectorizedArray<number> p_p = multiphase_scratch_data.material_liquid.eos_utils->calculate_thermodynamic_pressure(u_p);
-              const dealii::VectorizedArray<number> p_ave = 0.5 * (p_m + p_p);
-              const dealii::VectorizedArray<number> e_i_corrected_m = (p_ave + (mat.gamma * mat.eos_data.p_inf)) / (mat.gamma - 1.) * (1./u_m[0] - mat.eos_data.b) + mat.eos_data.q;
-              const dealii::VectorizedArray<number> e_i_corrected_p = (p_ave + (mat.gamma * mat.eos_data.p_inf)) / (mat.gamma - 1.) * (1./u_p[0] - mat.eos_data.b) + mat.eos_data.q;
-              const dealii::VectorizedArray<number> vel_m = Flow::calculate_velocity<dim, number>(u_m)[0];
-              const dealii::VectorizedArray<number> vel_p = Flow::calculate_velocity<dim, number>(u_p)[0];
-              const dealii::VectorizedArray<number> E_m = u_m[0] * (e_i_corrected_m + 0.5 * vel_m * vel_m);
-              const dealii::VectorizedArray<number> E_p = u_p[0] * (e_i_corrected_p + 0.5 * vel_p * vel_p);
-              auto u_m_new = u_m;
-			  auto u_p_new = u_p;
-
-              u_m_new[1] = u_m[1] - time_step *
-
-              /*double epsilon = 2. * 3.125e-6;
-			  u_m_new[dim+1] = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
-                                          std::abs(eval_m.quadrature_point(dof_number)[0]),
-                                          dealii::make_vectorized_array(10.*epsilon),
-                                          E_m,
-                                          u_m[2]);
-              u_p_new[dim+1] = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
-                                          std::abs(eval_p.quadrature_point(dof_number)[0]),
-                                          dealii::make_vectorized_array(10.*epsilon),
-                                          E_p,
-                                          u_p[2]);*/
-
-              /*std::cout << "u_m: " << u_m << std::endl;
-              std::cout << "u_m: " << u_p << std::endl;
-              std::cout << "u_m_new: " << u_m_new << std::endl;
-              std::cout << "u_m_new: " << u_p_new << std::endl;
-              std::cout << "diff: " << (u_m_new - u_p_new) - (u_m - u_p) << std::endl;*/
-
-
-			  eval_m.submit_dof_value(u_m_new, dof_number);
-			  eval_p.submit_dof_value(u_p_new, dof_number);
-            }
-          eval_m.set_dof_values(dst);
-          eval_p.set_dof_values(dst);
-        }
   }
 
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>

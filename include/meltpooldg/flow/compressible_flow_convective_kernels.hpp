@@ -60,7 +60,8 @@ namespace MeltPoolDG::Flow
      */
     inline DEAL_II_ALWAYS_INLINE //
       ConservedVariablesGradType
-      calculate_convective_flux(const ConservedVariablesType &conserved_variables) const;
+      calculate_convective_flux(const ConservedVariablesType &conserved_variables,
+        const dealii::VectorizedArray<number> &mean_pressure=dealii::make_vectorized_array(0.)) const;
 
     /**
      * @brief Calculate the convective numerical flux F_c^*.
@@ -77,6 +78,8 @@ namespace MeltPoolDG::Flow
         const ConservedVariablesType                                  &u_m,
         const ConservedVariablesType                                  &u_p,
         const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> &normal,
+        const dealii::VectorizedArray<number> &mean_pressure_m = dealii::make_vectorized_array(0.),
+        const dealii::VectorizedArray<number> &mean_pressure_p = dealii::make_vectorized_array(0.),
         const dealii::VectorizedArray<number> &quadrature_points = dealii::make_vectorized_array(0.)) const;
 
     /**
@@ -157,7 +160,8 @@ namespace MeltPoolDG::Flow
   inline DEAL_II_ALWAYS_INLINE //
     auto
     CompressibleFlowConvectiveKernels<dim, number>::calculate_convective_flux(
-      const ConservedVariablesType &conserved_variables) const -> ConservedVariablesGradType
+      const ConservedVariablesType &conserved_variables,
+      const dealii::VectorizedArray<number> &mean_pressure) const -> ConservedVariablesGradType
   {
     const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> velocity =
       calculate_velocity<dim, number>(conserved_variables);
@@ -183,6 +187,8 @@ namespace MeltPoolDG::Flow
       const ConservedVariablesType                                  &u_m,
       const ConservedVariablesType                                  &u_p,
       const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> &normal,
+      const dealii::VectorizedArray<number> &mean_pressure_m,
+      const dealii::VectorizedArray<number> &mean_pressure_p,
       const dealii::VectorizedArray<number> &quadrature_points) const
     -> ConservedVariablesType
   {
@@ -194,6 +200,18 @@ namespace MeltPoolDG::Flow
 
     const auto sound_speed_p = material.eos_utils->calculate_speed_of_sound(u_p);
     const auto sound_speed_m = material.eos_utils->calculate_speed_of_sound(u_m);
+
+    /*const auto pressure_m = mean_pressure_m;
+    const auto density_m  = u_m[0];
+
+    const auto sound_speed_m = std::sqrt(material.data.gamma * (pressure_m + material.data.eos_data.p_inf) /
+                     (density_m * (1. - density_m * material.data.eos_data.b)));
+
+    const auto pressure_p = mean_pressure_p;
+    const auto density_p  = u_p[0];
+
+    const auto sound_speed_p = std::sqrt(material.data.gamma * (pressure_p + material.data.eos_data.p_inf) /
+                     (density_p * (1. - density_p* material.data.eos_data.b)));*/
 
     switch (flow_data.numerical_flux_type)
       {
@@ -213,7 +231,7 @@ namespace MeltPoolDG::Flow
                    0.5 * lambda * (u_m - u_p);
           }
           case NumericalFluxType::lax_friedrichs_exact: {
-            const auto lambda = std::max(std::abs(velocity_p * normal) + sound_speed_p,
+            /*const auto lambda = std::max(std::abs(velocity_p * normal) + sound_speed_p,
                              std::abs(velocity_m * normal) + sound_speed_m);
 
             auto flux = contract_average_tensor_with_vector<CompressibleFlow::n_conserved_variables<dim>,
@@ -221,7 +239,7 @@ namespace MeltPoolDG::Flow
                                                        dealii::VectorizedArray<number>>(flux_m,
                                                                                         flux_p,
                                                                                         normal) +
-                   0.5 * lambda * (u_m - u_p);
+                   0.5 * lambda * (u_m - u_p);*/
 
             /*double epsilon = 2. * 3.125e-6;
             flux[1] += 2.0 * ((material.eos_utils->calculate_thermodynamic_pressure(u_m) -
@@ -236,7 +254,7 @@ namespace MeltPoolDG::Flow
             /*flux[2] -= 0.0 * (1./u_m[0]-material.data.eos_data.b) / (material.data.gamma - 1.) * std::abs((material.eos_utils->calculate_thermodynamic_pressure(u_m) -
               material.eos_utils->calculate_thermodynamic_pressure(u_p)));*/
 
-            return flux;
+            //return flux;
 
             /*flux[1] -= 10.0 * (material.eos_utils->calculate_thermodynamic_pressure(u_m) -
               material.eos_utils->calculate_thermodynamic_pressure(u_p));
@@ -276,7 +294,7 @@ namespace MeltPoolDG::Flow
                                       dealii::make_vectorized_array(1.),
                                       dealii::make_vectorized_array(0.));
 
-            return return_flux;
+            //return return_flux;
 
             // Splitted Rusanov fix (Effective low-Mach number improvement for upwind schemes (Shu-sheng Chen)
             /*const auto lambda = std::max(std::abs(velocity_p * normal) + sound_speed_p,
@@ -303,63 +321,106 @@ namespace MeltPoolDG::Flow
                    0.5 * lambda * (delta_Q_rho + Mach_m  * delta_Q_u);*/
 
             // HLLC Riemann solver
-            /*const dealii::VectorizedArray<number> vel_m = velocity_m[0];
-            const dealii::VectorizedArray<number> vel_p = velocity_p[0];
-            const dealii::VectorizedArray<number> u_hat = (vel_m * std::sqrt(u_m[0]) + vel_p * std::sqrt(u_p[0])) / (std::sqrt(u_m[0])+std::sqrt(u_p[0]));
-            const dealii::VectorizedArray<number> c_hat_squared = (sound_speed_m * sound_speed_m * std::sqrt(u_m[0]) + sound_speed_p * sound_speed_p * std::sqrt(u_p[0])) / (std::sqrt(u_m[0])+std::sqrt(u_p[0]))
-             + 0.5 * std::sqrt(u_m[0]) * std::sqrt(u_p[0]) / ((std::sqrt(u_m[0]) + std::sqrt(u_p[0])) * (std::sqrt(u_m[0]) + std::sqrt(u_p[0]))) * (vel_p-vel_m) * (vel_p-vel_m);
-            const dealii::VectorizedArray<number> c_hat = std::sqrt(c_hat_squared);
-            const dealii::VectorizedArray<number> s_m = std::min(vel_m - sound_speed_m, u_hat - c_hat);
-            const dealii::VectorizedArray<number> s_p = std::max(vel_p + sound_speed_p, u_hat + c_hat);
+            const dealii::VectorizedArray<number> vel_m = velocity_m * normal;
+            const dealii::VectorizedArray<number> vel_p = velocity_p * normal;
+
+            const dealii::VectorizedArray<number> rho_m = u_m[0];
+            const dealii::VectorizedArray<number> rho_p = u_p[0];
+
             const dealii::VectorizedArray<number> p_m = material.eos_utils->calculate_thermodynamic_pressure(u_m);
             const dealii::VectorizedArray<number> p_p = material.eos_utils->calculate_thermodynamic_pressure(u_p);
-            const dealii::VectorizedArray<number> s_star = (p_p - p_m + u_m[0] * vel_m * (s_m - vel_m) - u_p[0] * vel_p * (s_p - vel_p)) / (u_m[0] * (s_m - vel_m) - u_p[0] * (s_p - vel_p));
+
+            // sound speed estimates according to Davis
+            const dealii::VectorizedArray<number> s_m = std::min(vel_m - sound_speed_m, vel_p - sound_speed_p);
+            const dealii::VectorizedArray<number> s_p = std::max(vel_m + sound_speed_m, vel_p + sound_speed_p);
+
+            // pressure estimate
+            /*const dealii::VectorizedArray<number> rho_mean = 0.5 * (rho_m + rho_p);
+            const dealii::VectorizedArray<number> sound_speed_mean = 0.5 * (sound_speed_m + sound_speed_p);
+            const dealii::VectorizedArray<number> p_pvrs = 0.5 * (p_m + p_p) - 0.5 * (vel_p - vel_m) * rho_mean * sound_speed_mean;
+            const dealii::VectorizedArray<number> p_star = std::max(dealii::make_vectorized_array<number>(0.),p_pvrs);
+
+            const dealii::VectorizedArray<number> q_m = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than_or_equal>(p_star,
+                                                                   p_m,
+                                                                   dealii::make_vectorized_array<number>(1.),
+                                                                   std::sqrt(1.+(material.data.gamma +1.)/(2.*material.data.gamma)*(p_star/p_m-1.)));
+
+            const dealii::VectorizedArray<number> q_p = dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than_or_equal>(p_star,
+                                                                   p_p,
+                                                                   dealii::make_vectorized_array<number>(1.),
+                                                                   std::sqrt(1.+(material.data.gamma +1.)/(2.*material.data.gamma)*(p_star/p_p-1.)));
+
+            const dealii::VectorizedArray<number> s_m = vel_m - sound_speed_m * q_m;
+            const dealii::VectorizedArray<number> s_p = vel_p + sound_speed_p * q_p;*/
+
+            const dealii::VectorizedArray<number> S_m = (rho_p * vel_p * (s_p - vel_p)
+                                                        - rho_m * vel_m * (s_m - vel_m) + p_m - p_p) /
+                                                          (rho_p * (s_p - vel_p) - rho_m * (s_m - vel_m));
+
             dealii::Tensor<1, dim+2, dealii::VectorizedArray<number>> u_star_m;
-            u_star_m[0] = u_m[0];
-            u_star_m[1] = u_m[0] * s_star;
-            u_star_m[2] = u_m[2] + (s_star - vel_m) * (u_m[0] * s_star + p_m / (s_m - vel_m));
-            u_star_m *= (s_m - vel_m) / (s_m - s_star);
+            u_star_m[0] = dealii::make_vectorized_array<number>(1.);
+            u_star_m[1] = S_m;
+            u_star_m[2] = u_m[dim+1] / rho_m + (S_m - vel_m) * (S_m + p_m / (rho_m * (s_m - vel_m)));
+            u_star_m *= rho_m * (s_m - vel_m) / (s_m - S_m);
 
             dealii::Tensor<1, dim+2, dealii::VectorizedArray<number>> u_star_p;
-            u_star_p[0] = u_p[0];
-            u_star_p[1] = u_p[0] * s_star;
-            u_star_p[2] = u_p[2] + (s_star - vel_p) * (u_p[0] * s_star + p_p / (s_p - vel_p));
-            u_star_p *= (s_p - vel_p) / (s_p- s_star);
+            u_star_p[0] = dealii::make_vectorized_array<number>(1.);
+            u_star_p[1] = S_m;
+            u_star_p[2] = u_p[dim+1] / rho_p + (S_m - vel_p) * (S_m + p_p / (rho_p * (s_p - vel_p)));
+            u_star_p *= rho_p * (s_p - vel_p) / (s_p - S_m);
+
+            dealii::Tensor<1, dim+2, dealii::VectorizedArray<number>> flux_m_{};
+            flux_m_[0] = rho_m * vel_m;
+            flux_m_[1] = rho_m * vel_m * vel_m + p_m;
+            flux_m_[2] = vel_m * (u_m[dim+1] + p_m);
+            flux_m_ *= normal[0];
+            dealii::Tensor<1, dim+2, dealii::VectorizedArray<number>> flux_p_{};
+            flux_p_[0] = rho_p * vel_p;
+            flux_p_[1] = rho_p * vel_p * vel_p + p_p;
+            flux_p_[2] = vel_p * (u_p[dim+1] + p_p);
+            flux_p_ *= normal[0];
+
+            dealii::Tensor<1, dim+2, dealii::VectorizedArray<number>> flux_star_m = flux_m_ + s_m * (u_star_m - u_m);
+            dealii::Tensor<1, dim+2, dealii::VectorizedArray<number>> flux_star_p = flux_p_ + s_p * (u_star_p - u_p);
 
             ConservedVariablesType return_flux{};
 
             const auto zero_vec = dealii::make_vectorized_array(0.);
             const auto one_vec = dealii::make_vectorized_array(1.);
 
-            return_flux = contract_tensor_with_vector<dim + 2, dim, number>(flux_m, normal) * dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than_or_equal>(s_m,
+            auto p_star_L = p_m + rho_m*(s_m-vel_m)*(S_m-vel_m);
+
+            auto p_star_R = p_p + rho_p*(s_p-vel_p)*(S_m-vel_p);
+
+            return_flux = flux_m_ * dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than_or_equal>(s_m,
                                                                    zero_vec,
                                                                    one_vec,
                                                                    zero_vec);
 
-            return_flux += contract_tensor_with_vector<dim + 2, dim, number>(flux_p, normal) * dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than_or_equal>(s_p,
+            return_flux += flux_p_ * dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than_or_equal>(s_p,
                                                                    zero_vec,
                                                                    one_vec,
                                                                    zero_vec);
 
-            return_flux += (contract_tensor_with_vector<dim + 2, dim, number>(flux_m , normal) + s_m * (u_star_m - u_m)) * dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(s_m,
+            return_flux += flux_star_m * dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(s_m,
                                                                    zero_vec,
                                                                    dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than_or_equal>(
-                                                                     s_star,
+                                                                     S_m,
                                                                      zero_vec,
                                                                      one_vec,
                                                                      zero_vec),
                                                                    zero_vec);
 
-            return_flux += (contract_tensor_with_vector<dim + 2, dim, number>(flux_p , normal) + s_p * (u_star_p - u_p))* dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(s_p,
+            return_flux += flux_star_p * dealii::compare_and_apply_mask<dealii::SIMDComparison::greater_than>(s_p,
                                                                    zero_vec,
-                                                                   dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than_or_equal>(
-                                                                     s_star,
+                                                                   dealii::compare_and_apply_mask<dealii::SIMDComparison::less_than>(
+                                                                     S_m,
                                                                      zero_vec,
                                                                      one_vec,
                                                                      zero_vec),
                                                                    zero_vec);
 
-            return return_flux;*/
+            return return_flux;
           }
           case NumericalFluxType::harten_lax_vanleer: {
             const auto avg_velocity_normal = 0.5 * ((velocity_m + velocity_p) * normal);

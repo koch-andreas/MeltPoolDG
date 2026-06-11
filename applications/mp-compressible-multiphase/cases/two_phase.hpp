@@ -273,12 +273,12 @@ namespace MeltPoolDG::Simulation::CompressibleMultiphase
         std::make_shared<dealii::parallel::shared::Triangulation<dim>>(this->mpi_communicator);
 
       dealii::Point<dim, number> lower_left;
-      lower_left[0] = -5.e-4;
+      lower_left[0] = -2.e-4;
       for (unsigned int d = 1; d < dim; ++d)
         lower_left[d] = 0.;
 
       dealii::Point<dim, number> upper_right;
-      upper_right[0] = 5.e-4;
+      upper_right[0] = 2.e-4;
       for (unsigned int d = 1; d < dim; ++d)
         upper_right[d] = 0.;
 
@@ -363,7 +363,7 @@ namespace MeltPoolDG::Simulation::CompressibleMultiphase
       // set level-set function
       dealii::Point<dim, number> p;
       // avoid phase interface colliding with element face (bug in dealii has to be fixed)
-      p[0] = 1.;
+      p[0] = 2.5e-6;
 
       dealii::Tensor<1, dim, number> normal;
       normal[0] = -1.;
