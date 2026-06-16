@@ -65,7 +65,7 @@
       "gamma": 2.788103,
       "equation of state": {
         "type": "stiffened_gas",
-        "p inf": 786251100.0
+        "stiffening pressure": 786251100.0
       }
     },
     "cut": {

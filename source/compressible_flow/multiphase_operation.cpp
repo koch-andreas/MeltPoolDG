@@ -144,6 +144,14 @@ namespace MeltPoolDG::Multiphase
 
   template <int dim, typename number>
   void
+  CompressibleMultiphaseOperation<dim, number>::add_external_force(
+    std::shared_ptr<CompressibleFlow::ExternalFlowForce<dim, number>> external_force)
+  {
+    std::visit([&](auto &op) { op.add_external_force(std::move(external_force)); }, cmp_operator);
+  }
+
+  template <int dim, typename number>
+  void
   CompressibleMultiphaseOperation<dim, number>::attach_output_vectors(
     GenericDataOut<dim, number> &data_out) const
   {

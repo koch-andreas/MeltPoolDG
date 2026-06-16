@@ -82,9 +82,9 @@
       "thermal conductivity": 28.63,
       "equation of state": {
         "type": "noble_abel_stiffened_gas",
-        "p inf": 258134879.2,
-        "b": 0.00018759,
-        "q": -2587818.15
+        "stiffening pressure": 258134879.2,
+        "covolume": 0.00018759,
+        "heat bound": -2587818.15
       }
     }
   },

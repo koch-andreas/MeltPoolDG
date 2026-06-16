@@ -41,6 +41,24 @@ namespace MeltPoolDG::CompressibleFlow
       return this->material().specific_isobaric_heat;
     }
 
+    decltype(auto)
+    stiffening_pressure() const
+    {
+      return this->material().eos_data.stiffening_pressure;
+    }
+
+    decltype(auto)
+    heat_bound() const
+    {
+      return this->material().eos_data.heat_bound;
+    }
+
+    decltype(auto)
+    covolume() const
+    {
+      return this->material().eos_data.covolume;
+    }
+
   private:
     decltype(auto)
     material() const

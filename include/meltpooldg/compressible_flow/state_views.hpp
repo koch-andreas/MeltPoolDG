@@ -14,9 +14,8 @@
 
 /**
  * @file
- * @brief This file provides a collection of view types for the compressible  Navier–Stokes solver. The
- * This file provides a collection of view types for the compressible  Navier–Stokes solver. The
- * views offer convenient and semantically meaningful access to:
+ * @brief This file provides a collection of view types for the compressible  Navier–Stokes solver.
+ * The views offer convenient and semantically meaningful access to:
  * - Conserved variables,
  * - Their gradients,
  * - Derived primitive and thermodynamic quantities, and

@@ -24,17 +24,17 @@ namespace MeltPoolDG::CompressibleFlow
   {
     /// Parameter to model molecular attraction within condensed matter
     /// (required for stiffened_gas and noble_abel_stiffened_gas)
-    number p_inf = std::numeric_limits<number>::max();
+    number stiffening_pressure = std::numeric_limits<number>::max();
 
     /// Parameter to model the covolume of the fluid, i.e., the exclude volume
     /// due to the finite size of the molecules
     /// (required for noble_abel_stiffened_gas)
-    number b = std::numeric_limits<number>::max();
+    number covolume = std::numeric_limits<number>::max();
 
     /// Parameter to model the 'heat bound', i.e., the energy due to chemical bounds,
     /// hydrogen bondings, latent heat,...
     /// (required for noble_abel_stiffened_gas)
-    number q = std::numeric_limits<number>::min();
+    number heat_bound = std::numeric_limits<number>::min();
 
     /**
      * @brief Add EOS-specific material parameters in the parameter handler.

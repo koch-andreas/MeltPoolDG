@@ -26,7 +26,7 @@ namespace MeltPoolDG::CompressibleFlow
    *
    * @tparam dim Dimension of the considered simulation case.
    * @tparam number Floating point format type.
-   * @tparam is_viscous Indicates whether the flow is viscous.
+   * @tparam n_species The number of species in a multi-component case. The default value is 1 for a single-component flow.
    */
   template <int dim, typename number, int n_species = 1>
   class DGOperatorExplicit final : public DGOperatorBase<dim, number, n_species>
@@ -59,7 +59,6 @@ namespace MeltPoolDG::CompressibleFlow
      *
      * @param flow_scratch_data Reference to the flow scratch data object (usually owned by the
      * corresponding operation class).
-     * @param external_forces Pointer to a struct implementing external forces acting on the fluid.
      */
     explicit DGOperatorExplicit(OperationScratchData<dim, number> &flow_scratch_data);
 
@@ -106,6 +105,11 @@ namespace MeltPoolDG::CompressibleFlow
                    const VectorType                                      &src,
                    const std::function<void(unsigned int, unsigned int)> &func) const;
 
+    /**
+     * @brief Add external fluid forces (e.g. gravity, ...).
+     *
+     * @param external_force A provided shared pointer to an external force definition.
+     */
     void
     add_external_force(std::shared_ptr<ExternalFlowForce<dim, number, n_species>> external_force,
                        std::shared_ptr<ExternalFlowForceJacobian<dim, number, n_species>>) override;

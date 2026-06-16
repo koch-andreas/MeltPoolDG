@@ -639,19 +639,19 @@
                 "equation of state": {
                   "type": "object",
                   "properties": {
-                    "p inf": {
+                    "stiffening pressure": {
                       "type": "number",
                       "minimum": 0.0,
                       "description": "Numerical EOS parameter to model the molecular attraction within condensed matter. The variable is required for the stiffened gas EOS and the Noble-Abel stiffened gas EOS. The minimum value is 0.",
                       "default": 1.79769e+308
                     },
-                    "b": {
+                    "covolume": {
                       "type": "number",
                       "minimum": 0.0,
                       "description": "Numerical EOS parameter to model the covolume of the fluid, i.e., the exclude volume due to the finite size of the molecules. The variable is required for the Noble-Abel stiffened gas EOS. The minimum value is 0.",
                       "default": 1.79769e+308
                     },
-                    "q": {
+                    "heat bound": {
                       "anyOf": [
                         {
                           "type": "string"
@@ -718,19 +718,19 @@
             "equation of state": {
               "type": "object",
               "properties": {
-                "p inf": {
+                "stiffening pressure": {
                   "type": "number",
                   "minimum": 0.0,
                   "description": "Numerical EOS parameter to model the molecular attraction within condensed matter. The variable is required for the stiffened gas EOS and the Noble-Abel stiffened gas EOS. The minimum value is 0.",
                   "default": 1.79769e+308
                 },
-                "b": {
+                "covolume": {
                   "type": "number",
                   "minimum": 0.0,
                   "description": "Numerical EOS parameter to model the covolume of the fluid, i.e., the exclude volume due to the finite size of the molecules. The variable is required for the Noble-Abel stiffened gas EOS. The minimum value is 0.",
                   "default": 1.79769e+308
                 },
-                "q": {
+                "heat bound": {
                   "anyOf": [
                     {
                       "type": "string"
@@ -797,19 +797,19 @@
                 "equation of state": {
                   "type": "object",
                   "properties": {
-                    "p inf": {
+                    "stiffening pressure": {
                       "type": "number",
                       "minimum": 0.0,
                       "description": "Numerical EOS parameter to model the molecular attraction within condensed matter. The variable is required for the stiffened gas EOS and the Noble-Abel stiffened gas EOS. The minimum value is 0.",
                       "default": 1.79769e+308
                     },
-                    "b": {
+                    "covolume": {
                       "type": "number",
                       "minimum": 0.0,
                       "description": "Numerical EOS parameter to model the covolume of the fluid, i.e., the exclude volume due to the finite size of the molecules. The variable is required for the Noble-Abel stiffened gas EOS. The minimum value is 0.",
                       "default": 1.79769e+308
                     },
-                    "q": {
+                    "heat bound": {
                       "anyOf": [
                         {
                           "type": "string"

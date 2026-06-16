@@ -18,23 +18,23 @@ MeltPoolDG::CompressibleFlow::EOSData<number>::add_parameters(dealii::ParameterH
   prm.enter_subsection("equation of state");
   {
     prm.add_parameter(
-      "p inf",
-      p_inf,
+      "stiffening pressure",
+      stiffening_pressure,
       "Numerical EOS parameter to model the "
       "molecular attraction within condensed matter. The variable is required for the "
       "stiffened gas EOS and the Noble-Abel stiffened gas EOS. The minimum value is 0.",
       dealii::Patterns::Double(0., std::numeric_limits<number>::max()));
     prm.add_parameter(
-      "b",
-      b,
+      "covolume",
+      covolume,
       "Numerical EOS parameter to model the covolume "
       "of the fluid, i.e., the exclude volume due to the finite size of the molecules. "
       "The variable is required for the Noble-Abel stiffened gas EOS. "
       "The minimum value is 0.",
       dealii::Patterns::Double(0., std::numeric_limits<number>::max()));
     prm.add_parameter(
-      "q",
-      q,
+      "heat bound",
+      heat_bound,
       "Numerical EOS parameter to model the "
       "'heat bound', i.e., the energy due to chemical bounds, hydrogen bondings, "
       "latent heat,.... The variable is required for the Noble-Abel stiffened gas EOS. The "
@@ -50,12 +50,12 @@ MeltPoolDG::CompressibleFlow::EOSData<number>::post(const EquationOfState eos_ty
 {
   // Ensure that parameters are set for advanced equations of state
   if (eos_type == EquationOfState::stiffened_gas)
-    AssertThrow(p_inf != std::numeric_limits<number>::max(),
+    AssertThrow(stiffening_pressure != std::numeric_limits<number>::max(),
                 dealii::ExcMessage("The parameter p_inf is required for the stiffened gas EOS."));
   else if (eos_type == EquationOfState::noble_abel_stiffened_gas)
-    AssertThrow(p_inf != std::numeric_limits<number>::max() and
-                  b != std::numeric_limits<number>::max() and
-                  q != std::numeric_limits<number>::min(),
+    AssertThrow(stiffening_pressure != std::numeric_limits<number>::max() and
+                  covolume != std::numeric_limits<number>::max() and
+                  heat_bound != std::numeric_limits<number>::min(),
                 dealii::ExcMessage(
                   "The parameters p_inf, b and q are required for the Noble-Abel stiffened"
                   " gas EOS."));

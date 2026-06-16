@@ -63,7 +63,7 @@
       "gamma": 2.788103,
       "eos type": "stiffened_gas",
       "equation of state": {
-        "p inf": 786251100.0
+        "stiffening pressure": 786251100.0
       }
     },
     "cut": {

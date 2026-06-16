@@ -769,7 +769,7 @@
                 },
                 "equation of state":
                 {
-                    "p inf":
+                    "stiffening pressure":
                     {
                         "value": "1.79769e+308",
                         "default_value": "1.79769e+308",
@@ -778,7 +778,7 @@
                         "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
                         "actions": "64"
                     },
-                    "b":
+                    "covolume":
                     {
                         "value": "1.79769e+308",
                         "default_value": "1.79769e+308",
@@ -787,7 +787,7 @@
                         "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
                         "actions": "65"
                     },
-                    "q":
+                    "heat bound":
                     {
                         "value": "2.22507e-308",
                         "default_value": "2.22507e-308",
@@ -863,7 +863,7 @@
             },
             "equation of state":
             {
-                "p inf":
+                "stiffening pressure":
                 {
                     "value": "1.79769e+308",
                     "default_value": "1.79769e+308",
@@ -872,7 +872,7 @@
                     "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
                     "actions": "74"
                 },
-                "b":
+                "covolume":
                 {
                     "value": "1.79769e+308",
                     "default_value": "1.79769e+308",
@@ -881,7 +881,7 @@
                     "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
                     "actions": "75"
                 },
-                "q":
+                "heat bound":
                 {
                     "value": "2.22507e-308",
                     "default_value": "2.22507e-308",
@@ -958,7 +958,7 @@
                 },
                 "equation of state":
                 {
-                    "p inf":
+                    "stiffening pressure":
                     {
                         "value": "1.79769e+308",
                         "default_value": "1.79769e+308",
@@ -967,7 +967,7 @@
                         "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
                         "actions": "84"
                     },
-                    "b":
+                    "covolume":
                     {
                         "value": "1.79769e+308",
                         "default_value": "1.79769e+308",
@@ -976,7 +976,7 @@
                         "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
                         "actions": "85"
                     },
-                    "q":
+                    "heat bound":
                     {
                         "value": "2.22507e-308",
                         "default_value": "2.22507e-308",

@@ -4,10 +4,11 @@
 
 #include <meltpooldg/compressible_flow/convective_kernels.hpp>
 #include <meltpooldg/compressible_flow/data_types.hpp>
+#include <meltpooldg/compressible_flow/kernels.hpp>
 #include <meltpooldg/compressible_flow/multiphase_level_set_advection.hpp>
-#include <meltpooldg/compressible_flow/viscous_kernels.hpp>
 #include <meltpooldg/cut/util.hpp>
 #include <meltpooldg/phase_change/evaporation_model_knight.hpp>
+#include <meltpooldg/utilities/dg_generic_convection_diffusion_worker.hpp>
 #include <meltpooldg/utilities/vector_tools.hpp>
 
 namespace MeltPoolDG::Multiphase
@@ -31,6 +32,19 @@ namespace MeltPoolDG::Multiphase
     using ConservedVariablesType = CompressibleFlow::ConservedVariablesType<dim, number>;
     using ConservedVariablesGradType =
       CompressibleFlow::ConservedVariablesGradientType<dim, number>;
+
+    using FlowFluxType   = CompressibleFlow::FluxType<dim, number>;
+    using FlowSourceType = CompressibleFlow::SourceType<dim, number>;
+
+    using ConvectiveKernel = CompressibleFlow::
+      ConvectiveFlux<dim, number, ConservedVariablesType, ConservedVariablesGradType>;
+    using DiffusiveKernel = CompressibleFlow::
+      DiffusiveFlux<dim, number, ConservedVariablesType, ConservedVariablesGradType, FlowFluxType>;
+
+    using ConvectionDiffusionOperator =
+      Utils::DGConvectionDiffusionOperator<dim, number, ConvectiveKernel, DiffusiveKernel>;
+
+    using ConvectionOperator = Utils::DGConvectionOperator<dim, number, ConvectiveKernel>;
 
     /**
      * @brief Constructor.
@@ -144,13 +158,13 @@ namespace MeltPoolDG::Multiphase
      * @brief Function for the matrix-free right-hand side vector evaluation.
      *
      * @param time Current simulation time.
-     * @param time_step Current time step size.
+     * @param time_step_in Current time step size.
      * @param dst Vector where the computed right-hand side rhs(src) is stored.
      * @param src The solution vector at the current time.
      */
     void
     create_rhs(const number     &time,
-               const number     &time_step,
+               const number     &time_step_in,
                VectorType       &dst,
                const VectorType &src) const;
 
@@ -174,21 +188,18 @@ namespace MeltPoolDG::Multiphase
       current_time = current_time_in;
     };
 
+    /**
+     * @brief Add external fluid forces (e.g. gravity, ...).
+     *
+     * @param external_force A provided shared pointer to an external force definition.
+     */
+    void
+    add_external_force(
+      std::shared_ptr<CompressibleFlow::ExternalFlowForce<dim, number>> external_force);
+
   private:
     /// Scratch data for multiphase case
     CompressibleFlow::MultiphaseOperationScratchData<dim, number> &multiphase_scratch_data;
-
-    /// Object for the convective term evaluations for the liquid phase
-    const CompressibleFlow::ConvectiveKernels<dim, number> convective_terms_liquid;
-
-    /// Object for the convective term evaluations for the gas phase
-    const CompressibleFlow::ConvectiveKernels<dim, number> convective_terms_gas;
-
-    /// Object for the viscous term evaluations for the liquid phase
-    const CompressibleFlow::ViscousKernels<dim, number> viscous_terms_liquid;
-
-    /// Object for the viscous term evaluations for the gas phase
-    const CompressibleFlow::ViscousKernels<dim, number> viscous_terms_gas;
 
     /// Mapping information for integration over the phase interface
     const MappingInfoType &mapping_info_interface;
@@ -208,6 +219,13 @@ namespace MeltPoolDG::Multiphase
     /// Weighting factors for Nitsche-type viscous interface flux
     number visc_ave_weight_phase_liquid;
     number visc_ave_weight_phase_gas;
+
+    /// This pointer may hold an instance of an external fluid force contribution
+    /// (e.g., gravity, body forces, or user - defined source terms)
+    std::vector<std::shared_ptr<CompressibleFlow::ExternalFlowForce<dim, number>>> external_forces;
+
+    /// Current time step size
+    mutable number time_step = 0.;
 
     /// Inverse time step size
     mutable number inv_time_step = 0.;

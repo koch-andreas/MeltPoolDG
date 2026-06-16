@@ -71,9 +71,9 @@
       "gamma": 1.4355,
       "eos type": "noble_abel_stiffened_gas",
       "equation of state": {
-        "p inf": 11587000000.0,
-        "b": 0.00018759,
-        "q": -607968.8
+        "stiffening pressure": 11587000000.0,
+        "covolume": 0.00018759,
+        "heat bound": -607968.8
       }
     }
   },

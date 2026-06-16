@@ -11,6 +11,7 @@
 #include <meltpooldg/compressible_flow/operation_scratch_data.hpp>
 #include <meltpooldg/compressible_flow/utils.hpp>
 #include <meltpooldg/cut/util.hpp>
+#include <meltpooldg/utilities/matrix_free_util.hpp>
 #include <meltpooldg/utilities/preprocessor_directives.hpp>
 
 
@@ -27,11 +28,6 @@ namespace MeltPoolDG::Multiphase
       const MappingInfoVectorType &mapping_info_cells_in,
       const MappingInfoVectorType &mapping_info_faces_in)
     : multiphase_scratch_data(multiphase_scratch_data)
-    , convective_terms_liquid(multiphase_scratch_data.flow_data,
-                              multiphase_scratch_data.material_liquid)
-    , convective_terms_gas(multiphase_scratch_data.flow_data, multiphase_scratch_data.material_gas)
-    , viscous_terms_liquid(multiphase_scratch_data.material_liquid)
-    , viscous_terms_gas(multiphase_scratch_data.material_gas)
     , mapping_info_interface(mapping_info_interface_in)
     , mapping_info_cells(mapping_info_cells_in)
     , mapping_info_faces(mapping_info_faces_in)
@@ -93,14 +89,25 @@ namespace MeltPoolDG::Multiphase
 
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
   void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+    add_external_force(
+      std::shared_ptr<CompressibleFlow::ExternalFlowForce<dim, number>> external_force)
+  {
+    Assert(external_force != nullptr, dealii::ExcInternalError());
+    external_forces.push_back(external_force);
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
   CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::create_rhs(
     const number     &time,
-    const number     &time_step,
+    const number     &time_step_in,
     VectorType       &dst,
     const VectorType &src) const
   {
-    Assert(time_step > 0., dealii::ExcMessage("Time step size must be larger than 0!"));
-    inv_time_step = 1. / time_step;
+    Assert(time_step_in > 0., dealii::ExcMessage("Time step size must be larger than 0!"));
+    inv_time_step = 1. / time_step_in;
+    time_step     = time_step_in;
 
     using local_applier_type =
       std::function<void(const MatrixFree<dim, number> &,
@@ -128,91 +135,88 @@ namespace MeltPoolDG::Multiphase
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
   void
   CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
-    local_apply_cell_rhs(const dealii::MatrixFree<dim, number> &,
-                         VectorType                          &dst,
-                         const VectorType                    &src,
-                         const std::pair<unsigned, unsigned> &cell_range) const
+    local_apply_cell_rhs(const dealii::MatrixFree<dim, number> &matrix_free,
+                         VectorType                            &dst,
+                         const VectorType                      &src,
+                         const std::pair<unsigned, unsigned>   &cell_range) const
   {
     const auto cell_category =
       multiphase_scratch_data.scratch_data.get_cell_range_category(cell_range);
 
-    dealii::Tensor<1, dim, dealii::VectorizedArray<number>> constant_body_force;
-    const Functions::ConstantFunction<dim>                 *constant_function =
-      dynamic_cast<Functions::ConstantFunction<dim> *>(multiphase_scratch_data.body_force.get());
-
-    if (constant_function)
-      constant_body_force = VectorTools::evaluate_function_at_vectorized_points(
-        *constant_function, dealii::Point<dim, dealii::VectorizedArray<number>>());
-
     // lambda function for cell integral
-    auto process_cell =
-      [&]<bool is_gas_phase, bool is_viscous, typename IntegratorType>(IntegratorType &eval,
-                                                                       const auto &convective_terms,
-                                                                       const auto &viscous_terms) {
-        for (const unsigned int q : eval.quadrature_point_indices())
-          {
-            const auto [force, grad_flux] =
-              CompressibleFlow::rhs_cell_integral_kernel<dim, number, IntegratorType, is_viscous>(
-                eval,
-                q,
-                constant_function ? &constant_body_force : nullptr,
-                convective_terms,
-                viscous_terms,
-                multiphase_scratch_data.body_force);
+    auto process_cell = [&]<bool is_gas_phase, bool is_viscous, typename IntegratorType>(
+                          IntegratorType &eval, const auto &material, const auto &cell) {
+      std::vector<dealii::TriaIterator<dealii::CellAccessor<dim>>> cell_iterators =
+        cells_in_cell_batch(matrix_free, cell);
 
-            ConservedVariablesType darcy_damping{};
+      for (const unsigned int q : eval.quadrature_point_indices())
+        {
+          FlowSourceType flux;
+          FlowFluxType   grad_flux;
 
-            // TODO: use DarcyDampingOperation
-            if (!is_gas_phase and
-                multiphase_scratch_data.phase_change.solid_liquid.use_darcy_damping)
-              {
-                const auto w        = eval.get_value(q);
-                const auto velocity = CompressibleFlow::calculate_velocity<dim, number>(w);
-                const auto temperature =
-                  multiphase_scratch_data.material_liquid.eos_utils->calculate_temperature(w);
+          if (is_viscous)
+            grad_flux = ConvectionDiffusionOperator::cell(eval.get_value(q),
+                                                          eval.get_gradient(q),
+                                                          ConvectiveKernel(material.data),
+                                                          DiffusiveKernel(material.data));
+          else
+            grad_flux =
+              ConvectionOperator::cell(eval.get_value(q), ConvectiveKernel(material.data));
 
-                const VectorizedArray<number> T_liquidus_vec = dealii::make_vectorized_array(
-                  multiphase_scratch_data.phase_change.solid_liquid.liquidus_temperature);
-                const VectorizedArray<number> T_solidus_vec = dealii::make_vectorized_array(
-                  multiphase_scratch_data.phase_change.solid_liquid.solidus_temperature);
+          // consider mass term
+          flux = eval.get_value(q) * inv_time_step;
 
-                VectorizedArray<number> liquid_fraction =
-                  (temperature - T_solidus_vec) / (T_liquidus_vec - T_solidus_vec);
+          ConservedVariablesType darcy_damping{};
 
-                // liquid fraction is bounded [0;1]
-                liquid_fraction =
-                  std::min(std::max(liquid_fraction,
-                                    dealii::make_vectorized_array<VectorizedArray<number>>(0.)),
-                           dealii::make_vectorized_array<VectorizedArray<number>>(1.));
+          // TODO: use DarcyDampingOperation
+          if (!is_gas_phase and multiphase_scratch_data.phase_change.solid_liquid.use_darcy_damping)
+            {
+              const auto w        = eval.get_value(q);
+              const auto velocity = CompressibleFlow::calculate_velocity<dim, number>(w);
+              const auto temperature =
+                multiphase_scratch_data.material_liquid.eos_utils->calculate_temperature(w);
 
-                const VectorizedArray<number> solid_fraction = 1. - liquid_fraction;
+              const VectorizedArray<number> T_liquidus_vec = dealii::make_vectorized_array(
+                multiphase_scratch_data.phase_change.solid_liquid.liquidus_temperature);
+              const VectorizedArray<number> T_solidus_vec = dealii::make_vectorized_array(
+                multiphase_scratch_data.phase_change.solid_liquid.solidus_temperature);
 
-                const VectorizedArray<number> darcy_damping_coefficient =
-                  -multiphase_scratch_data.darcy_damping.mushy_zone_morphology * solid_fraction *
-                  solid_fraction /
-                  (liquid_fraction * liquid_fraction * liquid_fraction +
-                   multiphase_scratch_data.darcy_damping.avoid_div_zero_constant);
+              VectorizedArray<number> liquid_fraction =
+                (temperature - T_solidus_vec) / (T_liquidus_vec - T_solidus_vec);
 
-                // contribution to momentum equation
-                darcy_damping[1] = darcy_damping_coefficient * velocity[0];
+              // liquid fraction is bounded [0;1]
+              liquid_fraction =
+                std::min(std::max(liquid_fraction,
+                                  dealii::make_vectorized_array<VectorizedArray<number>>(0.)),
+                         dealii::make_vectorized_array<VectorizedArray<number>>(1.));
 
-                // contribution to energy equation
-                darcy_damping[2] = darcy_damping[1] * velocity[0];
-              }
+              const VectorizedArray<number> solid_fraction = 1. - liquid_fraction;
 
-            // consider mass term
-            ConservedVariablesType flux = eval.get_value(q) * inv_time_step;
+              const VectorizedArray<number> darcy_damping_coefficient =
+                -multiphase_scratch_data.darcy_damping.mushy_zone_morphology * solid_fraction *
+                solid_fraction /
+                (liquid_fraction * liquid_fraction * liquid_fraction +
+                 multiphase_scratch_data.darcy_damping.avoid_div_zero_constant);
 
-            if (multiphase_scratch_data.phase_change.solid_liquid.use_darcy_damping)
+              // contribution to momentum equation
+              darcy_damping[1] = darcy_damping_coefficient * velocity[0];
+
+              // contribution to energy equation
+              darcy_damping[2] = darcy_damping[1] * velocity[0];
+
               flux += darcy_damping;
+            }
 
-            if (multiphase_scratch_data.body_force.get() != nullptr)
-              flux += force;
+          for (auto &external_force : external_forces)
+            flux += external_force->value(time_step,
+                                          cell_iterators,
+                                          eval.quadrature_point(q),
+                                          eval.get_value(q));
 
-            eval.submit_value(flux, q);
-            eval.submit_gradient(grad_flux, q);
-          }
-      };
+          eval.submit_value(flux, q);
+          eval.submit_gradient(grad_flux, q);
+        }
+    };
 
     switch (cell_category)
       {
@@ -225,9 +229,8 @@ namespace MeltPoolDG::Multiphase
                                             EvaluationFlags::values |
                                               (is_viscous_liquid ? EvaluationFlags::gradients :
                                                                    EvaluationFlags::nothing));
-                process_cell.template operator()<false, is_viscous_liquid>(eval_liquid,
-                                                                           convective_terms_liquid,
-                                                                           viscous_terms_liquid);
+                process_cell.template operator()<false, is_viscous_liquid>(
+                  eval_liquid, multiphase_scratch_data.material_liquid, cell);
                 eval_liquid.integrate_scatter(EvaluationFlags::values | EvaluationFlags::gradients,
                                               dst);
               }
@@ -242,9 +245,8 @@ namespace MeltPoolDG::Multiphase
                                          EvaluationFlags::values |
                                            (is_viscous_gas ? EvaluationFlags::gradients :
                                                              EvaluationFlags::nothing));
-                process_cell.template operator()<true, is_viscous_gas>(eval_gas,
-                                                                       convective_terms_gas,
-                                                                       viscous_terms_gas);
+                process_cell.template operator()<true, is_viscous_gas>(
+                  eval_gas, multiphase_scratch_data.material_gas, cell);
                 eval_gas.integrate_scatter(EvaluationFlags::values | EvaluationFlags::gradients,
                                            dst);
               }
@@ -321,7 +323,7 @@ namespace MeltPoolDG::Multiphase
 
                     // do domain integral in liquid phase
                     process_cell.template operator()<false, is_viscous_liquid>(
-                      eval_point_liquid, convective_terms_liquid, viscous_terms_liquid);
+                      eval_point_liquid, multiphase_scratch_data.material_liquid, cell_batch);
 
                     eval_point_liquid.integrate(
                       StridedArrayView<number, n_lanes>(
@@ -329,9 +331,8 @@ namespace MeltPoolDG::Multiphase
                       EvaluationFlags::values | EvaluationFlags::gradients);
 
                     // do domain integral in gas phase
-                    process_cell.template operator()<true, is_viscous_gas>(eval_point_gas,
-                                                                           convective_terms_gas,
-                                                                           viscous_terms_gas);
+                    process_cell.template operator()<true, is_viscous_gas>(
+                      eval_point_gas, multiphase_scratch_data.material_gas, cell_batch);
 
                     eval_point_gas.integrate(StridedArrayView<number, n_lanes>(
                                                &eval_gas_intersected.begin_dof_values()[0][lane],
@@ -379,8 +380,6 @@ namespace MeltPoolDG::Multiphase
                                                             grad_w_liquid,
                                                             grad_w_gas,
                                                             multiphase_scratch_data,
-                                                            viscous_terms_liquid,
-                                                            viscous_terms_gas,
                                                             m_dot_evap,
                                                             laser_heat_source);
 
@@ -439,8 +438,8 @@ namespace MeltPoolDG::Multiphase
                                 w_liquid,
                                 w_gas,
                                 normal,
-                                convective_terms_liquid,
-                                convective_terms_gas,
+                                ConvectiveKernel(multiphase_scratch_data.material_liquid.data),
+                                ConvectiveKernel(multiphase_scratch_data.material_gas.data),
                                 multiphase_scratch_data,
                                 m_dot_evap);
 
@@ -477,8 +476,9 @@ namespace MeltPoolDG::Multiphase
                                         visc_ave_weight_phase_gas,
                                         multiphase_scratch_data.phase_coupling.hllp0_and_sipg
                                           .interior_penalty_parameter_interface,
-                                        viscous_terms_liquid,
-                                        viscous_terms_gas,
+                                        DiffusiveKernel(
+                                          multiphase_scratch_data.material_liquid.data),
+                                        DiffusiveKernel(multiphase_scratch_data.material_gas.data),
                                         multiphase_scratch_data,
                                         multiphase_scratch_data.scratch_data.get_min_cell_size(),
                                         m_dot_evap,
@@ -506,8 +506,9 @@ namespace MeltPoolDG::Multiphase
                                         normal,
                                         visc_ave_weight_phase_liquid,
                                         visc_ave_weight_phase_gas,
-                                        viscous_terms_liquid,
-                                        viscous_terms_gas,
+                                        DiffusiveKernel(
+                                          multiphase_scratch_data.material_liquid.data),
+                                        DiffusiveKernel(multiphase_scratch_data.material_gas.data),
                                         multiphase_scratch_data,
                                         multiphase_scratch_data.scratch_data.get_min_cell_size(),
                                         m_dot_evap,
@@ -532,16 +533,17 @@ namespace MeltPoolDG::Multiphase
                                     dim,
                                     number,
                                     ConservedVariablesType,
-                                    ConservedVariablesGradType>(w_liquid,
-                                                                w_gas,
-                                                                normal,
-                                                                visc_ave_weight_phase_liquid,
-                                                                visc_ave_weight_phase_gas,
-                                                                viscous_terms_liquid,
-                                                                viscous_terms_gas,
-                                                                multiphase_scratch_data,
-                                                                m_dot_evap,
-                                                                delta_T);
+                                    ConservedVariablesGradType>(
+                                    w_liquid,
+                                    w_gas,
+                                    normal,
+                                    visc_ave_weight_phase_liquid,
+                                    visc_ave_weight_phase_gas,
+                                    DiffusiveKernel(multiphase_scratch_data.material_liquid.data),
+                                    DiffusiveKernel(multiphase_scratch_data.material_gas.data),
+                                    multiphase_scratch_data,
+                                    m_dot_evap,
+                                    delta_T);
 
                                 eval_point_interface_liquid.submit_gradient(
                                   -numerical_flux_gradient_liquid, q);
@@ -597,8 +599,7 @@ namespace MeltPoolDG::Multiphase
 
     auto process_bulk_face_range = [&]<bool is_viscous>(auto &eval_m,
                                                         auto &eval_p,
-                                                        auto &convective_terms,
-                                                        auto &viscous_terms) {
+                                                        auto &material) {
       const auto eval_flags = EvaluationFlags::values |
                               (is_viscous ? EvaluationFlags::gradients : EvaluationFlags::nothing);
       for (unsigned int face = face_range.first; face < face_range.second; ++face)
@@ -611,7 +612,7 @@ namespace MeltPoolDG::Multiphase
 
           const auto interior_penalty_parameter =
             is_viscous ?
-              0.5 *
+              0.5 * material.data.dynamic_viscosity / material.data.reference_density *
                 std::max(eval_m.read_cell_data(multiphase_scratch_data.interior_penalty_parameter),
                          eval_p.read_cell_data(
                            multiphase_scratch_data.interior_penalty_parameter)) :
@@ -619,21 +620,40 @@ namespace MeltPoolDG::Multiphase
 
           for (const unsigned int q : eval_m.quadrature_point_indices())
             {
-              const auto [flux_m, flux_p, grad_flux_m, grad_flux_p] =
-                MeltPoolDG::CompressibleFlow::rhs_face_integral_kernel<
-                  dim,
-                  number,
-                  FEFaceIntegrator<dim, dim + 2, number>,
-                  is_viscous>(
-                  eval_m, eval_p, q, interior_penalty_parameter, convective_terms, viscous_terms);
+              CompressibleFlow::FaceFluxType<dim, number> flux_m;
+              CompressibleFlow::FaceFluxType<dim, number> flux_p;
+
+              if (is_viscous)
+                {
+                  const auto flux =
+                    ConvectionDiffusionOperator::face(eval_m.get_value(q),
+                                                      eval_p.get_value(q),
+                                                      eval_m.get_gradient(q),
+                                                      eval_p.get_gradient(q),
+                                                      eval_m.normal_vector(q),
+                                                      interior_penalty_parameter,
+                                                      ConvectiveKernel(material.data),
+                                                      DiffusiveKernel(material.data));
+
+                  flux_m = flux.inner_face_value;
+                  flux_p = flux.outer_face_value;
+
+                  eval_m.submit_gradient(flux.inner_face_gradient, q);
+                  eval_p.submit_gradient(flux.outer_face_gradient, q);
+                }
+              else
+                {
+                  const auto flux = ConvectionOperator::face(eval_m.get_value(q),
+                                                             eval_p.get_value(q),
+                                                             eval_m.normal_vector(q),
+                                                             ConvectiveKernel(material.data));
+
+                  flux_m = flux.inner_face_value;
+                  flux_p = flux.outer_face_value;
+                }
 
               eval_m.submit_value(flux_m, q);
               eval_p.submit_value(flux_p, q);
-              if (is_viscous)
-                {
-                  eval_m.submit_gradient(grad_flux_m, q);
-                  eval_p.submit_gradient(grad_flux_p, q);
-                }
             }
           eval_m.integrate_scatter(eval_flags, dst);
           eval_p.integrate_scatter(eval_flags, dst);
@@ -643,8 +663,7 @@ namespace MeltPoolDG::Multiphase
     auto process_intersected_face_range = [&]<bool is_viscous>(auto              &eval_m_int,
                                                                auto              &eval_p_int,
                                                                const unsigned int mapping_idx,
-                                                               const auto        &convective_terms,
-                                                               const auto        &viscous_terms) {
+                                                               auto              &material) {
       FEFacePointEvaluation<dim + 2, dim, dim, VectorizedArray<number>> eval_point_m(
         *mapping_info_faces[mapping_idx], fe_point_temp);
       FEFacePointEvaluation<dim + 2, dim, dim, VectorizedArray<number>> eval_point_p(
@@ -683,33 +702,50 @@ namespace MeltPoolDG::Multiphase
 
               // factor 0.5 for interior face
               const dealii::VectorizedArray<number> interior_penalty_parameter =
-                is_viscous ? 0.5 * std::max(eval_m_int.read_cell_data(
-                                              multiphase_scratch_data.interior_penalty_parameter),
-                                            eval_p_int.read_cell_data(
-                                              multiphase_scratch_data.interior_penalty_parameter)) :
-                             0.;
+                is_viscous ?
+                  0.5 * material.data.dynamic_viscosity / material.data.reference_density *
+                    std::max(eval_m_int.read_cell_data(
+                               multiphase_scratch_data.interior_penalty_parameter),
+                             eval_p_int.read_cell_data(
+                               multiphase_scratch_data.interior_penalty_parameter)) :
+                  0.;
 
               for (const unsigned int q : eval_point_m.quadrature_point_indices())
                 {
-                  const auto [flux_m, flux_p, grad_flux_m, grad_flux_p] =
-                    MeltPoolDG::CompressibleFlow::rhs_face_integral_kernel<
-                      dim,
-                      number,
-                      FEFacePointEvaluation<dim + 2, dim, dim, VectorizedArray<number>>,
-                      is_viscous>(eval_point_m,
-                                  eval_point_p,
-                                  q,
-                                  interior_penalty_parameter,
-                                  convective_terms,
-                                  viscous_terms);
+                  CompressibleFlow::FaceFluxType<dim, number> flux_m;
+                  CompressibleFlow::FaceFluxType<dim, number> flux_p;
 
-                  eval_point_m.submit_value(flux_m, q);
-                  eval_point_p.submit_value(flux_p, q);
                   if (is_viscous)
                     {
-                      eval_point_m.submit_gradient(grad_flux_m, q);
-                      eval_point_p.submit_gradient(grad_flux_p, q);
+                      const auto flux =
+                        ConvectionDiffusionOperator::face(eval_m_int.get_value(q),
+                                                          eval_p_int.get_value(q),
+                                                          eval_m_int.get_gradient(q),
+                                                          eval_p_int.get_gradient(q),
+                                                          eval_m_int.normal_vector(q),
+                                                          interior_penalty_parameter,
+                                                          ConvectiveKernel(material.data),
+                                                          DiffusiveKernel(material.data));
+
+                      flux_m = flux.inner_face_value;
+                      flux_p = flux.outer_face_value;
+
+                      eval_m_int.submit_gradient(flux.inner_face_gradient, q);
+                      eval_p_int.submit_gradient(flux.outer_face_gradient, q);
                     }
+                  else
+                    {
+                      const auto flux = ConvectionOperator::face(eval_m_int.get_value(q),
+                                                                 eval_p_int.get_value(q),
+                                                                 eval_m_int.normal_vector(q),
+                                                                 ConvectiveKernel(material.data));
+
+                      flux_m = flux.inner_face_value;
+                      flux_p = flux.outer_face_value;
+                    }
+
+                  eval_m_int.submit_value(flux_m, q);
+                  eval_p_int.submit_value(flux_p, q);
                 }
 
               eval_point_m.integrate_in_face(&eval_m_int.get_scratch_data().begin()[0][lane],
@@ -732,10 +768,8 @@ namespace MeltPoolDG::Multiphase
           case CutUtil::FaceType::inside_face_liquid: {
             auto [eval_liquid_m, eval_liquid_p] =
               create_face_integrators(CutUtil::CellCategory::liquid, 0);
-            process_bulk_face_range.template operator()<is_viscous_liquid>(eval_liquid_m,
-                                                                           eval_liquid_p,
-                                                                           convective_terms_liquid,
-                                                                           viscous_terms_liquid);
+            process_bulk_face_range.template operator()<is_viscous_liquid>(
+              eval_liquid_m, eval_liquid_p, multiphase_scratch_data.material_liquid);
           }
           break;
 
@@ -744,10 +778,7 @@ namespace MeltPoolDG::Multiphase
               create_face_integrator(false, CutUtil::CellCategory::intersected, 0);
             auto eval_liquid_m = create_face_integrator(true, CutUtil::CellCategory::liquid, 0);
             process_bulk_face_range.template operator()<is_viscous_liquid>(
-              eval_liquid_m,
-              eval_liquid_p_intersected,
-              convective_terms_liquid,
-              viscous_terms_liquid);
+              eval_liquid_m, eval_liquid_p_intersected, multiphase_scratch_data.material_liquid);
           }
           break;
 
@@ -756,20 +787,15 @@ namespace MeltPoolDG::Multiphase
               create_face_integrator(true, CutUtil::CellCategory::intersected, 0);
             auto eval_liquid_p = create_face_integrator(false, CutUtil::CellCategory::liquid, 0);
             process_bulk_face_range.template operator()<is_viscous_liquid>(
-              eval_liquid_m_intersected,
-              eval_liquid_p,
-              convective_terms_liquid,
-              viscous_terms_liquid);
+              eval_liquid_m_intersected, eval_liquid_p, multiphase_scratch_data.material_liquid);
           }
           break;
 
           case CutUtil::FaceType::inside_face_gas: {
             auto [eval_gas_m, eval_gas_p] =
               create_face_integrators(CutUtil::CellCategory::gas, dim + 2);
-            process_bulk_face_range.template operator()<is_viscous_gas>(eval_gas_m,
-                                                                        eval_gas_p,
-                                                                        convective_terms_gas,
-                                                                        viscous_terms_gas);
+            process_bulk_face_range.template operator()<is_viscous_gas>(
+              eval_gas_m, eval_gas_p, multiphase_scratch_data.material_gas);
           }
           break;
 
@@ -777,10 +803,8 @@ namespace MeltPoolDG::Multiphase
             auto eval_gas_m = create_face_integrator(true, CutUtil::CellCategory::gas, dim + 2);
             auto eval_gas_p_intersected =
               create_face_integrator(false, CutUtil::CellCategory::intersected, dim + 2);
-            process_bulk_face_range.template operator()<is_viscous_gas>(eval_gas_m,
-                                                                        eval_gas_p_intersected,
-                                                                        convective_terms_gas,
-                                                                        viscous_terms_gas);
+            process_bulk_face_range.template operator()<is_viscous_gas>(
+              eval_gas_m, eval_gas_p_intersected, multiphase_scratch_data.material_gas);
           }
           break;
 
@@ -788,10 +812,8 @@ namespace MeltPoolDG::Multiphase
             auto eval_gas_p = create_face_integrator(false, CutUtil::CellCategory::gas, dim + 2);
             auto eval_gas_m_intersected =
               create_face_integrator(true, CutUtil::CellCategory::intersected, dim + 2);
-            process_bulk_face_range.template operator()<is_viscous_gas>(eval_gas_m_intersected,
-                                                                        eval_gas_p,
-                                                                        convective_terms_gas,
-                                                                        viscous_terms_gas);
+            process_bulk_face_range.template operator()<is_viscous_gas>(
+              eval_gas_m_intersected, eval_gas_p, multiphase_scratch_data.material_gas);
           }
           break;
 
@@ -804,14 +826,12 @@ namespace MeltPoolDG::Multiphase
               eval_liquid_m_intersected,
               eval_liquid_p_intersected,
               0,
-              convective_terms_liquid,
-              viscous_terms_liquid);
+              multiphase_scratch_data.material_liquid);
             process_intersected_face_range.template operator()<is_viscous_gas>(
               eval_gas_m_intersected,
               eval_gas_p_intersected,
               1,
-              convective_terms_gas,
-              viscous_terms_gas);
+              multiphase_scratch_data.material_gas);
             break;
           }
         default:
@@ -831,8 +851,6 @@ namespace MeltPoolDG::Multiphase
       multiphase_scratch_data.scratch_data.get_face_range_category(face_range);
 
     auto process_bulk_face_range = [&]<bool is_viscous, bool is_gas_phase>(auto &eval_m,
-                                                                           auto &convective_terms,
-                                                                           auto &viscous_terms,
                                                                            auto &material) {
       for (unsigned int face = face_range.first; face < face_range.second; ++face)
         {
@@ -842,29 +860,54 @@ namespace MeltPoolDG::Multiphase
                                    dealii::EvaluationFlags::gradients);
 
           const dealii::VectorizedArray<number> interior_penalty_parameter =
-            is_viscous ? eval_m.read_cell_data(multiphase_scratch_data.interior_penalty_parameter) :
-                         0.;
+            is_viscous ?
+              material.data.dynamic_viscosity / material.data.reference_density *
+                eval_m.read_cell_data(multiphase_scratch_data.interior_penalty_parameter) :
+              0.;
 
           for (const unsigned int q : eval_m.quadrature_point_indices())
             {
-              const auto [flux_m, grad_flux_m] =
-                CompressibleFlow::rhs_boundary_face_integral_kernel<
-                  dim,
-                  number,
-                  FEFaceIntegrator<dim, dim + 2, number>,
-                  is_viscous,
-                  is_gas_phase>(
-                  eval_m,
-                  q,
-                  multiphase_scratch_data.scratch_data.get_matrix_free().get_boundary_id(face),
-                  interior_penalty_parameter,
-                  convective_terms,
-                  viscous_terms,
+              const auto w_m      = eval_m.get_value(q);
+              const auto grad_w_m = eval_m.get_gradient(q);
+
+              const auto [w_p, grad_w_p] =
+                multiphase_scratch_data.boundary_conditions.get_boundary_face_value_and_gradient(
+                  eval_m.quadrature_point(q),
+                  eval_m.normal_vector(q),
+                  eval_m.boundary_id(),
+                  w_m,
+                  grad_w_m,
                   material,
-                  multiphase_scratch_data.boundary_conditions);
-              eval_m.submit_value(flux_m, q);
+                  is_gas_phase);
+
+              CompressibleFlow::FaceFluxType<dim, number> flux_m;
               if (is_viscous)
-                eval_m.submit_gradient(grad_flux_m, q);
+                {
+                  const auto flux =
+                    ConvectionDiffusionOperator::face(eval_m.get_value(q),
+                                                      w_p,
+                                                      eval_m.get_gradient(q),
+                                                      grad_w_p,
+                                                      eval_m.normal_vector(q),
+                                                      interior_penalty_parameter,
+                                                      ConvectiveKernel(material.data),
+                                                      DiffusiveKernel(material.data));
+
+                  flux_m = flux.inner_face_value;
+
+                  eval_m.submit_gradient(flux.inner_face_gradient, q);
+                }
+              else
+                {
+                  const auto flux = ConvectionOperator::face(eval_m.get_value(q),
+                                                             w_p,
+                                                             eval_m.normal_vector(q),
+                                                             ConvectiveKernel(material.data));
+
+                  flux_m = flux.inner_face_value;
+                }
+
+              eval_m.submit_value(flux_m, q);
             }
 
           eval_m.integrate_scatter(EvaluationFlags::values |
@@ -874,95 +917,110 @@ namespace MeltPoolDG::Multiphase
         }
     };
 
-    auto process_intersected_face_range = [&]<bool is_viscous, bool is_gas_phase>(
-                                            auto              &eval_m_int,
-                                            const unsigned int mapping_idx,
-                                            auto              &convective_terms,
-                                            auto              &viscous_terms,
-                                            auto              &material) {
-      FEFacePointEvaluation<dim + 2, dim, dim, VectorizedArray<number>> eval_point_m_int(
-        *mapping_info_faces[mapping_idx], fe_point_temp);
+    auto process_intersected_face_range =
+      [&]<bool is_viscous, bool is_gas_phase>(auto              &eval_m_int,
+                                              const unsigned int mapping_idx,
+                                              auto              &material) {
+        FEFacePointEvaluation<dim + 2, dim, dim, VectorizedArray<number>> eval_point_m_int(
+          *mapping_info_faces[mapping_idx], fe_point_temp);
 
-      for (unsigned int face = face_range.first; face < face_range.second; ++face)
-        {
-          eval_m_int.reinit(face);
-          eval_m_int.read_dof_values(src);
+        for (unsigned int face = face_range.first; face < face_range.second; ++face)
+          {
+            eval_m_int.reinit(face);
+            eval_m_int.read_dof_values(src);
 
-          eval_m_int.project_to_face(EvaluationFlags::values | EvaluationFlags::gradients);
+            eval_m_int.project_to_face(EvaluationFlags::values | EvaluationFlags::gradients);
 
-          const auto face_info =
-            multiphase_scratch_data.scratch_data.get_matrix_free().get_face_info(face);
+            const auto face_info =
+              multiphase_scratch_data.scratch_data.get_matrix_free().get_face_info(face);
 
-          for (unsigned int lane = 0; lane < multiphase_scratch_data.scratch_data.get_matrix_free()
-                                               .n_active_entries_per_face_batch(face);
-               ++lane)
-            {
-              eval_point_m_int.reinit(face_info.cells_interior[lane],
-                                      static_cast<int>(face_info.interior_face_no));
+            for (unsigned int lane = 0;
+                 lane < multiphase_scratch_data.scratch_data.get_matrix_free()
+                          .n_active_entries_per_face_batch(face);
+                 ++lane)
+              {
+                eval_point_m_int.reinit(face_info.cells_interior[lane],
+                                        static_cast<int>(face_info.interior_face_no));
 
-              eval_point_m_int.evaluate_in_face(&eval_m_int.get_scratch_data().begin()[0][lane],
-                                                EvaluationFlags::values |
-                                                  EvaluationFlags::gradients);
+                eval_point_m_int.evaluate_in_face(&eval_m_int.get_scratch_data().begin()[0][lane],
+                                                  EvaluationFlags::values |
+                                                    EvaluationFlags::gradients);
 
-              const dealii::VectorizedArray<number> interior_penalty_parameter =
-                is_viscous ?
-                  eval_m_int.read_cell_data(multiphase_scratch_data.interior_penalty_parameter) :
-                  0.;
+                const dealii::VectorizedArray<number> interior_penalty_parameter =
+                  is_viscous ?
+                    eval_m_int.read_cell_data(multiphase_scratch_data.interior_penalty_parameter) :
+                    0.;
 
-              for (const unsigned int q : eval_point_m_int.quadrature_point_indices())
-                {
-                  const auto [flux_m, grad_flux_m] =
-                    MeltPoolDG::CompressibleFlow::rhs_boundary_face_integral_kernel<
-                      dim,
-                      number,
-                      FEFacePointEvaluation<dim + 2, dim, dim, VectorizedArray<number>>,
-                      is_viscous,
-                      is_gas_phase>(
-                      eval_point_m_int,
-                      q,
-                      multiphase_scratch_data.scratch_data.get_matrix_free().get_boundary_id(face),
-                      interior_penalty_parameter,
-                      convective_terms,
-                      viscous_terms,
-                      material,
-                      multiphase_scratch_data.boundary_conditions);
+                for (const unsigned int q : eval_point_m_int.quadrature_point_indices())
+                  {
+                    const auto w_m      = eval_m_int.get_value(q);
+                    const auto grad_w_m = eval_m_int.get_gradient(q);
 
-                  eval_point_m_int.submit_value(flux_m, q);
-                  if (is_viscous)
-                    eval_point_m_int.submit_gradient(grad_flux_m, q);
-                }
+                    const auto [w_p, grad_w_p] =
+                      multiphase_scratch_data.boundary_conditions
+                        .get_boundary_face_value_and_gradient(eval_m_int.quadrature_point(q),
+                                                              eval_m_int.normal_vector(q),
+                                                              eval_m_int.boundary_id(),
+                                                              w_m,
+                                                              grad_w_m,
+                                                              material,
+                                                              is_gas_phase);
 
-              eval_point_m_int.integrate_in_face(&eval_m_int.get_scratch_data().begin()[0][lane],
-                                                 dealii::EvaluationFlags::values |
-                                                   dealii::EvaluationFlags::gradients);
-            }
+                    CompressibleFlow::FaceFluxType<dim, number> flux_m;
+                    if (is_viscous)
+                      {
+                        const auto flux =
+                          ConvectionDiffusionOperator::face(eval_m_int.get_value(q),
+                                                            w_p,
+                                                            eval_m_int.get_gradient(q),
+                                                            grad_w_p,
+                                                            eval_m_int.normal_vector(q),
+                                                            interior_penalty_parameter,
+                                                            ConvectiveKernel(material.data),
+                                                            DiffusiveKernel(material.data));
 
-          eval_m_int.collect_from_face(dealii::EvaluationFlags::values |
-                                         dealii::EvaluationFlags::gradients,
-                                       eval_m_int.begin_dof_values());
+                        flux_m = flux.inner_face_value;
 
-          eval_m_int.distribute_local_to_global(dst);
-        }
-    };
+                        eval_m_int.submit_gradient(flux.inner_face_gradient, q);
+                      }
+                    else
+                      {
+                        const auto flux = ConvectionOperator::face(eval_m_int.get_value(q),
+                                                                   w_p,
+                                                                   eval_m_int.normal_vector(q),
+                                                                   ConvectiveKernel(material.data));
+
+                        flux_m = flux.inner_face_value;
+                      }
+
+                    eval_m_int.submit_value(flux_m, q);
+                  }
+
+                eval_point_m_int.integrate_in_face(&eval_m_int.get_scratch_data().begin()[0][lane],
+                                                   dealii::EvaluationFlags::values |
+                                                     dealii::EvaluationFlags::gradients);
+              }
+
+            eval_m_int.collect_from_face(dealii::EvaluationFlags::values |
+                                           dealii::EvaluationFlags::gradients,
+                                         eval_m_int.begin_dof_values());
+
+            eval_m_int.distribute_local_to_global(dst);
+          }
+      };
 
     switch (face_category.first)
       {
           case CutUtil::CellCategory::liquid: {
             auto eval_liquid_m = create_face_integrator(true, CutUtil::CellCategory::liquid, 0);
             process_bulk_face_range.template operator()<is_viscous_liquid, false /*is_gas_phase*/>(
-              eval_liquid_m,
-              convective_terms_liquid,
-              viscous_terms_liquid,
-              multiphase_scratch_data.material_liquid);
+              eval_liquid_m, multiphase_scratch_data.material_liquid);
             break;
           }
           case CutUtil::CellCategory::gas: {
             auto eval_gas_m = create_face_integrator(true, CutUtil::CellCategory::gas, dim + 2);
             process_bulk_face_range.template operator()<is_viscous_gas, true /*is_gas_phase*/>(
-              eval_gas_m,
-              convective_terms_gas,
-              viscous_terms_gas,
-              multiphase_scratch_data.material_gas);
+              eval_gas_m, multiphase_scratch_data.material_gas);
             break;
           }
           case CutUtil::CellCategory::intersected: {
@@ -972,17 +1030,10 @@ namespace MeltPoolDG::Multiphase
               create_face_integrator(true, CutUtil::CellCategory::intersected, dim + 2);
             process_intersected_face_range
               .template operator()<is_viscous_liquid, false /*is_gas_phase*/>(
-                eval_liquid_m_intersected,
-                0,
-                convective_terms_liquid,
-                viscous_terms_liquid,
-                multiphase_scratch_data.material_liquid);
-            process_intersected_face_range.template
-            operator()<is_viscous_gas, true /*is_gas_phase*/>(eval_gas_m_intersected,
-                                                              1,
-                                                              convective_terms_gas,
-                                                              viscous_terms_gas,
-                                                              multiphase_scratch_data.material_gas);
+                eval_liquid_m_intersected, 0, multiphase_scratch_data.material_liquid);
+            process_intersected_face_range
+              .template operator()<is_viscous_gas, true /*is_gas_phase*/>(
+                eval_gas_m_intersected, 1, multiphase_scratch_data.material_gas);
             break;
           }
         default:

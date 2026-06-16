@@ -124,6 +124,15 @@ namespace MeltPoolDG::Multiphase
     set_body_force(std::unique_ptr<dealii::Function<dim>> body_force_in);
 
     /**
+     * @brief Add external fluid forces (e.g. gravity, ...).
+     *
+     * @param external_force A provided shared pointer to an external force definition.
+     */
+    void
+    add_external_force(
+      std::shared_ptr<CompressibleFlow::ExternalFlowForce<dim, number>> external_force);
+
+    /**
      * @brief Compute the maximum time step size.
      *
      * The maximum time step size arises from the convective and viscous time step limits.

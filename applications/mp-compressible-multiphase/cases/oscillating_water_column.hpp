@@ -121,7 +121,7 @@ namespace MeltPoolDG::Simulation::CompressibleMultiphase
 
       if (component == liquid_components[0])
         {
-          return (pressure + liquid_material_data.eos_data.p_inf) /
+          return (pressure + liquid_material_data.eos_data.stiffening_pressure) /
                  ((liquid_material_data.gamma - 1.) * liquid_material_data.specific_isobaric_heat /
                   liquid_material_data.gamma * T);
         }
@@ -129,7 +129,8 @@ namespace MeltPoolDG::Simulation::CompressibleMultiphase
         return 0.;
       else if (component == liquid_components[2])
         {
-          return (pressure + liquid_material_data.gamma * liquid_material_data.eos_data.p_inf) /
+          return (pressure +
+                  liquid_material_data.gamma * liquid_material_data.eos_data.stiffening_pressure) /
                  (liquid_material_data.gamma - 1.);
         }
       else

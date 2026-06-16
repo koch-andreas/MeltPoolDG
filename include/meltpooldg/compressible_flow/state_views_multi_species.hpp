@@ -122,6 +122,9 @@ namespace MeltPoolDG::CompressibleFlow
   {
     using state_type = std::remove_cvref_t<Value>;
 
+    // Only ideal gas is supported for multi-species flow
+    static constexpr std::array<EquationOfState, 1> supported_eos = {{EquationOfState::ideal_gas}};
+
     MultiSpeciesDofStateView(Value &value_state, const MaterialPhaseData<number> &material_data)
       : flow_state(&value_state)
       , material_data(material_data)
@@ -215,6 +218,9 @@ namespace MeltPoolDG::CompressibleFlow
   {
     using state_type    = std::remove_cvref_t<Value>;
     using gradient_type = std::remove_cvref_t<Gradient>;
+
+    // Only ideal gas is supported for multi-species flow
+    static constexpr std::array<EquationOfState, 1> supported_eos = {{EquationOfState::ideal_gas}};
 
     MultiSpeciesDofValueAndGradientStateView(Value                           &value_state,
                                              Gradient                        &gradient_state,

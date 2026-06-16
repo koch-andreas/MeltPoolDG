@@ -63,6 +63,46 @@ namespace MeltPoolDG::Flow
     };
   };
 
+  /**
+   * Concept defining the specific requirements for a material view to be used with the stiffened
+   * gas equation of state.
+   */
+  template <typename T>
+  concept StiffenedGasIsMaterialView = requires(const T m) {
+    {
+      m.heat_capacity_ratio()
+    };
+    {
+      m.specific_isobaric_heat()
+    };
+    {
+      m.stiffening_pressure()
+    };
+  };
+
+  /**
+   * Concept defining the specific requirements for a material view to be used with the Noble-Abel
+   * stiffened gas equation of state.
+   */
+  template <typename T>
+  concept NobleAbelStiffenedGasIsMaterialView = requires(const T m) {
+    {
+      m.heat_capacity_ratio()
+    };
+    {
+      m.specific_isobaric_heat()
+    };
+    {
+      m.stiffening_pressure()
+    };
+    {
+      m.heat_bound()
+    };
+    {
+      m.covolume()
+    };
+  };
+
   struct IdealGasEOS
   {
     /**
@@ -156,10 +196,12 @@ namespace MeltPoolDG::Flow
      *
      * @return Inner energy resulting from the given pressure and material properties.
      */
-    template <typename ValueType, IdealGasIsMaterialView MaterialView>
+    template <typename ValueType, EOSIsValueView ValueView, IdealGasIsMaterialView MaterialView>
     static inline DEAL_II_ALWAYS_INLINE //
       auto
-      inner_energy_from_pressure(const ValueType &pressure, const MaterialView &material_view)
+      inner_energy_from_pressure(const ValueType &pressure,
+                                 const ValueView &,
+                                 const MaterialView &material_view)
     {
       return pressure / (material_view.heat_capacity_ratio() - 1.);
     }
@@ -181,6 +223,308 @@ namespace MeltPoolDG::Flow
     }
   };
 
+  struct StiffenedGasEOS
+  {
+    /**
+     * Compute the thermodynamic pressure for a stiffened gas from the given flow state.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Pressure resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView ValueView, StiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      thermodynamic_pressure(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return (material_view.heat_capacity_ratio() - 1.) *
+               (value_view.total_energy() -
+                value_view.density() * 0.5 *
+                  scalar_product(value_view.velocity(), value_view.velocity())) -
+             material_view.heat_capacity_ratio() * material_view.stiffening_pressure();
+    }
+
+    /**
+     * Compute the gradient of the temperature for a stiffened gas from the given flow state and
+     * material properties.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param gradient_view View providing access to the gradients of the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Gradient of the temperature resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView             ValueView,
+              EOSIsGradientView          GradientView,
+              StiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      grad_temperature(const ValueView    &value_view,
+                       const GradientView &gradient_view,
+                       const MaterialView &material_view)
+    {
+      const auto inv_rho = 1. / value_view.density();
+
+      const auto grad_E =
+        inv_rho * (gradient_view.grad_total_energy() -
+                   inv_rho * value_view.total_energy() * gradient_view.grad_density());
+
+      return material_view.heat_capacity_ratio() / material_view.specific_isobaric_heat() *
+             (grad_E - matrix_vector_product(gradient_view.grad_velocity(), value_view.velocity()) +
+              material_view.stiffening_pressure() * inv_rho * inv_rho *
+                gradient_view.grad_density());
+    }
+
+    /**
+     * Compute the speed of sound for a stiffened gas from the given flow state and material
+     * properties.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Speed of sound resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView ValueView, StiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      speed_of_sound(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return std::sqrt(
+        material_view.heat_capacity_ratio() *
+        (thermodynamic_pressure(value_view, material_view) + material_view.stiffening_pressure()) /
+        value_view.density());
+    }
+
+    /**
+     * Compute the temperature for a stiffened gas from the given flow state and material
+     * properties.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Temperature resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView ValueView, StiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      temperature(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return (thermodynamic_pressure(value_view, material_view) +
+              material_view.stiffening_pressure()) *
+             material_view.heat_capacity_ratio() /
+             (material_view.specific_isobaric_heat() * value_view.density() *
+              (material_view.heat_capacity_ratio() - 1.));
+    }
+
+    /**
+     * Compute the inner energy from a given pressure for a stiffened gas with the given material
+     * properties.
+     *
+     * @param pressure Pressure for which the inner energy should be computed.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Inner energy resulting from the given pressure and material properties.
+     */
+    template <typename ValueType, EOSIsValueView ValueView, StiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      inner_energy_from_pressure(const ValueType &pressure,
+                                 const ValueView &,
+                                 const MaterialView &material_view)
+    {
+      return (pressure +
+              material_view.heat_capacity_ratio() * material_view.stiffening_pressure()) /
+             (material_view.heat_capacity_ratio() - 1.);
+    }
+
+    /**
+     * Compute the specific inner energy from a given flow state and material properties for a
+     * stiffened gas.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     */
+    template <typename ValueView, StiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      specific_inner_energy(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return (thermodynamic_pressure(value_view, material_view) +
+              material_view.heat_capacity_ratio() * material_view.stiffening_pressure()) /
+             (value_view.density() * (material_view.heat_capacity_ratio() - 1.));
+    }
+  };
+
+  struct NobleAbelStiffenedGasEOS
+  {
+    /**
+     * Compute the thermodynamic pressure for a Noble-Abel stiffened gas from the given flow state.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Pressure resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView ValueView, NobleAbelStiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      thermodynamic_pressure(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return ((material_view.heat_capacity_ratio() - 1.) *
+                (value_view.total_energy() -
+                 0.5 * value_view.density() *
+                   scalar_product(value_view.velocity(), value_view.velocity()) -
+                 value_view.density() * material_view.heat_bound()) -
+              material_view.heat_capacity_ratio() * material_view.stiffening_pressure() *
+                (1. - value_view.density() * material_view.covolume())) /
+             (1. - value_view.density() * material_view.covolume());
+    }
+
+    /**
+     * Compute the gradient of the temperature for a Noble-Abel stiffened gas from the given flow
+     * state and material properties.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param gradient_view View providing access to the gradients of the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Gradient of the temperature resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView                      ValueView,
+              EOSIsGradientView                   GradientView,
+              NobleAbelStiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      grad_temperature(const ValueView    &value_view,
+                       const GradientView &gradient_view,
+                       const MaterialView &material_view)
+    {
+      const auto inv_rho = 1. / value_view.density();
+
+      const auto grad_E =
+        inv_rho * (gradient_view.grad_total_energy() -
+                   inv_rho * value_view.total_energy() * gradient_view.grad_density());
+
+      return material_view.heat_capacity_ratio() / material_view.specific_isobaric_heat() *
+             (grad_E - matrix_vector_product(gradient_view.grad_velocity(), value_view.velocity()) +
+              material_view.stiffening_pressure() * inv_rho * inv_rho *
+                gradient_view.grad_density());
+    }
+
+    /**
+     * Compute the speed of sound for a Noble-Abel stiffened gas from the given flow state and
+     * material properties.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Speed of sound resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView ValueView, NobleAbelStiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      speed_of_sound(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return std::sqrt(
+        material_view.heat_capacity_ratio() *
+        (thermodynamic_pressure(value_view, material_view) + material_view.stiffening_pressure()) /
+        (value_view.density() * (1. - value_view.density() * material_view.covolume())));
+    }
+
+    /**
+     * Compute the temperature for a Noble-Abel stiffened gas from the given flow state and material
+     * properties.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Temperature resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView ValueView, NobleAbelStiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      temperature(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return (thermodynamic_pressure(value_view, material_view) +
+              material_view.stiffening_pressure()) *
+             (1. / value_view.density() - material_view.covolume()) *
+             material_view.heat_capacity_ratio() / (material_view.heat_capacity_ratio() - 1.) *
+             material_view.specific_isobaric_heat();
+    }
+
+    /**
+     * Compute the inner energy from a given pressure for a Noble-Abel stiffened gas with the given
+     * material properties.
+     *
+     * @param pressure Pressure for which the inner energy should be computed.
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Inner energy resulting from the given pressure and material properties.
+     */
+    template <typename ValueType,
+              EOSIsValueView                      ValueView,
+              NobleAbelStiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      inner_energy_from_pressure(const ValueType    &pressure,
+                                 const ValueView    &value_view,
+                                 const MaterialView &material_view)
+    {
+      return (pressure +
+              material_view.heat_capacity_ratio() * material_view.stiffening_pressure()) /
+               (material_view.heat_capacity_ratio() - 1.) *
+               (1. - value_view.density() * material_view.covolume()) +
+             value_view.density() * material_view.heat_bound();
+    }
+
+    /**
+     * Compute the specific inner energy from a given flow state and material properties for a
+     * Noble-Abel stiffened gas.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     */
+    template <typename ValueView, NobleAbelStiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      specific_inner_energy(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return (thermodynamic_pressure(value_view, material_view) +
+              material_view.heat_capacity_ratio() * material_view.stiffening_pressure()) /
+               (material_view.heat_capacity_ratio() - 1.) *
+               (1. / value_view.density() - material_view.covolume()) +
+             material_view.heat_bound();
+    }
+  };
+
+  /**
+   * @brief Concept ensuring a type defines a specific, compatible `supported_eos` array.
+   */
+  template <typename T>
+  concept HasSupportedEOS = requires {
+    {
+      T::supported_eos
+    } -> std::convertible_to<const std::array<CompressibleFlow::EquationOfState,
+                                              std::tuple_size_v<decltype(T::supported_eos)>> &>;
+  };
+
+  /**
+   * @brief Dispatch helper function that checks at compile-time whether an equation of state is supported.
+   *
+   * @tparam Derived Type containing a `supported_eos` container.
+   * @tparam EOS Equation of state being queried.
+   *
+   * @return `true` if `Derived` supports `EOS`; otherwise `false`.
+   */
+  template <typename Derived, CompressibleFlow::EquationOfState EOS>
+  constexpr bool
+  supports_eos()
+  {
+    return std::ranges::find(Derived::supported_eos, EOS) != Derived::supported_eos.end();
+  }
+
   /**
    * Dispatches a functional to a concrete Equation of State (EOS) implementation.
    *
@@ -198,20 +542,50 @@ namespace MeltPoolDG::Flow
    *
    * @throws dealii::ExcMessage if \p eos_type is not implemented in the switch.
    */
-  template <typename F>
-  inline DEAL_II_ALWAYS_INLINE //
-    decltype(auto)
-    dispatch_eos(CompressibleFlow::EquationOfState eos_type, F &&f)
+  template <typename Derived, typename F>
+  inline DEAL_II_ALWAYS_INLINE decltype(auto)
+  dispatch_eos(CompressibleFlow::EquationOfState eos_type, F &&f)
   {
+    auto check_support = [](CompressibleFlow::EquationOfState type) {
+      if constexpr (HasSupportedEOS<Derived>)
+        {
+          if (type == CompressibleFlow::EquationOfState::ideal_gas)
+            return supports_eos<Derived, CompressibleFlow::EquationOfState::ideal_gas>();
+          if (type == CompressibleFlow::EquationOfState::stiffened_gas)
+            return supports_eos<Derived, CompressibleFlow::EquationOfState::stiffened_gas>();
+          if (type == CompressibleFlow::EquationOfState::noble_abel_stiffened_gas)
+            return supports_eos<Derived,
+                                CompressibleFlow::EquationOfState::noble_abel_stiffened_gas>();
+          return false;
+        }
+      return true;
+    };
+
     switch (eos_type)
       {
         case CompressibleFlow::EquationOfState::ideal_gas:
-          return std::forward<F>(f)(IdealGasEOS{});
+          if constexpr (check_support(CompressibleFlow::EquationOfState::ideal_gas))
+            return std::forward<F>(f)(IdealGasEOS{});
+          break;
+
+        case CompressibleFlow::EquationOfState::stiffened_gas:
+          if constexpr (check_support(CompressibleFlow::EquationOfState::stiffened_gas))
+            return std::forward<F>(f)(StiffenedGasEOS{});
+          break;
+
+        case CompressibleFlow::EquationOfState::noble_abel_stiffened_gas:
+          if constexpr (check_support(CompressibleFlow::EquationOfState::noble_abel_stiffened_gas))
+            return std::forward<F>(f)(NobleAbelStiffenedGasEOS{});
+          break;
+
         default:
-          AssertThrow(false,
-                      dealii::ExcMessage("The provided equation of state type is not supported!"));
+          break;
       }
+
+    AssertThrow(false, dealii::ExcMessage("The provided EOS is not supported by this View."));
+    __builtin_unreachable();
   }
+
 
 
   /**
@@ -228,7 +602,7 @@ namespace MeltPoolDG::Flow
     decltype(auto)
     pressure() const
     {
-      return dispatch_eos(eos_type(), [&](auto eos) -> decltype(auto) {
+      return dispatch_eos<Derived>(eos_type(), [&](auto eos) -> decltype(auto) {
         return eos.thermodynamic_pressure(derived(), derived());
       });
     }
@@ -236,7 +610,7 @@ namespace MeltPoolDG::Flow
     decltype(auto)
     temperature() const
     {
-      return dispatch_eos(eos_type(), [&](auto eos) -> decltype(auto) {
+      return dispatch_eos<Derived>(eos_type(), [&](auto eos) -> decltype(auto) {
         return eos.temperature(derived(), derived());
       });
     }
@@ -244,7 +618,7 @@ namespace MeltPoolDG::Flow
     decltype(auto)
     speed_of_sound() const
     {
-      return dispatch_eos(eos_type(), [&](auto eos) -> decltype(auto) {
+      return dispatch_eos<Derived>(eos_type(), [&](auto eos) -> decltype(auto) {
         return eos.speed_of_sound(derived(), derived());
       });
     }
@@ -252,15 +626,15 @@ namespace MeltPoolDG::Flow
     decltype(auto)
     inner_energy_from_pressure(const ValueType &pressure) const
     {
-      return dispatch_eos(eos_type(), [&](auto eos) -> decltype(auto) {
-        return eos.inner_energy_from_pressure(pressure, derived());
+      return dispatch_eos<Derived>(eos_type(), [&](auto eos) -> decltype(auto) {
+        return eos.inner_energy_from_pressure(pressure, derived(), derived());
       });
     }
 
     decltype(auto)
     specific_inner_energy() const
     {
-      return dispatch_eos(eos_type(), [&](auto eos) -> decltype(auto) {
+      return dispatch_eos<Derived>(eos_type(), [&](auto eos) -> decltype(auto) {
         return eos.specific_inner_energy(derived(), derived());
       });
     }
@@ -293,7 +667,7 @@ namespace MeltPoolDG::Flow
     decltype(auto)
     grad_temperature() const
     {
-      return dispatch_eos(eos_type(), [&](auto eos) -> decltype(auto) {
+      return dispatch_eos<Derived>(eos_type(), [&](auto eos) -> decltype(auto) {
         return eos.grad_temperature(derived(), derived(), derived());
       });
     }
