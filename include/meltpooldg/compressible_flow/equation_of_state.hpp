@@ -103,6 +103,26 @@ namespace MeltPoolDG::Flow
     };
   };
 
+  /**
+   * Concept defining the specific requirements for a material view to be used with the weakly compressible
+   * equation of state.
+   */
+  template <typename T>
+  concept WeaklyCompressibleIsMaterialView = requires(const T m) {
+    {
+      m.linearization_point_pressure()
+    };
+    {
+      m.linearization_point_density()
+    };
+    {
+      m.artificial_sound_speed()
+    };
+    {
+      m.specific_isobaric_heat()
+    };
+  };
+
   struct IdealGasEOS
   {
     /**
@@ -499,6 +519,118 @@ namespace MeltPoolDG::Flow
     }
   };
 
+  struct WeaklyCompressibleEOS
+  {
+    /**
+     * Compute the thermodynamic pressure for a weakly compressible fluid from the given flow state.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Pressure resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView ValueView, WeaklyCompressibleIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      thermodynamic_pressure(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return material_view.artificial_sound_speed() * material_view.artificial_sound_speed() *
+        (value_view.density() - material_view.linearization_point_density()) + material_view.linearization_point_pressure();
+    }
+
+    /**
+     * Compute the gradient of the temperature for a weakly compressible fluid from the given flow state and
+     * material properties.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param gradient_view View providing access to the gradients of the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Gradient of the temperature resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView         ValueView,
+              EOSIsGradientView      GradientView,
+              WeaklyCompressibleIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      grad_temperature(const ValueView    &value_view,
+                       const GradientView &gradient_view,
+                       const MaterialView &material_view)
+    {
+      const auto grad_E =
+        1. / value_view.density() *
+        (gradient_view.grad_total_energy() -
+         1. / value_view.density() * value_view.total_energy() * gradient_view.grad_density());
+
+      return grad_E / material_view.specific_isobaric_heat();
+    }
+
+    /**
+     * Compute the speed of sound for a weakly compressible fluid from the given flow state and material
+     * properties.
+     *
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Speed of sound resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView ValueView, WeaklyCompressibleIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      speed_of_sound(const ValueView &, const MaterialView &material_view)
+    {
+      return dealii::make_vectorized_array(material_view.artificial_sound_speed());
+    }
+
+    /**
+     * Compute the temperature for a weakly compressible fluid from the given flow state and material properties.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     *
+     * @return Temperature resulting from the given flow state and material properties.
+     */
+    template <EOSIsValueView ValueView, WeaklyCompressibleIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      temperature(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return (value_view.specific_total_energy() - 0.5 * scalar_product(value_view.velocity(), value_view.velocity()))
+        / material_view.specific_isobaric_heat();
+    }
+
+    /**
+     * Compute the inner energy from a given pressure for a weakly compressible fluid with the given material
+     * properties.
+     *
+     * @note The inner energy is not dependent of the pressure for the weakly compressible eos.
+     *
+     * @throws dealii::ExcMessage if this function is called.
+     */
+    template <typename ValueType, EOSIsValueView ValueView, WeaklyCompressibleIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      inner_energy_from_pressure(const ValueType &,
+                                 const ValueView &value_view,
+                                 const MaterialView &material_view)
+    {
+      return value_view.specific_total_energy() - 0.5 * scalar_product(value_view.velocity(), value_view.velocity());
+    }
+
+    /**
+     * Compute the specific inner energy from a given flow state and material properties for a weakly compressible fluid.
+     *
+     * @param value_view View providing access to the flow state.
+     * @param material_view View providing access to the material properties.
+     */
+    template <typename ValueView, WeaklyCompressibleIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      auto
+      specific_inner_energy(const ValueView &value_view, const MaterialView &material_view)
+    {
+      return material_view.specific_isobaric_heat() * value_view.temperature();
+    }
+  };
+
   /**
    * @brief Concept ensuring a type defines a specific, compatible `supported_eos` array.
    */
@@ -556,6 +688,9 @@ namespace MeltPoolDG::Flow
           if (type == CompressibleFlow::EquationOfState::noble_abel_stiffened_gas)
             return supports_eos<Derived,
                                 CompressibleFlow::EquationOfState::noble_abel_stiffened_gas>();
+          if (type == CompressibleFlow::EquationOfState::weakly_compressible)
+            return supports_eos<Derived,
+                                CompressibleFlow::EquationOfState::weakly_compressible>();
           return false;
         }
       return true;
@@ -566,24 +701,28 @@ namespace MeltPoolDG::Flow
         case CompressibleFlow::EquationOfState::ideal_gas:
           if constexpr (check_support(CompressibleFlow::EquationOfState::ideal_gas))
             return std::forward<F>(f)(IdealGasEOS{});
-          break;
+        break;
 
         case CompressibleFlow::EquationOfState::stiffened_gas:
           if constexpr (check_support(CompressibleFlow::EquationOfState::stiffened_gas))
             return std::forward<F>(f)(StiffenedGasEOS{});
-          break;
+        break;
 
         case CompressibleFlow::EquationOfState::noble_abel_stiffened_gas:
           if constexpr (check_support(CompressibleFlow::EquationOfState::noble_abel_stiffened_gas))
             return std::forward<F>(f)(NobleAbelStiffenedGasEOS{});
-          break;
+        break;
+
+        case CompressibleFlow::EquationOfState::weakly_compressible:
+          if constexpr (check_support(CompressibleFlow::EquationOfState::weakly_compressible))
+            return std::forward<F>(f)(WeaklyCompressibleEOS{});
+        break;
 
         default:
           break;
       }
 
     AssertThrow(false, dealii::ExcMessage("The provided EOS is not supported by this View."));
-    __builtin_unreachable();
   }
 
 

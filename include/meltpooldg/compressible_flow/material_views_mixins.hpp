@@ -59,6 +59,24 @@ namespace MeltPoolDG::CompressibleFlow
       return this->material().eos_data.covolume;
     }
 
+    decltype(auto)
+    linearization_point_pressure() const
+    {
+      return this->material().eos_data.linearization_point_pressure;
+    }
+
+    decltype(auto)
+    linearization_point_density() const
+    {
+      return this->material().eos_data.linearization_point_density;
+    }
+
+    decltype(auto)
+    artificial_sound_speed() const
+    {
+      return this->material().eos_data.artificial_sound_speed;
+    }
+
   private:
     decltype(auto)
     material() const

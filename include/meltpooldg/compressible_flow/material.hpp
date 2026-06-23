@@ -13,7 +13,7 @@ namespace MeltPoolDG::CompressibleFlow
 {
   /// Enumeration for the currently supported equations of state to model compressible or (nearly)
   /// incompressible fluids
-  BETTER_ENUM(EquationOfState, char, ideal_gas, stiffened_gas, noble_abel_stiffened_gas)
+  BETTER_ENUM(EquationOfState, char, ideal_gas, stiffened_gas, noble_abel_stiffened_gas, weakly_compressible)
 
   /**
    * @brief Collection of parameters related to the equation of state for a compressible or nearly
@@ -35,6 +35,18 @@ namespace MeltPoolDG::CompressibleFlow
     /// hydrogen bondings, latent heat,...
     /// (required for noble_abel_stiffened_gas)
     number heat_bound = std::numeric_limits<number>::min();
+
+    /// Pressure at the considered linearization point.
+    /// (required for weakly_compressible)
+    number linearization_point_pressure = std::numeric_limits<number>::min();
+
+    /// Density at the considered linearization point.
+    /// (required for weakly_compressible)
+    number linearization_point_density = std::numeric_limits<number>::min();
+
+    /// Artificial speed of sound.
+    /// (required for weakly_compressible)
+    number artificial_sound_speed = std::numeric_limits<number>::min();
 
     /**
      * @brief Add EOS-specific material parameters in the parameter handler.

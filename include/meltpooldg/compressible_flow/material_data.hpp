@@ -58,6 +58,8 @@ namespace MeltPoolDG::CompressibleFlow
             return std::make_shared<EOS::StiffenedGas<dim, number>>(material_data);
           case EquationOfState::noble_abel_stiffened_gas:
             return std::make_shared<EOS::NobleAbelStiffenedGas<dim, number>>(material_data);
+          case EquationOfState::weakly_compressible:
+            return std::make_shared<EOS::WeaklyCompressible<dim, number>>(material_data);
           default:
             DEAL_II_NOT_IMPLEMENTED();
         }

@@ -40,6 +40,27 @@ MeltPoolDG::CompressibleFlow::EOSData<number>::add_parameters(dealii::ParameterH
       "latent heat,.... The variable is required for the Noble-Abel stiffened gas EOS. The "
       "maximum value is 0.",
       dealii::Patterns::Double(std::numeric_limits<number>::min(), 0.));
+    prm.add_parameter(
+      "linearization point pressure",
+      linearization_point_pressure,
+      "Numerical EOS parameter for the reference pressure at the linearization point. "
+      "The variable is required for the weakly compressible (linearized) EOS. The "
+      "minimum value is 0.",
+      dealii::Patterns::Double(0., std::numeric_limits<number>::max()));
+    prm.add_parameter(
+      "linearization point density",
+      linearization_point_density,
+      "Numerical EOS parameter for the reference density at the linearization point. "
+      "The variable is required for the weakly compressible (linearized) EOS. The "
+      "minimum value is 0.",
+      dealii::Patterns::Double(0., std::numeric_limits<number>::max()));
+    prm.add_parameter(
+      "artificial sound speed",
+      artificial_sound_speed,
+      "Numerical EOS parameter for an artificial sound speed. "
+      "The variable is required for the weakly compressible (linearized) EOS. The "
+      "minimum value is 0.",
+      dealii::Patterns::Double(0., std::numeric_limits<number>::max()));
   }
   prm.leave_subsection();
 }
@@ -51,14 +72,21 @@ MeltPoolDG::CompressibleFlow::EOSData<number>::post(const EquationOfState eos_ty
   // Ensure that parameters are set for advanced equations of state
   if (eos_type == EquationOfState::stiffened_gas)
     AssertThrow(stiffening_pressure != std::numeric_limits<number>::max(),
-                dealii::ExcMessage("The parameter p_inf is required for the stiffened gas EOS."));
+                dealii::ExcMessage("The parameter stiffening_pressure is required for the stiffened gas EOS."));
   else if (eos_type == EquationOfState::noble_abel_stiffened_gas)
     AssertThrow(stiffening_pressure != std::numeric_limits<number>::max() and
                   covolume != std::numeric_limits<number>::max() and
                   heat_bound != std::numeric_limits<number>::min(),
                 dealii::ExcMessage(
-                  "The parameters p_inf, b and q are required for the Noble-Abel stiffened"
+                  "The parameters stiffening_pressure, covolume and heat_bound are required for the Noble-Abel stiffened"
                   " gas EOS."));
+  else if (eos_type == EquationOfState::weakly_compressible)
+    AssertThrow(linearization_point_pressure != std::numeric_limits<number>::min() and
+                  linearization_point_density != std::numeric_limits<number>::min() and
+                  artificial_sound_speed != std::numeric_limits<number>::min(),
+                dealii::ExcMessage(
+                  "The parameters linearization_point_pressure, linearization_point_density "
+                  "and artificial_sound_speed are required for the weakly compressible eos."));
 }
 
 template <typename number>
@@ -131,8 +159,8 @@ MeltPoolDG::CompressibleFlow::MaterialPhaseData<number>::add_parameters(
       "eos type",
       eos_type,
       "Type of equation of state. "
-      "The options are \"ideal_gas\", \"stiffened_gas\" and \"noble_abel_stiffened_gas\".",
-      dealii::Patterns::Selection("ideal_gas|stiffened_gas|noble_abel_stiffened_gas"));
+      "The options are \"ideal_gas\", \"stiffened_gas\", \"noble_abel_stiffened_gas\" and \"weakly_compressible\".",
+      dealii::Patterns::Selection("ideal_gas|stiffened_gas|noble_abel_stiffened_gas|weakly_compressible"));
     prm.add_parameter("reference density",
                       reference_density,
                       "Reference density for computing the interior penalty factor. "
