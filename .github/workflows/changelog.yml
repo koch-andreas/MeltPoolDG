@@ -1,0 +1,78 @@
+name: Update Changelog
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  update-changelog:
+    # update changelog when PR is merged
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Dynamic history is needed to parse commits
+
+      - name: Generate Changelog Content
+        id: changelog_builder
+        run: |
+          # Get variables from GitHub Event Context
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          MERGE_DATE=$(date +'%Y-%m-%d')
+          
+          # Extract labels and format them as a comma-separated list
+          LABELS=$(echo '${{ toJson(github.event.pull_request.labels.*.name) }}' | jq -r '. | join(", ")')
+          if [ -z "$LABELS" ]; then LABELS="none"; fi
+
+          # Fetch commit messages in this PR and format them
+          # This gets all commits from the PR merge base to the current HEAD
+          COMMITS=$(git log --format="* %s" origin/${{ github.event.pull_request.base.ref }}..HEAD)
+
+          # Escape newlines for GitHub Actions output variables
+          COMMITS="${COMMITS//'%'/'%25'}"
+          COMMITS="${COMMITS//$'\n'/'%0A'}"
+          COMMITS="${COMMITS//$'\r'/'%0D'}"
+
+          echo "date=$MERGE_DATE" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "labels=$LABELS" >> $GITHUB_OUTPUT
+          echo "commits=$COMMITS" >> $GITHUB_OUTPUT
+
+      - name: Update CHANGELOG.md File
+        run: |
+          DATE="${{ steps.changelog_builder.outputs.date }}"
+          PR_NO="${{ steps.changelog_builder.outputs.pr_number }}"
+          PR_URL="${{ steps.changelog_builder.outputs.pr_url }}"
+          LABELS="${{ steps.changelog_builder.outputs.labels }}"
+          
+          # Read and decode commits
+          COMMITS=$(printf "${{ steps.changelog_builder.outputs.commits }}")
+
+          # Create the new entry block
+          ENTRY="### [$DATE] PR [#$PR_NO]($PR_URL)\n"
+          ENTRY="$ENTRY**Labels:** \`$LABELS\`\n\n"
+          ENTRY="$ENTRY**Commits:**\n$COMMITS\n\n"
+
+          # Ensure CHANGELOG.md exists
+          touch CHANGELOG.md
+
+          # Prepend the new entry to the top of the file safely
+          printf "$ENTRY$(cat CHANGELOG.md)" > CHANGELOG.md
+
+      - name: Commit and Push Changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs(changelog): update CHANGELOG.md for PR #${{ github.event.pull_request.number }} [skip ci]"
+          file_pattern: 'CHANGELOG.md'
+          commit_options: '--no-verify'
