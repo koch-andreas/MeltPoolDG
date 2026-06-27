@@ -1,0 +1,88 @@
+{
+  "base": {
+    "case name": "evaporating_droplet",
+    "dimension": 1,
+    "verbosity level": 1,
+    "do print parameters": false,
+    "global refinements": 1
+  },
+  "time stepping": {
+    "start time": 0.0,
+    "end time": 1.0e-08
+  },
+  "output": {
+    "write frequency": 1,
+    "do user defined postprocessing": true,
+    "paraview": {
+      "filename": "evaporating_droplet_1D",
+      "enable": true
+    }
+  },
+  "simulation specific parameters": {
+    "lower boundary condition": "outflow_fixed_pressure",
+    "upper boundary condition": "outflow_fixed_pressure",
+    "initial conditions": {
+      "gas": "0.696621386276559; 0.; 250000",
+      "liquid": "4942.52838219827; 0.; 2782643479.17763"
+    },
+    "atmospheric pressure": 1.0e5
+  },
+  "compressible navier stokes": {
+    "numerical flux type": "lax_friedrichs_modified",
+    "courant number": 0.05,
+    "viscous courant number": 0.02,
+    "use cfl criteria": true,
+    "gravity constant": 0.0,
+    "domain representation type": "cut",
+    "time integration": {
+      "linear solver": {
+        "preconditioner type": "Identity",
+        "solver type": "CG",
+        "max iterations": 10000,
+        "rel tolerance": 1e-20,
+        "abs tolerance": 1e-20
+      }
+    },
+    "fe": {
+      "degree": 1,
+      "type": "FE_DGQ"
+    }
+  },
+  "compressible flow phase coupling": {
+    "type": "HLLP0_and_penalty",
+    "evaporation mass flux": 0.0,
+    "HLLP0 and penalty": {
+      "penalty parameter temperature jump": 0.2,
+      "delta T": 0.0
+    }
+  },
+  "material": {
+    "gas": {
+      "eos type": "ideal_gas",
+      "dynamic viscosity": 2e-05,
+      "specific isobaric heat": 1004.85,
+      "specific gas constant": 287.1,
+      "reference density": 1.0,
+      "gamma": 1.4
+    },
+    "liquid": {
+      "dynamic viscosity": 0.0035,
+      "specific isobaric heat": 1126.0,
+      "reference density": 4000.0,
+      "eos type": "weakly_compressible",
+      "equation of state": {
+        "linearization point pressure": 1.0e5,
+        "linearization point density": 4942.52838219827,
+        "artificial sound speed": 1000.0
+      }
+    }
+  },
+  "cut": {
+    "stabilization": {
+      "ghost-penalty": {
+        "gamma M degree 0": 1.0,
+        "gamma M degree 1": 1.0
+      }
+    }
+  }
+}

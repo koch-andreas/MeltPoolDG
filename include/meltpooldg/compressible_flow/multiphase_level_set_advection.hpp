@@ -125,6 +125,9 @@ namespace MeltPoolDG::Multiphase
           for (unsigned int i = 0; i < level_set.size(); i++)
             level_set[i] += time_step * interface_velocity[0];
         }
+      else if (case_name == "evaporating_droplet")
+        {
+        }
       else
         AssertThrow(false,
                     dealii::ExcMessage(

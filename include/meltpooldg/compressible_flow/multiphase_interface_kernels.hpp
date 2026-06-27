@@ -887,7 +887,46 @@ namespace MeltPoolDG::Multiphase
     // compute Robin-type viscous interface jump conditions
     // TODO: add contributions for surface tension and Marangoni forces (for dim>1)
 
+    std::vector<dealii::Tensor<1, dim, dealii::VectorizedArray<number>>> tangent;
+    tangent.resize(dim - 1);
+
+    // compute tangential vector for dim=2 and dim=3
+    if constexpr (dim == 2)
+      {
+        tangent[0][0] = normal[1];
+        tangent[0][1] = -normal[0];
+      }
+    else if constexpr (dim == 3)
+      {
+        dealii::Tensor<1, dim, dealii::VectorizedArray<number>> temp_vec;
+        temp_vec[0] = 1.;
+        // if normal vector is identical with unit vector choose different unit vector to
+        // compute the tangent
+        dealii::VectorizedArray<number> tolerance = 1.e-10;
+        dealii::VectorizedArray<number> norm_diff = (temp_vec - normal).norm();
+        dealii::Tensor<1, dim, dealii::VectorizedArray<number>> temp_vec_y;
+        temp_vec_y[1] = 1.;
+        for (int i = 0; i < 3; ++i)
+          {
+            temp_vec[i] = compare_and_apply_mask<dealii::SIMDComparison::less_than>(norm_diff,
+                                                                                    tolerance,
+                                                                                    temp_vec_y[i],
+                                                                                    temp_vec[i]);
+          }
+        tangent[0] = temp_vec - (temp_vec * normal) * normal;
+        tangent[1] = dealii::cross_product_3d(normal, tangent[0]);
+      }
+
+    const dealii::VectorizedArray<number> vel_liquid_tangent_x = vel_liquid * tangent[0];
+    const dealii::VectorizedArray<number> vel_liquid_tangent_y = vel_liquid * tangent[1];
+
+    const dealii::VectorizedArray<number> vel_gas_tangent_x = vel_gas * tangent[0];
+    const dealii::VectorizedArray<number> vel_gas_tangent_y = vel_gas * tangent[1];
+
     ConservedVariablesType J_Rob;
+
+    //J_Rob[1] = m_dot_evap * (vel_liquid[0]- vel_gas[0]) + (pressure_liquid - pressure_gas) * normal[0];
+    //J_Rob[2] = m_dot_evap * (vel_liquid[1]- vel_gas[1]) + (pressure_liquid - pressure_gas) * normal[1];
 
     J_Rob[Idx::energy] =
       m_dot_evap * (u_liquid[Idx::energy] / u_liquid[Idx::density] -
@@ -910,6 +949,12 @@ namespace MeltPoolDG::Multiphase
       ((multiphase_scratch_data.material_liquid.eos_utils->calculate_temperature(u_liquid) -
         multiphase_scratch_data.material_gas.eos_utils->calculate_temperature(u_gas)) -
        delta_T);
+
+    if constexpr (dim == 2)
+      {
+        penalty_term_dT[Idx::momentum_x] = 100. * (vel_liquid[0] - vel_gas[0]);
+        penalty_term_dT[Idx::momentum_y] = 100. * (vel_liquid[1] - vel_gas[1]);
+      }
 
     const ConservedVariablesType weighted_viscous_flux =
       UtilityFunctions::calculate_arithmetic_phase_weighted_average(

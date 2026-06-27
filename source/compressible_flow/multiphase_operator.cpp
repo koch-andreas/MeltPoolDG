@@ -390,7 +390,7 @@ namespace MeltPoolDG::Multiphase
 
                             // TODO: temporal solution for dim=1; revise for dim>1!
                             const number interface_velocity =
-                              (std::abs(w_liquid[Idx::density][0] - w_gas[Idx::density][0]) >
+                              0. * (std::abs(w_liquid[Idx::density][0] - w_gas[Idx::density][0]) >
                                    1.e-12 ?
                                  (w_liquid[Idx::momentum_x][0] - w_gas[Idx::momentum_x][0]) /
                                    (w_liquid[Idx::density][0] - w_gas[Idx::density][0]) :
@@ -601,7 +601,7 @@ namespace MeltPoolDG::Multiphase
                                                         auto &eval_p,
                                                         auto &material) {
       const auto eval_flags = EvaluationFlags::values |
-                              (is_viscous ? EvaluationFlags::gradients : EvaluationFlags::nothing);
+                              (EvaluationFlags::gradients);
       for (unsigned int face = face_range.first; face < face_range.second; ++face)
         {
           eval_m.reinit(face);
@@ -670,7 +670,7 @@ namespace MeltPoolDG::Multiphase
         *mapping_info_faces[mapping_idx], fe_point_temp);
 
       const auto eval_flags = EvaluationFlags::values |
-                              (is_viscous ? EvaluationFlags::gradients : EvaluationFlags::nothing);
+                              (EvaluationFlags::gradients);
 
       for (unsigned int face = face_range.first; face < face_range.second; ++face)
         {
@@ -718,11 +718,11 @@ namespace MeltPoolDG::Multiphase
                   if (is_viscous)
                     {
                       const auto flux =
-                        ConvectionDiffusionOperator::face(eval_m_int.get_value(q),
-                                                          eval_p_int.get_value(q),
-                                                          eval_m_int.get_gradient(q),
-                                                          eval_p_int.get_gradient(q),
-                                                          eval_m_int.normal_vector(q),
+                        ConvectionDiffusionOperator::face(eval_point_m.get_value(q),
+                                                          eval_point_p.get_value(q),
+                                                          eval_point_m.get_gradient(q),
+                                                          eval_point_p.get_gradient(q),
+                                                          eval_point_m.normal_vector(q),
                                                           interior_penalty_parameter,
                                                           ConvectiveKernel(material.data),
                                                           DiffusiveKernel(material.data));
@@ -730,22 +730,22 @@ namespace MeltPoolDG::Multiphase
                       flux_m = flux.inner_face_value;
                       flux_p = flux.outer_face_value;
 
-                      eval_m_int.submit_gradient(flux.inner_face_gradient, q);
-                      eval_p_int.submit_gradient(flux.outer_face_gradient, q);
+                      eval_point_m.submit_gradient(flux.inner_face_gradient, q);
+                      eval_point_p.submit_gradient(flux.outer_face_gradient, q);
                     }
                   else
                     {
-                      const auto flux = ConvectionOperator::face(eval_m_int.get_value(q),
-                                                                 eval_p_int.get_value(q),
-                                                                 eval_m_int.normal_vector(q),
+                      const auto flux = ConvectionOperator::face(eval_point_m.get_value(q),
+                                                                 eval_point_p.get_value(q),
+                                                                 eval_point_m.normal_vector(q),
                                                                  ConvectiveKernel(material.data));
 
                       flux_m = flux.inner_face_value;
                       flux_p = flux.outer_face_value;
                     }
 
-                  eval_m_int.submit_value(flux_m, q);
-                  eval_p_int.submit_value(flux_p, q);
+                  eval_point_m.submit_value(flux_m, q);
+                  eval_point_p.submit_value(flux_p, q);
                 }
 
               eval_point_m.integrate_in_face(&eval_m_int.get_scratch_data().begin()[0][lane],

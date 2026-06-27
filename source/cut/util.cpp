@@ -164,7 +164,7 @@ namespace MeltPoolDG::CutUtil
         {
           quad_vec_faces_liquid_domain.resize(reserve_size);
           if (is_two_phase)
-            quad_vec_faces_gas_domain.reserve(reserve_size);
+            quad_vec_faces_gas_domain.resize(reserve_size);
         }
       vector_cell_iterators.reserve(reserve_size);
     }

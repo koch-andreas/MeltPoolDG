@@ -92,7 +92,7 @@ namespace MeltPoolDG::Multiphase
     // distorted level-set.
 
     // move level-set analytically (currently, only 1D simulations are supported)
-    AssertThrow(dim == 1,
+    /*AssertThrow(dim == 1,
                 dealii::ExcNotImplemented(
                   "Currently, interface movement is only allowed for 1D simulations."));
 
@@ -100,7 +100,7 @@ namespace MeltPoolDG::Multiphase
                                                 time_step,
                                                 simulation_case->parameters.base.case_name,
                                                 scratch_data,
-                                                level_set_dof_idx);
+                                                level_set_dof_idx);*/
   }
 
   template <int dim, typename number>

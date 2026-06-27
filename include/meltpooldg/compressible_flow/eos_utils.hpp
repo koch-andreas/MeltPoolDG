@@ -567,7 +567,7 @@ namespace MeltPoolDG::CompressibleFlow::EOS
       const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> velocity =
         calculate_velocity<dim, number>(conserved_variables);
 
-      return (conserved_variables[2]/conserved_variables[0] - 0.5 * scalar_product(velocity, velocity)) / material_data.specific_isobaric_heat;
+      return (conserved_variables[dim+1]/conserved_variables[0] - 0.5 * scalar_product(velocity, velocity)) / material_data.specific_isobaric_heat;
     }
 
     /**
