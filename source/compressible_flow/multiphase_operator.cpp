@@ -454,7 +454,7 @@ namespace MeltPoolDG::Multiphase
                             // returns velocity with respect to the outward liquid phase pointing
                             // normal!
                             level_set_advection_operator.set_interface_velocity(
-                              velocity_interface_vec[0] * normal[0][0]);
+                              0. * velocity_interface_vec[0] * normal[0][0]);
 
                             if (is_viscous_liquid or is_viscous_gas)
                               {

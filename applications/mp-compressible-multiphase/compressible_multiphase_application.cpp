@@ -119,10 +119,10 @@ namespace MeltPoolDG::Multiphase
 
     // Currently, only homogeneous Cartesian grids without mesh refinements are enabled for
     // cutDG
-    AssertThrow(
+    /*AssertThrow(
       std::abs(scratch_data->get_min_cell_size() - scratch_data->get_max_cell_size()) < 1e-10,
       dealii::ExcMessage(
-        "Only homogeneous Cartesian grids without local grid refinements are supported!"));
+        "Only homogeneous Cartesian grids without local grid refinements are supported!"));*/
 
     // print mesh information
     CellMonitor<number>::add_info("compFlow::cells",

@@ -1,28 +1,25 @@
 {
   "base": {
-    "case name": "evaporating_droplet",
+    "case name": "evaporating_droplet_circular_domain",
     "dimension": 2,
     "verbosity level": 1,
     "do print parameters": false,
-    "global refinements": 1
+    "global refinements": 4
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 1.0e-06
+    "end time": 1.0e-03
   },
   "output": {
     "write frequency": 100,
     "do user defined postprocessing": true,
     "paraview": {
-      "filename": "evaporating_droplet_2D",
+      "filename": "evaporating_droplet_2D_evaporation_circular_domain",
       "enable": true
     }
   },
   "simulation specific parameters": {
-    "lower boundary condition": "outflow_fixed_pressure",
-    "upper boundary condition": "outflow_fixed_pressure",
-    "left boundary condition": "outflow_fixed_pressure",
-    "right boundary condition": "outflow_fixed_pressure",
+    "boundary condition": "outflow_fixed_pressure",
     "initial conditions": {
       "gas": "0.696621386276559; 0.; 0.; 250000",
       "liquid": "4942.52838219827; 0.; 0.; 2782643479.17763"
@@ -31,8 +28,8 @@
   },
   "compressible navier stokes": {
     "numerical flux type": "lax_friedrichs_modified",
-    "courant number": 0.05,
-    "viscous courant number": 0.02,
+    "courant number": 0.01,
+    "viscous courant number": 0.01,
     "use cfl criteria": true,
     "gravity constant": 0.0,
     "domain representation type": "cut",
@@ -52,10 +49,14 @@
   },
   "compressible flow phase coupling": {
     "type": "HLLP0_and_penalty",
-    "evaporation mass flux": 0.0,
+    "evaporation model": "Knight",
+    "laser heat source": {
+      "do ramp": true,
+      "ramp time": 1.0e-5,
+      "laser power density": 2.0e9
+    },
     "HLLP0 and penalty": {
-      "penalty parameter temperature jump": 0.2,
-      "delta T": 0.0
+      "penalty parameter temperature jump": 2.0
     }
   },
   "material": {
@@ -64,7 +65,7 @@
       "dynamic viscosity": 2e-05,
       "specific isobaric heat": 1004.85,
       "specific gas constant": 287.1,
-      "reference density": 1.0,
+      "reference density": 0.01,
       "gamma": 1.4
     },
     "liquid": {
@@ -79,28 +80,12 @@
       }
     }
   },
-  "phase change": {
-    "liquid gas": {
-      "boiling temperature": 3133.0,
-      "reference pressure": 100000.0,
-      "latent heat of vaporization": 8840000.0
-    },
-    "solid liquid": {
-      "use darcy damping": true,
-      "liquidus temperature": 2200,
-      "solidus temperature": 1933
-    }
-  },
   "cut": {
     "stabilization": {
       "ghost-penalty": {
-        "gamma M degree 0": 1.0,
-        "gamma M degree 1": 1.0
+        "gamma M degree 0": 0.5,
+        "gamma M degree 1": 0.1
       }
     }
-  },
-  "darcy damping": {
-    "mushy zone morphology": 1.0e12,
-    "avoid div zero constant": 1.0
   }
 }

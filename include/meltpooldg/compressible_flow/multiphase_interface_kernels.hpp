@@ -925,8 +925,8 @@ namespace MeltPoolDG::Multiphase
 
     ConservedVariablesType J_Rob;
 
-    //J_Rob[1] = m_dot_evap * (vel_liquid[0]- vel_gas[0]) + (pressure_liquid - pressure_gas) * normal[0];
-    //J_Rob[2] = m_dot_evap * (vel_liquid[1]- vel_gas[1]) + (pressure_liquid - pressure_gas) * normal[1];
+    J_Rob[1] = m_dot_evap * (vel_liquid[0]- vel_gas[0]) + (pressure_liquid - pressure_gas) * normal[0];
+    J_Rob[2] = m_dot_evap * (vel_liquid[1]- vel_gas[1]) + (pressure_liquid - pressure_gas) * normal[1];
 
     J_Rob[Idx::energy] =
       m_dot_evap * (u_liquid[Idx::energy] / u_liquid[Idx::density] -
@@ -950,11 +950,11 @@ namespace MeltPoolDG::Multiphase
         multiphase_scratch_data.material_gas.eos_utils->calculate_temperature(u_gas)) -
        delta_T);
 
-    if constexpr (dim == 2)
+    /*if constexpr (dim == 2)
       {
         penalty_term_dT[Idx::momentum_x] = 100. * (vel_liquid[0] - vel_gas[0]);
         penalty_term_dT[Idx::momentum_y] = 100. * (vel_liquid[1] - vel_gas[1]);
-      }
+      }*/
 
     const ConservedVariablesType weighted_viscous_flux =
       UtilityFunctions::calculate_arithmetic_phase_weighted_average(
