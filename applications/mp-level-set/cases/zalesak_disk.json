@@ -21,15 +21,20 @@
   },
   "level set": {
     "reinitialization": {
-      "reinit constant epsilon": -1,
-      "reinit scale factor epsilon": 2,
       "enable": true,
       "type": "olsson2007",
       "hyperbolic": {
         "pseudo time stepping": {
           "max n steps": 5
         }
+      },
+      "interface thickness parameter": {
+        "type": "proportional_to_cell_size",
+        "val": 1
       }
+    },
+    "curvature": {
+      "filter parameter": 0.0
     },
     "normal vector": {
       "filter parameter": 0.5

@@ -28,7 +28,7 @@
       "preconditioner type": "AMG"
     }
   },
-  "application specific": {
+  "laser": {
     "beam direction": "0.0,-1.0"
   },
   "case specific": {

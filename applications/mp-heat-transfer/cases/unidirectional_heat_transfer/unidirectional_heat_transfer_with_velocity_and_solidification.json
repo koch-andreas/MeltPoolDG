@@ -31,7 +31,6 @@
     "velocity": 0.005
   },
   "application specific": {
-    "do two phase": false,
     "do solidification": true
   },
   "material": {

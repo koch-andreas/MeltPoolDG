@@ -71,9 +71,7 @@
       "reference density": 0.15,
       "gamma": 1.666666666666666,
       "thermal conductivity": 0.02863,
-      "equation of state": {
-        "type": "ideal_gas"
-      }
+      "eos type": "ideal_gas"
     },
     "liquid": {
       "dynamic viscosity": 0.0035,
@@ -81,8 +79,8 @@
       "reference density": 3400.0,
       "gamma": 1.006804865,
       "thermal conductivity": 28.63,
+      "eos type": "noble_abel_stiffened_gas",
       "equation of state": {
-        "type": "noble_abel_stiffened_gas",
         "p inf": 258134879.2,
         "b": 0.00018759,
         "q": -2587818.15

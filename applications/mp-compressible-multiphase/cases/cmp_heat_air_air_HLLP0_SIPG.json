@@ -16,7 +16,7 @@
     "do user defined postprocessing": true,
     "paraview": {
       "filename": "heat_air_air_HLLP0_and_SIPG",
-      "enable": false
+      "enable": true
     }
   },
   "case specific": {
@@ -64,9 +64,7 @@
       "thermal conductivity": 0.1,
       "reference density": 0.06,
       "gamma": 1.4,
-      "equation of state": {
-        "type": "ideal_gas"
-      }
+      "eos type": "ideal_gas"
     },
     "liquid": {
       "dynamic viscosity": 2e-05,
@@ -75,13 +73,10 @@
       "thermal conductivity": 0.1,
       "reference density": 0.06,
       "gamma": 1.4,
-      "equation of state": {
-        "type": "ideal_gas"
-      }
+      "eos type": "ideal_gas"
     }
   },
   "cut": {
-    "two phase": true,
     "stabilization": {
       "ghost-penalty": {
         "gamma M degree 0": 1.0,

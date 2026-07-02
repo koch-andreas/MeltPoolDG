@@ -16,7 +16,7 @@
     "do user defined postprocessing": true,
     "paraview": {
       "filename": "am_evaporation_HLLP0_and_SIPG",
-      "enable": false
+      "enable": true
     }
   },
   "case specific": {
@@ -68,9 +68,7 @@
       "thermal conductivity": 0.02863,
       "reference density": 0.2,
       "gamma": 1.666666666666666,
-      "equation of state": {
-        "type": "ideal_gas"
-      }
+      "eos type": "ideal_gas"
     },
     "liquid": {
       "dynamic viscosity": 0.0035,
@@ -78,8 +76,8 @@
       "thermal conductivity": 28.63,
       "reference density": 200.0,
       "gamma": 1.4355,
+      "eos type": "noble_abel_stiffened_gas",
       "equation of state": {
-        "type": "noble_abel_stiffened_gas",
         "p inf": 11587000000.0,
         "b": 0.00018759,
         "q": -607968.8

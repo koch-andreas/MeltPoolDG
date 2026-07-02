@@ -66,13 +66,13 @@
       "equation of state": {
         "p inf": 786251100.0
       }
-    },
-    "cut": {
-      "stabilization": {
-        "ghost-penalty": {
-          "gamma M degree 0": 1.0,
-          "gamma M degree 1": 1.0
-        }
+    }
+  },
+  "cut": {
+    "stabilization": {
+      "ghost-penalty": {
+        "gamma M degree 0": 1.0,
+        "gamma M degree 1": 1.0
       }
     }
   }

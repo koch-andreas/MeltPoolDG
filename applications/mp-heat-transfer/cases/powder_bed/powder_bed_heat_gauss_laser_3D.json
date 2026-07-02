@@ -45,7 +45,7 @@
     "cell repetitions": "4,4,3",
     "initial temperature": 500.0,
     "powder bed": {
-      "particle list file": "particles_in_domain.csv",
+      "particle list file": "applications/mp-heat-transfer/cases/powder_bed/particles_in_domain.csv",
       "substrate level": 0.0
     }
   },
@@ -55,13 +55,5 @@
       "enable": true
     },
     "output variables": "temperature,heat_source,heaviside"
-  },
-  "level set": {
-    "reinitialization": {
-      "interface thickness parameter": {
-        "type": "proportional_to_cell_size",
-        "val": 1.5
-      }
-    }
   }
 }

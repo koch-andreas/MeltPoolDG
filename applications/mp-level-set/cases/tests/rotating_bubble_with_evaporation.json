@@ -16,7 +16,7 @@
   },
   "evaporation": {
     "analytical": {
-      "function": 0.0001
+      "function": "0.0001"
     }
   },
   "material": {

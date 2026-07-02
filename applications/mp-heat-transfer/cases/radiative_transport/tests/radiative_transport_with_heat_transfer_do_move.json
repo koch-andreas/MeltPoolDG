@@ -50,13 +50,5 @@
   "time stepping": {
     "end time": 1.0,
     "time step size": 0.1
-  },
-  "level set": {
-    "reinitialization": {
-      "interface thickness parameter": {
-        "type": "proportional_to_cell_size",
-        "val": 6.0
-      }
-    }
   }
 }

@@ -17,7 +17,9 @@
   },
   "rte": {
     "rte verbosity level": 0,
-    "avoid div zero constant": 1e-16,
+    "absorptivity": {
+      "avoid div zero constant": 1e-16
+    },
     "linear solver": {
       "solver type": "GMRES",
       "monitor type": "reduced",

@@ -52,13 +52,5 @@
     "paraview": {
       "enable": false
     }
-  },
-  "level set": {
-    "reinitialization": {
-      "interface thickness parameter": {
-        "type": "proportional_to_cell_size",
-        "val": 1.5
-      }
-    }
   }
 }

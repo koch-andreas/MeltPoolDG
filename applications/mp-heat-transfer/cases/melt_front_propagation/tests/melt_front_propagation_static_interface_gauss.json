@@ -34,7 +34,6 @@
     }
   },
   "application specific": {
-    "do two phase": true,
     "do solidification": true
   },
   "laser": {

@@ -65,7 +65,7 @@
     },
     "evaporative cooling": {
       "enable": true,
-      "consider enthalpy transport vapor mass flux": true
+      "consider enthalpy transport vapor mass flux": "true"
     }
   },
   "output": {

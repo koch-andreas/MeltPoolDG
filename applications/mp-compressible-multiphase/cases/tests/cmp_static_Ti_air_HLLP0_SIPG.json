@@ -1,7 +1,7 @@
 {
-  "$schema": "../parameters.schema.json",
+  "$schema": "../../parameters.schema.json",
   "base": {
-    "case name": "oscillating_water_column",
+    "case name": "two_phase",
     "dimension": 1,
     "verbosity level": 1,
     "do print parameters": false,
@@ -9,20 +9,28 @@
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 0.5
+    "end time": 5e-09
   },
   "output": {
-    "write frequency": 1000,
+    "write frequency": 1,
     "do user defined postprocessing": true,
     "paraview": {
-      "filename": "oscillating_water_column_HLLP0_SIPG",
+      "filename": "static_Ti_air_HLLP0_SIPG",
       "enable": false
+    }
+  },
+  "case specific": {
+    "left boundary condition": "no_slip_wall",
+    "right boundary condition": "no_slip_wall",
+    "initial conditions": {
+      "gas": "0.0977166666666666; 0.0; 2.104084125e5",
+      "liquid": "3622.73659245216946; 0.0; 1.003506642361949e10"
     }
   },
   "compressible navier stokes": {
     "numerical flux type": "lax_friedrichs_modified",
-    "courant number": 0.01,
-    "viscous courant number": 0.01,
+    "courant number": 0.05,
+    "viscous courant number": 0.02,
     "use cfl criteria": true,
     "gravity constant": 0.0,
     "domain representation type": "cut",
@@ -53,28 +61,28 @@
       "dynamic viscosity": 2e-05,
       "specific isobaric heat": 1004.85,
       "specific gas constant": 287.1,
-      "reference density": 0.4,
+      "reference density": 1.0,
       "gamma": 1.4,
-      "equation of state": {
-        "type": "ideal_gas"
-      }
+      "eos type": "ideal_gas"
     },
     "liquid": {
-      "dynamic viscosity": 0.001,
-      "specific isobaric heat": 4190.0,
-      "reference density": 800.0,
-      "gamma": 2.788103,
+      "dynamic viscosity": 0.0035,
+      "specific isobaric heat": 1126.0,
+      "reference density": 3622.0,
+      "gamma": 1.4355,
+      "eos type": "noble_abel_stiffened_gas",
       "equation of state": {
-        "type": "stiffened_gas",
-        "p inf": 786251100.0
+        "p inf": 11587000000.0,
+        "b": 0.00018759,
+        "q": -607968.8
       }
-    },
-    "cut": {
-      "stabilization": {
-        "ghost-penalty": {
-          "gamma M degree 0": 1.0,
-          "gamma M degree 1": 1.0
-        }
+    }
+  },
+  "cut": {
+    "stabilization": {
+      "ghost-penalty": {
+        "gamma M degree 0": 1.0,
+        "gamma M degree 1": 1.0
       }
     }
   }

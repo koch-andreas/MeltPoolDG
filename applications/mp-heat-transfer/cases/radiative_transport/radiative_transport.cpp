@@ -1,4 +1,3 @@
-#ifdef MELT_POOL_DG_WITH_RTE
 #  include "../../../mp-radiative-transport/cases/radiative_transport.templates.hpp"
 //
 #  include <meltpooldg/core/case_registration.hpp>
@@ -23,4 +22,3 @@ namespace MeltPoolDG::Simulation::RadiativeTransport
                                      3,
                                      double);
 } // namespace MeltPoolDG::Simulation::RadiativeTransport
-#endif

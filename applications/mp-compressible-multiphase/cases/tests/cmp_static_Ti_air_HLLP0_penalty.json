@@ -1,5 +1,5 @@
 {
-  "$schema": "../parameters.schema.json",
+  "$schema": "../../parameters.schema.json",
   "base": {
     "case name": "two_phase",
     "dimension": 1,
@@ -9,22 +9,22 @@
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 4e-06
+    "end time": 5e-09
   },
   "output": {
-    "write frequency": 100,
+    "write frequency": 1,
     "do user defined postprocessing": true,
     "paraview": {
-      "filename": "moving_Ti_air_HLLP0_and_SIPG",
+      "filename": "static_Ti_air_HLLP0_penalty",
       "enable": false
     }
   },
   "case specific": {
-    "left boundary condition": "inflow",
-    "right boundary condition": "outflow_fixed_energy",
+    "left boundary condition": "no_slip_wall",
+    "right boundary condition": "no_slip_wall",
     "initial conditions": {
-      "gas": "0.097716666666666; 100.0 * 0.097716666666666; 2.108969958333318e5",
-      "liquid": "3622.73659245216946; 100.0 * 3622.73659245216946; 1.005318010658175e10"
+      "gas": "0.0977166666666666; 0.0; 2.104084125e5",
+      "liquid": "3622.73659245216946; 0.0; 1.003506642361949e10"
     }
   },
   "compressible navier stokes": {
@@ -49,10 +49,10 @@
     }
   },
   "compressible flow phase coupling": {
-    "type": "HLLP0_and_SIPG",
+    "type": "HLLP0_and_penalty",
     "evaporation mass flux": 0.0,
-    "HLLP0 and SIPG": {
-      "interior penalty parameter interface": 1.0,
+    "HLLP0 and penalty": {
+      "penalty parameter temperature jump": 0.2,
       "delta T": 0.0
     }
   },
@@ -63,17 +63,15 @@
       "specific gas constant": 287.1,
       "reference density": 1.0,
       "gamma": 1.4,
-      "equation of state": {
-        "type": "ideal_gas"
-      }
+      "eos type": "ideal_gas"
     },
     "liquid": {
       "dynamic viscosity": 0.0035,
       "specific isobaric heat": 1126.0,
       "reference density": 3622.0,
       "gamma": 1.4355,
+      "eos type": "noble_abel_stiffened_gas",
       "equation of state": {
-        "type": "noble_abel_stiffened_gas",
         "p inf": 11587000000.0,
         "b": 0.00018759,
         "q": -607968.8

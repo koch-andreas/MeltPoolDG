@@ -41,7 +41,7 @@
     },
     "evaporative cooling": {
       "enable": true,
-      "consider enthalpy transport vapor mass flux": false,
+      "consider enthalpy transport vapor mass flux": "false",
       "dirac delta function approximation": {
         "auto weights": true,
         "type": "heaviside_phase_weighted"

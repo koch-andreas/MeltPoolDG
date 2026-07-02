@@ -82,7 +82,7 @@
         "nitsche parameter": 500
       }
     },
-    "@predictor": {
+    "predictor": {
       "type": "linear_extrapolation"
     },
     "nlsolve": {

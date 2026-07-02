@@ -21,7 +21,6 @@
   },
   "level set": {
     "reinitialization": {
-      "reinit eps scale factor": 0.5,
       "linear solver": {
         "solver type": "CG",
         "preconditioner type": "Identity",

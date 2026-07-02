@@ -20,9 +20,11 @@
   },
   "rte": {
     "rte verbosity level": 3,
-    "absorptivity gas": 0,
-    "absorptivity liquid": 10.0,
-    "avoid div zero constant": 1e-10,
+    "absorptivity": {
+      "absorptivity gas": 0,
+      "absorptivity liquid": 10.0,
+      "avoid div zero constant": 1e-10
+    },
     "predictor type": "pseudo_time_stepping",
     "absorptivity type": "gradient_based",
     "pseudo time stepping": {
