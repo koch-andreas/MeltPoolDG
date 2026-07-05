@@ -64,7 +64,7 @@ namespace MeltPoolDG::Evaporation
                   "The Mach number exceeds Ma = 10. The result is expected to be non-physical!"));
 
     // Choose a minimum finite Mach number to trigger evaporation initially
-    const number_2 Ma_gas_corrected = std::max(Ma_gas, number_2(1.e-6));
+    const number_2 Ma_gas_corrected = std::max(Ma_gas, number_2(1.e-4));
 
     // Dimensionless gas velocity
     const number_2 m_g = Ma_gas_corrected * std::sqrt(0.5 * specific_heat_ratio_vapor);
