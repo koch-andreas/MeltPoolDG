@@ -32,7 +32,7 @@
      How did you ensure that the solution works? -->
 
 # Screenshots (if appropriate)
-<!-- Do you have an visual results from simulations that relate to this PR? -->
+<!-- Do you have any visual results from simulations that relate to this PR? -->
 
 # Checklist (should be removed by the person who merges this PR)
 
@@ -46,3 +46,4 @@
 - [ ] All in-code documentation related to this PR is up to date (Doxygen format)
 - [ ] Commit has unit test(s) (preferred) or application test(s)
 - [ ] If the fix is temporary, an issue is opened where this PR is referenced
+- [ ] A changelog entry is added for any notable change
