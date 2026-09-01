@@ -6,6 +6,7 @@
 #include <deal.II/base/tensor.h>
 #include <deal.II/base/vectorization.h>
 
+#include <meltpooldg/compressible_flow/data_types.hpp>
 #include <meltpooldg/compressible_flow/material.hpp>
 #include <meltpooldg/utilities/concepts.hpp>
 #include <meltpooldg/utilities/dealii_tensor.hpp>
@@ -29,6 +30,23 @@ namespace MeltPoolDG::Flow
     };
     {
       v.total_energy()
+    };
+  };
+
+  /**
+   * Concept defining the specific requirements for a value view with primitive variables to be used
+   * with any equation of state.
+   */
+  template <typename T>
+  concept EOSIsPrimitiveValueView = requires(const T v) {
+    {
+      v.pressure()
+    };
+    {
+      v.velocity()
+    };
+    {
+      v.temperature()
     };
   };
 
@@ -221,6 +239,48 @@ namespace MeltPoolDG::Flow
       return thermodynamic_pressure(value_view, material_view) /
              (value_view.density() * (material_view.heat_capacity_ratio() - 1.));
     }
+
+    /**
+     * Compute the set of conserved variables (density, momentum, total energy) from the given state
+     * of primitive variables (pressure, velocity, temperature) for an ideal gas.
+     *
+     * @param primitive_value_view View providing access to the flow state in primitive variables.
+     * @param material_view View providing access to the material properties.
+     */
+    template <int dim,
+              typename ConservativeStateType,
+              EOSIsPrimitiveValueView PrimitiveValueView,
+              IdealGasIsMaterialView  MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      ConservativeStateType
+      conservative_from_primitive(const PrimitiveValueView &primitive_value_view,
+                                  const MaterialView       &material_view)
+    {
+      const auto pressure    = primitive_value_view.pressure();
+      const auto temperature = primitive_value_view.temperature();
+      const auto velocity    = primitive_value_view.velocity();
+
+      const auto density = pressure / (material_view.specific_gas_constant() * temperature);
+
+      ConservativeStateType conservative;
+
+      using Idx = CompressibleFlow::ConservedVariableIndex<dim>;
+
+      // density
+      conservative[Idx::density] = density;
+
+      // momentum
+      for (unsigned int d = 0; d < dim; ++d)
+        conservative[Idx::momentum + d] = density * velocity[d];
+
+      // total energy
+      conservative[Idx::energy] =
+        density * (material_view.specific_gas_constant() /
+                     (material_view.heat_capacity_ratio() - 1.) * temperature +
+                   0.5 * scalar_product(velocity, velocity));
+
+      return conservative;
+    }
   };
 
   struct StiffenedGasEOS
@@ -353,6 +413,50 @@ namespace MeltPoolDG::Flow
       return (thermodynamic_pressure(value_view, material_view) +
               material_view.heat_capacity_ratio() * material_view.stiffening_pressure()) /
              (value_view.density() * (material_view.heat_capacity_ratio() - 1.));
+    }
+
+    /**
+     * Compute the set of conserved variables (density, momentum, total energy) from the given state
+     * of primitive variables (pressure, velocity, temperature) for a stiffened gas.
+     *
+     * @param primitive_value_view View providing access to the flow state in primitive variables.
+     * @param material_view View providing access to the material properties.
+     */
+    template <int dim,
+              typename ConservativeStateType,
+              EOSIsPrimitiveValueView    PrimitiveValueView,
+              StiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      ConservativeStateType
+      conservative_from_primitive(const PrimitiveValueView &primitive_value_view,
+                                  const MaterialView       &material_view)
+    {
+      const auto density =
+        (primitive_value_view.pressure() + material_view.stiffening_pressure()) *
+        material_view.heat_capacity_ratio() /
+        (material_view.specific_isobaric_heat() * primitive_value_view.temperature() *
+         (material_view.heat_capacity_ratio() - 1.));
+
+      ConservativeStateType conservative;
+
+      using Idx = CompressibleFlow::ConservedVariableIndex<dim>;
+
+      // density
+      conservative[Idx::density] = density;
+
+      // momentum
+      for (unsigned int d = 0; d < dim; ++d)
+        conservative[Idx::momentum + d] = density * primitive_value_view.velocity(d);
+
+      // total energy
+      conservative[Idx::energy] =
+        density *
+        (material_view.specific_isobaric_heat() / material_view.heat_capacity_ratio() *
+           primitive_value_view.temperature() +
+         material_view.stiffening_pressure() / density +
+         0.5 * scalar_product(primitive_value_view.velocity(), primitive_value_view.velocity()));
+
+      return conservative;
     }
   };
 
@@ -496,6 +600,54 @@ namespace MeltPoolDG::Flow
                (material_view.heat_capacity_ratio() - 1.) *
                (1. / value_view.density() - material_view.covolume()) +
              material_view.heat_bound();
+    }
+
+    /**
+     * Compute the set of conserved variables (density, momentum, total energy) from the given state
+     * of primitive variables (pressure, velocity, temperature) for a Noble-Abel stiffened gas.
+     *
+     * @param primitive_value_view View providing access to the flow state in primitive variables.
+     * @param material_view View providing access to the material properties.
+     */
+    template <int dim,
+              typename ConservativeStateType,
+              EOSIsPrimitiveValueView             PrimitiveValueView,
+              NobleAbelStiffenedGasIsMaterialView MaterialView>
+    static inline DEAL_II_ALWAYS_INLINE //
+      ConservativeStateType
+      conservative_from_primitive(const PrimitiveValueView &primitive_value_view,
+                                  const MaterialView       &material_view)
+    {
+      const auto pressure    = primitive_value_view.pressure();
+      const auto temperature = primitive_value_view.temperature();
+
+      const auto density =
+        (pressure + material_view.stiffening_pressure()) /
+        (material_view.specific_isobaric_heat() * temperature *
+           (material_view.heat_capacity_ratio() - 1.) / material_view.heat_capacity_ratio() +
+         material_view.covolume() * (pressure + material_view.stiffening_pressure()));
+
+      ConservativeStateType conservative;
+
+      using Idx = CompressibleFlow::ConservedVariableIndex<dim>;
+
+      // density
+      conservative[Idx::density] = density;
+
+      // momentum
+      for (unsigned int d = 0; d < dim; ++d)
+        conservative[Idx::momentum + d] = density * primitive_value_view.velocity(d);
+
+      // total energy
+      conservative[Idx::energy] =
+        density *
+        (material_view.specific_isobaric_heat() / material_view.heat_capacity_ratio() *
+           temperature +
+         material_view.stiffening_pressure() * (1. / density - material_view.covolume()) +
+         material_view.heat_bound() +
+         0.5 * scalar_product(primitive_value_view.velocity(), primitive_value_view.velocity()));
+
+      return conservative;
     }
   };
 

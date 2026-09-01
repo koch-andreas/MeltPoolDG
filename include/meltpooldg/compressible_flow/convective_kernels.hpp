@@ -14,6 +14,7 @@
 #include <meltpooldg/compressible_flow/operation_data.hpp>
 #include <meltpooldg/compressible_flow/operation_scratch_data.hpp>
 #include <meltpooldg/compressible_flow/phase_coupling_data.hpp>
+#include <meltpooldg/compressible_flow/state_views.hpp>
 #include <meltpooldg/compressible_flow/utils.hpp>
 #include <meltpooldg/utilities/dealii_tensor.hpp>
 
@@ -39,6 +40,8 @@ namespace MeltPoolDG::CompressibleFlow
   {
     using ConservedVariables         = ConservedVariablesType<dim, number>;
     using ConservedVariablesGradient = ConservedVariablesGradientType<dim, number>;
+
+    using StateView = DofStateView<dim, number, const ConservedVariables>;
 
     /**
      * @brief Constructor initializing the convective kernel with flow and material properties.
@@ -157,8 +160,9 @@ namespace MeltPoolDG::CompressibleFlow
   {
     const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> velocity =
       calculate_velocity<dim, number>(conserved_variables);
-    const dealii::VectorizedArray<number> pressure =
-      material.eos_utils->calculate_thermodynamic_pressure(conserved_variables);
+
+    StateView                             state_view(conserved_variables, material.data);
+    const dealii::VectorizedArray<number> pressure = state_view.pressure();
 
     ConservedVariablesGradient flux;
     for (unsigned int d = 0; d < dim; ++d)
@@ -187,8 +191,11 @@ namespace MeltPoolDG::CompressibleFlow
     const auto flux_m = calculate_convective_flux(u_m);
     const auto flux_p = calculate_convective_flux(u_p);
 
-    const auto sound_speed_p = material.eos_utils->calculate_speed_of_sound(u_p);
-    const auto sound_speed_m = material.eos_utils->calculate_speed_of_sound(u_m);
+    StateView state_view_p(u_p, material.data);
+    StateView state_view_m(u_m, material.data);
+
+    const auto sound_speed_p = state_view_p.speed_of_sound();
+    const auto sound_speed_m = state_view_m.speed_of_sound();
 
     switch (flow_data.numerical_flux_type)
       {
@@ -380,10 +387,12 @@ namespace MeltPoolDG::CompressibleFlow
               const auto velocity_m = calculate_velocity<dim, number>(w_m);
               const auto velocity_p = calculate_velocity<dim, number>(w_p);
 
-              const auto lambda = std::max(std::abs(velocity_p * normal) +
-                                             material.eos_utils->calculate_speed_of_sound(w_p),
-                                           std::abs(velocity_m * normal) +
-                                             material.eos_utils->calculate_speed_of_sound(w_m));
+              StateView state_view_p(w_p, material.data);
+              StateView state_view_m(w_m, material.data);
+
+              const auto lambda =
+                std::max(std::abs(velocity_p * normal) + state_view_p.speed_of_sound(),
+                         std::abs(velocity_m * normal) + state_view_m.speed_of_sound());
               return lambda * (delta_w_m - delta_w_p);
             };
             break;
@@ -399,8 +408,11 @@ namespace MeltPoolDG::CompressibleFlow
               const auto velocity_m = calculate_velocity<dim, number>(w_m);
               const auto velocity_p = calculate_velocity<dim, number>(w_p);
 
-              const auto pressure_m = material.eos_utils->calculate_thermodynamic_pressure(w_m);
-              const auto pressure_p = material.eos_utils->calculate_thermodynamic_pressure(w_p);
+              StateView state_view_p(w_p, material.data);
+              StateView state_view_m(w_m, material.data);
+
+              const auto pressure_m = state_view_m.pressure();
+              const auto pressure_p = state_view_p.pressure();
 
               const auto lambda =
                 0.5 * std::sqrt(std::max(velocity_p.norm_square() +
@@ -494,11 +506,15 @@ namespace MeltPoolDG::CompressibleFlow
             const auto velocity_m = calculate_velocity<dim, number>(w_m);
             const auto velocity_p = calculate_velocity<dim, number>(w_p);
 
-            const auto pressure_m = material.eos_utils->calculate_thermodynamic_pressure(w_m);
-            const auto pressure_p = material.eos_utils->calculate_thermodynamic_pressure(w_p);
+            StateView state_view_p(w_p, material.data);
+            StateView state_view_m(w_m, material.data);
 
-            const auto speed_of_sound_m = material.eos_utils->calculate_speed_of_sound(w_m);
-            const auto speed_of_sound_p = material.eos_utils->calculate_speed_of_sound(w_p);
+            const auto pressure_m = state_view_m.pressure();
+            const auto pressure_p = state_view_p.pressure();
+
+            const auto speed_of_sound_m = state_view_m.speed_of_sound();
+            const auto speed_of_sound_p = state_view_p.speed_of_sound();
+            ;
 
             const auto lin_lambda_p =
               signum(velocity_p * normal) * norm_lin_velocity(w_p, delta_w_p, normal) +

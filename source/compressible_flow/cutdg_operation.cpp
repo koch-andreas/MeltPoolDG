@@ -13,6 +13,7 @@
 #include <meltpooldg/compressible_flow/cutdg_operation.hpp>
 #include <meltpooldg/compressible_flow/cutdg_operator.hpp>
 #include <meltpooldg/compressible_flow/operation_scratch_data.hpp>
+#include <meltpooldg/compressible_flow/state_views.hpp>
 #include <meltpooldg/linear_algebra/linear_solver.hpp>
 #include <meltpooldg/time_integration/time_integrator_util.hpp>
 #include <meltpooldg/utilities/fe_integrator.hpp>
@@ -438,6 +439,7 @@ namespace MeltPoolDG::CompressibleFlow
     FECellIntegrator<dim, dim + 2, number> phi(flow_scratch_data.scratch_data.get_matrix_free(),
                                                flow_scratch_data.dof_idx,
                                                flow_scratch_data.quad_idx);
+    using StateView = DofStateView<dim, number, const ConservedVariables>;
 
     for (unsigned int cell = 0;
          cell < flow_scratch_data.scratch_data.get_matrix_free().n_cell_batches();
@@ -463,9 +465,8 @@ namespace MeltPoolDG::CompressibleFlow
                 for (unsigned int d = 0; d < dim; ++d)
                   convective_limit = std::max(convective_limit, std::abs(convective_speed[d]));
 
-                const auto speed_of_sound =
-                  flow_scratch_data.material.eos_utils->calculate_speed_of_sound(
-                    conserved_variables);
+                StateView  state_view(conserved_variables, flow_scratch_data.material.data);
+                const auto speed_of_sound = state_view.speed_of_sound();
 
                 dealii::Tensor<1, dim, dealii::VectorizedArray<number>> eigenvector;
                 for (unsigned int d = 0; d < dim; ++d)
@@ -529,9 +530,8 @@ namespace MeltPoolDG::CompressibleFlow
                     for (unsigned int d = 0; d < dim; ++d)
                       convective_limit = std::max(convective_limit, std::abs(convective_speed[d]));
 
-                    const auto speed_of_sound =
-                      flow_scratch_data.material.eos_utils->calculate_speed_of_sound(
-                        conserved_variables);
+                    StateView  state_view(conserved_variables, flow_scratch_data.material.data);
+                    const auto speed_of_sound = state_view.speed_of_sound();
 
                     dealii::Tensor<1, dim, dealii::VectorizedArray<number>> eigenvector;
                     for (unsigned int d = 0; d < dim; ++d)

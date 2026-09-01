@@ -6,8 +6,8 @@
 #include <deal.II/base/vectorization.h>
 
 #include <meltpooldg/compressible_flow/data_types.hpp>
-#include <meltpooldg/compressible_flow/eos_utils.hpp>
 #include <meltpooldg/compressible_flow/operation_data.hpp>
+#include <meltpooldg/compressible_flow/state_views.hpp>
 #include <meltpooldg/compressible_flow/utils.hpp>
 #include <meltpooldg/utilities/dealii_tensor.hpp>
 
@@ -31,6 +31,12 @@ namespace MeltPoolDG::CompressibleFlow
   {
     using ConservedVariables         = ConservedVariablesType<dim, number>;
     using ConservedVariablesGradient = ConservedVariablesGradientType<dim, number>;
+
+    using ValueAndGradientStateView =
+      DofValueAndGradientStateView<dim,
+                                   number,
+                                   const ConservedVariables,
+                                   const ConservedVariablesGradient>;
 
     explicit ViscousKernels(const Material<dim, number> &material_in);
     /**
@@ -206,17 +212,19 @@ namespace MeltPoolDG::CompressibleFlow
       const ConservedVariablesGradient &grad_conserved_variables) const
     -> ConservedVariablesGradient
   {
-    const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> velocity =
-      calculate_velocity<dim, number>(conserved_variables);
+    ValueAndGradientStateView state_view(conserved_variables,
+                                         grad_conserved_variables,
+                                         material.data);
 
-    const auto grad_u = calculate_grad_velocity(conserved_variables, grad_conserved_variables);
+    const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> velocity = state_view.velocity();
+
+    const auto grad_u = state_view.grad_velocity();
 
     const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> viscous_stress =
       calculate_viscous_stress_tensor(grad_u);
 
     const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> neg_heat_flux =
-      material.data.thermal_conductivity *
-      material.eos_utils->calculate_grad_T(conserved_variables, grad_conserved_variables);
+      state_view.thermal_conductivity() * state_view.grad_temperature();
 
     ConservedVariablesGradient flux;
     for (unsigned int d = 0; d < dim; ++d)

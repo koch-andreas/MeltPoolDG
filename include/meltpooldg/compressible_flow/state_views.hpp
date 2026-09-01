@@ -185,6 +185,59 @@ namespace MeltPoolDG::CompressibleFlow
   };
 
   /**
+   * View providing access to primitive variables stored in the underlying data structure.
+   * Further, the view provides access to the associated material data.
+   *
+   * The underlying `Value` must provide a `value_type` and be compatible with the primitive
+   * variable access expected by `PrimitiveDofValueMixin`.
+   *
+   * @tparam dim     Spatial dimension.
+   * @tparam number  Scalar floating point type.
+   * @tparam Value   Type of the data structure storing the primitive variables.
+   */
+  template <int dim, typename number, IsPrimitiveStateCompatible<dim> Value>
+  struct DofPrimitiveStateView
+    : public DofPrimitiveValueMixin<dim,
+                                    typename Value::value_type,
+                                    DofPrimitiveStateView<dim, number, Value>>,
+      public MaterialMixin<DofPrimitiveStateView<dim, number, Value>>
+  {
+    using state_type = std::remove_cvref_t<Value>;
+
+    DofPrimitiveStateView(Value &value_state, const MaterialPhaseData<number> &material_data)
+      : flow_state(&value_state)
+      , material_data(material_data)
+    {}
+
+    operator DofPrimitiveStateView<dim, number, const Value>()
+    {
+      return DofPrimitiveStateView<dim, number, const Value>(*flow_state, material_data);
+    }
+
+    EquationOfState
+    eos_type() const
+    {
+      return material_data.eos_type;
+    }
+
+    Value &
+    value() const
+    {
+      return *flow_state;
+    }
+
+    const MaterialPhaseData<number> &
+    material() const
+    {
+      return material_data;
+    }
+
+  private:
+    mutable Value                   *flow_state;
+    const MaterialPhaseData<number> &material_data;
+  };
+
+  /**
    * View providing access to the conserved variables and their gradients stored in the underlying
    * data structure.
    *

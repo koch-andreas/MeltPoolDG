@@ -18,6 +18,7 @@
 
 #include "meltpooldg/compressible_flow/material.hpp"
 #include <meltpooldg/compressible_flow/data_types.hpp>
+#include <meltpooldg/compressible_flow/state_views.hpp>
 #include <meltpooldg/core/scratch_data.hpp>
 #include <meltpooldg/utilities/better_enum.hpp>
 #include <meltpooldg/utilities/matrix_free_util.hpp>
@@ -87,6 +88,7 @@ namespace MeltPoolDG::CompressibleFlow
    *
    * @param solution_primitive_variables Vector where the solution in primitive variables is stored.
    * @param solution Current solution vector in conservative variable formulation.
+   * @param scratch_data Reference to the used ScratchData object.
    * @param dof_idx Index of the relevant dof handler in the matrix-free object.
    * @param quad_idx Relevant quadrature index of the flow solver.
    * @param material_liquid Pointer to the material object for liquid phase.
@@ -94,7 +96,7 @@ namespace MeltPoolDG::CompressibleFlow
    *
    * @note The second material object is only required for the two-phase case.
    */
-  template <int dim, typename number>
+  template <int dim, typename number, typename ConservedVariablesType>
   void
   update_primitive_variables_solution(
     dealii::LinearAlgebra::distributed::Vector<number>       &solution_primitive_variables,
@@ -105,6 +107,68 @@ namespace MeltPoolDG::CompressibleFlow
     const Material<dim, number>                              *material_liquid,
     const Material<dim, number>                              *material_gas = nullptr);
 
+  /**
+   * @brief Convert a state from conservative (density, momentum, total energy) to primitive
+   * (pressure, velocity, temperature) variables.
+   *
+   * @param conserved Conservative state view.
+   *
+   * @return The corresponding primitive state.
+   */
+  template <int dim, typename PrimitiveStateType, Flow::EOSIsValueView ValueView>
+  inline DEAL_II_ALWAYS_INLINE //
+    PrimitiveStateType
+    conservative_to_primitive(const ValueView &conserved);
+
+  /**
+   * @brief Convert a state from primitive (pressure, velocity, temperature) to conservative
+   * (density, momentum, total energy) variables.
+   *
+   * @param primitive Primitive state view.
+   *
+   * @return The corresponding conservative state.
+   */
+  template <int dim,
+            typename ConservativeStateType,
+            Flow::EOSIsPrimitiveValueView PrimitiveValueView>
+  inline DEAL_II_ALWAYS_INLINE //
+    ConservativeStateType
+    primitive_to_conservative(const PrimitiveValueView &primitive);
+
+  /**
+   * @brief Calculate the maximum local wave speed between two states on a face.
+   *
+   * @param u_m State view for the interior side of the face.
+   * @param u_p State view for the exterior side of the face.
+   *
+   * @return The maximum local wave speed between the two states on a face.
+   */
+  template <typename DofViewType, typename VectorizedArrayType>
+  inline DEAL_II_ALWAYS_INLINE //
+    VectorizedArrayType
+    maximum_local_wave_speed(const DofViewType &u_m, const DofViewType &u_p);
+
+  /**
+   * @brief Calculate the total stress tensor from pressure contribution and viscous stress
+   * contribution
+   * \f[
+   *   \sigma_{ij} = \tau_{ij} - p\,\delta_{ij},
+   * \f]
+   * where \f$\sigma_{ij}\f$ is the total stress tensor,
+   * \f$\tau_{ij}\f$ is the viscous stress tensor,
+   * \f$p\f$ is the pressure, and \f$\delta_{ij}\f$ is the Kronecker delta.
+   *
+   * @param pressure Current value for the pressure.
+   * @param viscous_stress_tensor Given viscous tress tensor.
+   *
+   * @return Resulting stress tensor.
+   */
+  template <int dim, typename number>
+  inline DEAL_II_ALWAYS_INLINE //
+    dealii::Tensor<2, dim, dealii::VectorizedArray<number>>
+    calculate_stress_tensor(
+      const dealii::VectorizedArray<number>                         &pressure,
+      const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &viscous_stress_tensor);
 
   /**
    * This function checks whether the flow is viscous or not. This is done by checking the dynamic
@@ -229,7 +293,6 @@ namespace MeltPoolDG::CompressibleFlow
     return grad_velocity;
   }
 
-
   template <typename number, int n_species>
   inline bool
   is_viscous_flow(const MaterialPhaseData<number> &material_data)
@@ -331,7 +394,7 @@ namespace MeltPoolDG::CompressibleFlow
                                      domain_representation_type + "' is not supported."));
   }
 
-  template <int dim, typename number>
+  template <int dim, typename number, typename ConservedVariablesType>
   void
   update_primitive_variables_solution(
     dealii::LinearAlgebra::distributed::Vector<number>       &solution_primitive_variables,
@@ -342,6 +405,8 @@ namespace MeltPoolDG::CompressibleFlow
     const Material<dim, number>                              *material_liquid,
     const Material<dim, number>                              *material_gas)
   {
+    using StateView = DofStateView<dim, number, const ConservedVariablesType>;
+
     const dealii::MatrixFree<dim, number, dealii::VectorizedArray<number>> &matrix_free =
       scratch_data.get_matrix_free();
     unsigned int n_support_points_per_cell = scratch_data.get_n_dofs_per_cell(dof_idx) / (dim + 2);
@@ -359,8 +424,10 @@ namespace MeltPoolDG::CompressibleFlow
 
       for (unsigned int i = 0; i < n_support_points_per_cell; ++i)
         {
-          const auto &u_cons = eval.get_dof_value(i);
-          auto u_prim = material->eos_utils->convert_conservative_into_primitive_variables(u_cons);
+          const auto            &u_cons = eval.get_dof_value(i);
+          StateView              u_cons_view(u_cons, material->data);
+          ConservedVariablesType u_prim =
+            conservative_to_primitive<dim, ConservedVariablesType>(u_cons_view);
           eval.submit_dof_value(u_prim, i);
         }
 
@@ -399,6 +466,37 @@ namespace MeltPoolDG::CompressibleFlow
       }
   }
 
+  template <int dim, typename PrimitiveStateType, Flow::EOSIsValueView ValueView>
+  inline DEAL_II_ALWAYS_INLINE //
+    PrimitiveStateType
+    conservative_to_primitive(const ValueView &conserved)
+  {
+    PrimitiveStateType primitive;
+
+    primitive[PrimitiveVariableIndex<dim>::pressure] = conserved.pressure();
+
+    for (unsigned int d = 0; d < dim; ++d)
+      primitive[PrimitiveVariableIndex<dim>::velocity + d] = conserved.velocity(d);
+
+    primitive[PrimitiveVariableIndex<dim>::temperature] = conserved.temperature();
+
+    return primitive;
+  }
+
+  template <int dim,
+            typename ConservativeStateType,
+            Flow::EOSIsPrimitiveValueView PrimitiveValueView>
+  inline DEAL_II_ALWAYS_INLINE //
+    ConservativeStateType
+    primitive_to_conservative(const PrimitiveValueView &primitive)
+  {
+    return Flow::dispatch_eos<PrimitiveValueView>(
+      primitive.eos_type(), [&](auto eos) -> ConservativeStateType {
+        return eos.template conservative_from_primitive<dim, ConservativeStateType>(primitive,
+                                                                                    primitive);
+      });
+  }
+
   template <typename DofViewType, typename VectorizedArrayType>
   inline DEAL_II_ALWAYS_INLINE //
     VectorizedArrayType
@@ -416,5 +514,18 @@ namespace MeltPoolDG::CompressibleFlow
     const auto lambda = 0.5 * std::sqrt(std::max(velocity_p.norm_square() + sound_speed_p2,
                                                  velocity_m.norm_square() + sound_speed_m2));
     return lambda;
+  }
+
+  template <int dim, typename number>
+  inline DEAL_II_ALWAYS_INLINE //
+    dealii::Tensor<2, dim, dealii::VectorizedArray<number>>
+    calculate_stress_tensor(
+      const dealii::VectorizedArray<number>                         &pressure,
+      const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> &viscous_stress_tensor)
+  {
+    const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> pressure_tensor =
+      pressure * dealii::unit_symmetric_tensor<dim, dealii::VectorizedArray<number>>();
+
+    return viscous_stress_tensor - pressure_tensor;
   }
 } // namespace MeltPoolDG::CompressibleFlow
