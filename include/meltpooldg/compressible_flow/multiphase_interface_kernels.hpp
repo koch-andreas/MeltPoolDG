@@ -224,12 +224,10 @@ namespace MeltPoolDG::Multiphase
 
     const dealii::VectorizedArray<number> weighted_average_energy_term_liquid =
       -stress_tensor_liquid * vel_liquid -
-      multiphase_scratch_data.material_liquid.data.thermal_conductivity *
-        liquid_state.grad_temperature()[0];
+      liquid_state.thermal_conductivity() * liquid_state.grad_temperature()[0];
     const dealii::VectorizedArray<number> weighted_average_energy_term_gas =
       -stress_tensor_gas * vel_gas -
-      multiphase_scratch_data.material_gas.data.thermal_conductivity *
-        gas_state.grad_temperature()[0];
+      gas_state.thermal_conductivity() * gas_state.grad_temperature()[0];
     const dealii::VectorizedArray<number> weighted_average_energy_term =
       UtilityFunctions::calculate_arithmetic_phase_weighted_average(
         omega_energy_2_visc,
@@ -269,9 +267,9 @@ namespace MeltPoolDG::Multiphase
    * interface.
    * @param gas_state State view for gas phase at quadrature point on the (unfitted) interface.
    * @param normal Interface normal vector, pointing outside the liquid phase.
-   * @param convective_kernel_liquid Object with references to the EOS utilities and material data needed for convective
+   * @param convective_kernel_liquid Object with reference to the material data needed for convective
    * flux calculations in the liquid phase.
-   * @param convective_kernel_gas Object with references to the EOS utilities and material data needed for convective
+   * @param convective_kernel_gas Object with reference to the material data needed for convective
    * flux calculations in the gas phase.
    * @param m_dot_evap Current evaporation mass flux (SI: in kg/(m^2 s)).
    *
@@ -536,9 +534,8 @@ namespace MeltPoolDG::Multiphase
     ConservedVariablesType gas_prim_data =
       CompressibleFlow::conservative_to_primitive<dim, ConservedVariablesType>(gas_state);
 
-    DofPrimitiveStateView liquid_prim(liquid_prim_data,
-                                      multiphase_scratch_data.material_liquid.data);
-    DofPrimitiveStateView gas_prim(gas_prim_data, multiphase_scratch_data.material_gas.data);
+    DofPrimitiveStateView liquid_prim(liquid_prim_data, multiphase_scratch_data.material_liquid);
+    DofPrimitiveStateView gas_prim(gas_prim_data, multiphase_scratch_data.material_gas);
 
     // TODO: consider surface tension here
     const dealii::VectorizedArray<number> delta_p = 0.;
@@ -558,8 +555,8 @@ namespace MeltPoolDG::Multiphase
     gas_prim_data    = liquid_prim_tmp - J_Dir;
 
     DofPrimitiveStateView liquid_prim_mod(liquid_prim_data,
-                                          multiphase_scratch_data.material_liquid.data);
-    DofPrimitiveStateView gas_prim_mod(gas_prim_data, multiphase_scratch_data.material_gas.data);
+                                          multiphase_scratch_data.material_liquid);
+    DofPrimitiveStateView gas_prim_mod(gas_prim_data, multiphase_scratch_data.material_gas);
 
     const auto u_liquid_cons_star =
       CompressibleFlow::primitive_to_conservative<dim, ConservedVariablesType>(liquid_prim_mod);
@@ -588,9 +585,9 @@ namespace MeltPoolDG::Multiphase
    * @param visc_ave_weight_phase_gas Weighting factor for Nitsche-type weighted viscous interface
    * fluxes.
    * @param tau Symmetric interior penalty parameter.
-   * @param diffusive_kernel_liquid Object with references to the EOS utilities and material data needed for diffusive
+   * @param diffusive_kernel_liquid Object with reference to the material data needed for diffusive
    * flux calculations in the liquid phase.
-   *  @param diffusive_kernel_gas Object with references to the EOS utilities and material data needed for diffusive
+   *  @param diffusive_kernel_gas Object with reference to the material data needed for diffusive
    * flux calculations in the gas phase.
    * @param multiphase_scratch_data Collection of parameters required by the compressible multiphase
    * Navier-Stokes operator.
@@ -689,9 +686,9 @@ namespace MeltPoolDG::Multiphase
 
     const number penalty_parameter =
       std::min(liquid_state.dynamic_viscosity() /
-                 multiphase_scratch_data.material_liquid.data.reference_density,
+                 multiphase_scratch_data.material_liquid.reference_density,
                gas_state.dynamic_viscosity() /
-                 multiphase_scratch_data.material_gas.data.reference_density) *
+                 multiphase_scratch_data.material_gas.reference_density) *
       (multiphase_scratch_data.flow_data.fe.degree + 1.) *
       (multiphase_scratch_data.flow_data.fe.degree + 1.) / cell_size * tau;
 
@@ -731,9 +728,9 @@ namespace MeltPoolDG::Multiphase
    * interface fluxes.
    * @param visc_ave_weight_phase_gas Weighting factor for Nitsche-type weighted viscous interface
    * fluxes.
-   * @param diffusive_kernel_liquid Object with references to the EOS utilities and material data needed for diffusive
+   * @param diffusive_kernel_liquid Object with reference to the material data needed for diffusive
    * flux calculations in the liquid phase.
-   * @param diffusive_kernel_gas Object with references to the EOS utilities and material data needed for diffusive
+   * @param diffusive_kernel_gas Object with reference to the material data needed for diffusive
    * flux calculations in the gas phase.
    * @param multiphase_scratch_data Collection of parameters required by the compressible multiphase
    * Navier-Stokes operator.

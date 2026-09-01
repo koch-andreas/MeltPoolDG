@@ -47,10 +47,10 @@ namespace MeltPoolDG::CompressibleFlow
      * @brief Constructor initializing the convective kernel with flow and material properties.
      *
      * @param flow_data Reference to the flow data object containing simulation-specific parameters.
-     * @param material Reference to the material model providing thermodynamic properties.
+     * @param material Reference to material parameter struct.
      */
-    explicit ConvectiveKernels(const OperationData<number> &flow_data,
-                               const Material<dim, number> &material);
+    explicit ConvectiveKernels(const OperationData<number>     &flow_data,
+                               const MaterialPhaseData<number> &material);
 
     /**
      * @brief Calculate the convective flux F_c.
@@ -115,7 +115,7 @@ namespace MeltPoolDG::CompressibleFlow
     const OperationData<number> &flow_data;
 
     /// Material-related parameters
-    const Material<dim, number> &material;
+    const MaterialPhaseData<number> &material;
 
     /// precomputed constant
     number rs_div_c;
@@ -143,13 +143,13 @@ namespace MeltPoolDG::CompressibleFlow
    * Inlined function definitions
    * *************************************************************************************+****/
   template <int dim, typename number>
-  ConvectiveKernels<dim, number>::ConvectiveKernels(const OperationData<number> &flow_data_in,
-                                                    const Material<dim, number> &material_in)
+  ConvectiveKernels<dim, number>::ConvectiveKernels(const OperationData<number>     &flow_data_in,
+                                                    const MaterialPhaseData<number> &material_in)
     : flow_data(flow_data_in)
     , material(material_in)
   {
     // Currently, only relevant for the single phase (gas) solver
-    rs_div_c = material.data.gamma - 1.0;
+    rs_div_c = material.gamma - 1.0;
   }
 
   template <int dim, typename number>
@@ -161,7 +161,7 @@ namespace MeltPoolDG::CompressibleFlow
     const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> velocity =
       calculate_velocity<dim, number>(conserved_variables);
 
-    StateView                             state_view(conserved_variables, material.data);
+    StateView                             state_view(conserved_variables, material);
     const dealii::VectorizedArray<number> pressure = state_view.pressure();
 
     ConservedVariablesGradient flux;
@@ -191,8 +191,8 @@ namespace MeltPoolDG::CompressibleFlow
     const auto flux_m = calculate_convective_flux(u_m);
     const auto flux_p = calculate_convective_flux(u_p);
 
-    StateView state_view_p(u_p, material.data);
-    StateView state_view_m(u_m, material.data);
+    StateView state_view_p(u_p, material);
+    StateView state_view_m(u_m, material);
 
     const auto sound_speed_p = state_view_p.speed_of_sound();
     const auto sound_speed_m = state_view_m.speed_of_sound();
@@ -387,8 +387,8 @@ namespace MeltPoolDG::CompressibleFlow
               const auto velocity_m = calculate_velocity<dim, number>(w_m);
               const auto velocity_p = calculate_velocity<dim, number>(w_p);
 
-              StateView state_view_p(w_p, material.data);
-              StateView state_view_m(w_m, material.data);
+              StateView state_view_p(w_p, material);
+              StateView state_view_m(w_m, material);
 
               const auto lambda =
                 std::max(std::abs(velocity_p * normal) + state_view_p.speed_of_sound(),
@@ -408,17 +408,16 @@ namespace MeltPoolDG::CompressibleFlow
               const auto velocity_m = calculate_velocity<dim, number>(w_m);
               const auto velocity_p = calculate_velocity<dim, number>(w_p);
 
-              StateView state_view_p(w_p, material.data);
-              StateView state_view_m(w_m, material.data);
+              StateView state_view_p(w_p, material);
+              StateView state_view_m(w_m, material);
 
               const auto pressure_m = state_view_m.pressure();
               const auto pressure_p = state_view_p.pressure();
 
               const auto lambda =
-                0.5 * std::sqrt(std::max(velocity_p.norm_square() +
-                                           std::abs(material.data.gamma * pressure_p / w_p[0]),
-                                         velocity_m.norm_square() +
-                                           std::abs(material.data.gamma * pressure_m / w_m[0])));
+                0.5 * std::sqrt(std::max(
+                        velocity_p.norm_square() + std::abs(material.gamma * pressure_p / w_p[0]),
+                        velocity_m.norm_square() + std::abs(material.gamma * pressure_m / w_m[0])));
               return lambda * (delta_w_m - delta_w_p);
             };
             break;
@@ -473,12 +472,11 @@ namespace MeltPoolDG::CompressibleFlow
                   delta_m_q[i] = delta_w_q[i + 1];
                 }
               dealii::VectorizedArray<number> rho_inv = 1. / w_q[0];
-              dealii::VectorizedArray<number> lin_c =
-                delta_w_q[0] / (2.0 * c) * material.data.gamma * rho_inv * rho_inv * rs_div_c *
-                (rho_inv * m_q * m_q - w_q[dim + 1]);
-              lin_c -=
-                material.data.gamma / (2.0 * c) * rho_inv * rho_inv * rs_div_c * m_q * delta_m_q;
-              lin_c += material.data.gamma / (2.0 * c) * rho_inv * rs_div_c * delta_w_q[dim + 1];
+              dealii::VectorizedArray<number> lin_c   = delta_w_q[0] / (2.0 * c) * material.gamma *
+                                                      rho_inv * rho_inv * rs_div_c *
+                                                      (rho_inv * m_q * m_q - w_q[dim + 1]);
+              lin_c -= material.gamma / (2.0 * c) * rho_inv * rho_inv * rs_div_c * m_q * delta_m_q;
+              lin_c += material.gamma / (2.0 * c) * rho_inv * rs_div_c * delta_w_q[dim + 1];
               return lin_c;
             };
 
@@ -506,8 +504,8 @@ namespace MeltPoolDG::CompressibleFlow
             const auto velocity_m = calculate_velocity<dim, number>(w_m);
             const auto velocity_p = calculate_velocity<dim, number>(w_p);
 
-            StateView state_view_p(w_p, material.data);
-            StateView state_view_m(w_m, material.data);
+            StateView state_view_p(w_p, material);
+            StateView state_view_m(w_m, material);
 
             const auto pressure_m = state_view_m.pressure();
             const auto pressure_p = state_view_p.pressure();
