@@ -42,6 +42,12 @@ namespace MeltPoolDG::CompressibleFlow
     }
 
     decltype(auto)
+    specific_isochoric_heat() const
+    {
+      return this->material().specific_isochoric_heat;
+    }
+
+    decltype(auto)
     stiffening_pressure() const
     {
       return this->material().eos_data.stiffening_pressure;
@@ -57,6 +63,24 @@ namespace MeltPoolDG::CompressibleFlow
     covolume() const
     {
       return this->material().eos_data.covolume;
+    }
+
+    decltype(auto)
+    linearization_pressure() const
+    {
+      return this->material().eos_data.linearization_pressure;
+    }
+
+    decltype(auto)
+    linearization_density() const
+    {
+      return this->material().eos_data.linearization_density;
+    }
+
+    decltype(auto)
+    linearization_sound_speed() const
+    {
+      return this->material().eos_data.linearization_sound_speed;
     }
 
   private:
@@ -122,7 +146,6 @@ namespace MeltPoolDG::CompressibleFlow
     {
       return material().species_data[species_component].specific_gas_constant;
     }
-
 
     ValueType
     specific_isobaric_heat() const
