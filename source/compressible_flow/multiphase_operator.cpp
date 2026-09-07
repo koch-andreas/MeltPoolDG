@@ -1050,7 +1050,8 @@ namespace MeltPoolDG::Multiphase
               }
 
             eval_m_int.collect_from_face(dealii::EvaluationFlags::values |
-                                           dealii::EvaluationFlags::gradients,
+                                           (is_viscous ? EvaluationFlags::gradients :
+                                                         EvaluationFlags::nothing),
                                          eval_m_int.begin_dof_values());
 
             eval_m_int.distribute_local_to_global(dst);
