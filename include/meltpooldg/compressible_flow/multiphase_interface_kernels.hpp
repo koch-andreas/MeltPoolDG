@@ -359,7 +359,7 @@ namespace MeltPoolDG::Multiphase
     // 4) calculate intermediate velocity states
 
     // TODO: consider surface tension for dim>1 here
-    const dealii::VectorizedArray<number> delta_p = 0.;
+    const dealii::VectorizedArray<number> delta_p = -29142.;
 
     // TODO: consider Hertz-Knudsen theory for evaporation mass flux here
     std::array<dealii::VectorizedArray<number>, 2> tmp_1;
@@ -442,7 +442,7 @@ namespace MeltPoolDG::Multiphase
       {
         u_star[i][Idx::density] = m_hat[i] / (vel_n_star[i] - shock_speed[i]);
         for (unsigned int j = 1; j < dim + 1; j++)
-          u_star[i][j] = u_star[i][Idx::density] * vel_star_cartesian[i][0][j - 1];
+          u_star[i][j] = u_star[i][Idx::density] * vel_star_cartesian[i][j - 1];
         u_star[i][Idx::energy] =
           (E_hat[i] - pressure_star[i] * vel_n_star[i]) / (vel_n_star[i] - shock_speed[i]) -
           0.5 * u_star[i][Idx::density] * vel_n_star[i] * vel_n_star[i] +
@@ -909,6 +909,49 @@ namespace MeltPoolDG::Multiphase
       multiphase_scratch_data.phase_coupling.hllp0_and_penalty.penalty_parameter_temperature_jump *
       (liquid_state.thermal_conductivity() + gas_state.thermal_conductivity()) / (2. * cell_size) *
       ((liquid_state.temperature() - gas_state.temperature()) - delta_T);
+
+    /*const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> viscous_stress_tensor_liquid =
+      CompressibleFlow::viscous_stress_tensor<dim, number>(liquid_state.grad_velocity(),
+                                                           liquid_state.dynamic_viscosity());
+    const dealii::Tensor<2, dim, dealii::VectorizedArray<number>> viscous_stress_tensor_gas =
+      CompressibleFlow::viscous_stress_tensor<dim, number>(gas_state.grad_velocity(),
+                                                           gas_state.dynamic_viscosity());
+
+    const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> viscous_stress_tensor_times_velocity_liquid = contract_tensor_with_vector<dim, dim, number>(viscous_stress_tensor_liquid, liquid_state.velocity());
+    const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> viscous_stress_tensor_times_velocity_gas = contract_tensor_with_vector<dim, dim, number>(viscous_stress_tensor_gas, gas_state.velocity());
+
+    const number mass_flux = 10.;
+    const number rho_g = 0.0977166666666666;
+    const number rho_l = 3622.73669496764;
+
+    std::cout << std::setprecision(16) << -m_dot_evap * ((1.00350663797032e10 + 0.5 * rho_l * mass_flux / rho_l * mass_flux / rho_l)/rho_l
+      - (2.104084125e5 + 0.5 * rho_g * mass_flux / rho_g * mass_flux / rho_g)/rho_g)
+    - (85186.7042732239 * mass_flux / rho_l - 84163.365 * mass_flux / rho_g) + mass_flux * 8.84e6 +
+      (scalar_product(viscous_stress_tensor_times_velocity_liquid - viscous_stress_tensor_times_velocity_gas, normal))
+    << std::endl;
+
+    std::cout << "viscous jump: " << scalar_product(viscous_stress_tensor_times_velocity_liquid - viscous_stress_tensor_times_velocity_gas, normal) << std::endl;
+
+
+    /*std::vector<dealii::Tensor<1, dim, dealii::VectorizedArray<number>>> tangent;
+    tangent.resize(dim - 1);
+
+    // compute tangential vector for dim=2 and dim=3
+    if constexpr (dim == 2)
+      {
+        tangent[0][0] = normal[1];
+        tangent[0][1] = -normal[0];
+      }
+
+    const dealii::VectorizedArray<number> vel_gas_x_tang = (vel_gas * tangent[0])[0];
+    const dealii::VectorizedArray<number> vel_gas_y_tang = (vel_gas * tangent[0])[1];
+    const dealii::VectorizedArray<number> vel_liquid_x_tang = (vel_liquid * tangent[0])[0];
+    const dealii::VectorizedArray<number> vel_liquid_y_tang = (vel_liquid * tangent[0])[1];
+
+    penalty_term_dT[1] = 1. * (vel_gas_x_tang - vel_liquid_x_tang);
+    penalty_term_dT[2] = 1. * (vel_gas_y_tang - vel_liquid_y_tang);*/
+
+    //J_Rob[1]
 
     const ConservedVariablesType weighted_viscous_flux =
       UtilityFunctions::calculate_arithmetic_phase_weighted_average(

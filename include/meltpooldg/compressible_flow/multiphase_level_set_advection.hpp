@@ -123,7 +123,7 @@ namespace MeltPoolDG::Multiphase
                                            level_set);
           level_set.update_ghost_values();
         }
-      else if (case_name == "two_phase")
+      else if (case_name == "two_phase" or case_name == "droplet")
         {
           // one phase boundary
 
@@ -148,10 +148,7 @@ namespace MeltPoolDG::Multiphase
             level_set[i] += time_step * velocity;
         }
       else
-        AssertThrow(false,
-                    dealii::ExcMessage(
-                      "Analytical function for level-set advection is "
-                      "only supported for the cases 'oscillating_water_column' and 'two_phase'."));
+        {}
     }
 
     /**
