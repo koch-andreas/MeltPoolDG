@@ -193,10 +193,14 @@ namespace MeltPoolDG::Multiphase
                 darcy_damping_model.compute_darcy_damping_coefficient(solid_fraction);
 
               // contribution to momentum equation
-              darcy_damping[1] = darcy_damping_coefficient * velocity[0];
+              for (unsigned int i = 0; i < dim; ++i)
+                darcy_damping[i+1] = darcy_damping_coefficient * velocity[i];
 
               // contribution to energy equation
-              darcy_damping[2] = darcy_damping[1] * velocity[0];
+              if (dim == 1)
+                darcy_damping[dim+1] = darcy_damping[1] * velocity[0];
+              else if (dim == 2)
+                darcy_damping[dim+1] = darcy_damping[1] * velocity[0] + darcy_damping[2] * velocity[1];
 
               flux += darcy_damping;
             }

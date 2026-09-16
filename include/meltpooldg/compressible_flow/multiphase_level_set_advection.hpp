@@ -123,7 +123,7 @@ namespace MeltPoolDG::Multiphase
                                            level_set);
           level_set.update_ghost_values();
         }
-      else if (case_name == "two_phase" or case_name == "droplet")
+      else if (case_name == "two_phase" or case_name == "droplet" or case_name == "evaporating_droplet")
         {
           // one phase boundary
 

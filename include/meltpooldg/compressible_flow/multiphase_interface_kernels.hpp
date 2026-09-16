@@ -359,7 +359,7 @@ namespace MeltPoolDG::Multiphase
     // 4) calculate intermediate velocity states
 
     // TODO: consider surface tension for dim>1 here
-    const dealii::VectorizedArray<number> delta_p = -29142.;
+    const dealii::VectorizedArray<number> delta_p = 0.;
 
     // TODO: consider Hertz-Knudsen theory for evaporation mass flux here
     std::array<dealii::VectorizedArray<number>, 2> tmp_1;
