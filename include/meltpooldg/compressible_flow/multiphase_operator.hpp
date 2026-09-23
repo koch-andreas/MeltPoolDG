@@ -59,6 +59,14 @@ namespace MeltPoolDG::Multiphase
                                                      const ConservedVariablesType,
                                                      const ConservedVariablesGradType>;
 
+    template <int n_components = CompressibleFlow::n_conserved_variables<dim>>
+    using DomainEval = FECellIntegrator<dim, n_components, number>;
+    template <int n_components = CompressibleFlow::n_conserved_variables<dim>>
+    using PointEval =
+      dealii::FEPointEvaluation<n_components, dim, dim, dealii::VectorizedArray<number>>;
+    template <int n_components = CompressibleFlow::n_conserved_variables<dim>>
+    using FaceEval = FEFaceIntegrator<dim, n_components, number>;
+
     /**
      * @brief Constructor.
      *
@@ -210,6 +218,28 @@ namespace MeltPoolDG::Multiphase
     add_external_force(
       std::shared_ptr<CompressibleFlow::ExternalFlowForce<dim, number>> external_force);
 
+    template <typename EvaluatorType>
+    inline void
+    ghost_penalty_face_integral(EvaluatorType     &eval_m,
+                                EvaluatorType     &eval_p,
+                                const unsigned int q,
+                                const number       cell_side_length,
+                                const number       cell_side_length_pow_3,
+                                const number       cell_side_length_pow_5) const;
+
+    /**
+     * @brief Compute the inverse diagonal of the system matrix.
+     *      Used by the preconditioner.
+     *
+     * @param diagonal  Output vector containing the diagonal inverse values.
+     */
+    void
+    compute_inverse_diagonal_from_matrixfree(VectorType &diagonal) const;
+
+    void
+    compute_system_matrix_from_matrixfree(
+      dealii::TrilinosWrappers::SparseMatrix &system_matrix) const;
+
   private:
     /// Scratch data for multiphase case
     CompressibleFlow::MultiphaseOperationScratchData<dim, number> &multiphase_scratch_data;
@@ -321,5 +351,17 @@ namespace MeltPoolDG::Multiphase
       return {create_face_integrator(true, category, offset),
               create_face_integrator(false, category, offset)};
     };
+
+    /**
+     * The setup for dealii::MatrixFreeTools::internal::compute_diagonal and
+     * dealii::MatrixFreeTools::internal::compute_matrix is identical. To avoid duplicate code this
+     * internal function can handle both operations. Choose which operation to perform using
+     * @param do_diagonal: `true` for compute_diagonal and `false` for compute_matrix.
+     */
+    void
+    internal_compute_diagonal_or_system_matrix(
+      [[maybe_unused]] VectorType                             &diagonal,
+      [[maybe_unused]] dealii::TrilinosWrappers::SparseMatrix &system_matrix,
+      const bool                                               do_diagonal) const;
   };
 } // namespace MeltPoolDG::Multiphase

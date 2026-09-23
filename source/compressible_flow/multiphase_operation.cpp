@@ -16,6 +16,7 @@
 #include <meltpooldg/compressible_flow/operation_scratch_data.hpp>
 #include <meltpooldg/compressible_flow/phase_coupling_data.hpp>
 #include <meltpooldg/linear_algebra/linear_solver.hpp>
+#include <meltpooldg/linear_algebra/preconditioner_factory.hpp>
 #include <meltpooldg/utilities/fe_integrator.hpp>
 #include <meltpooldg/utilities/vector_tools.hpp>
 
@@ -121,6 +122,19 @@ namespace MeltPoolDG::Multiphase
     mapping_info_faces.push_back(
       std::make_shared<NonMatching::MappingInfo<dim, dim, VectorizedArray<number>>>(
         this->multiphase_scratch_data.scratch_data.get_mapping(), update_flags_faces));
+
+    std::visit(
+      [&](auto &op) {
+        using OperatorType = std::decay_t<decltype(op)>;
+
+    preconditioner =
+      make_preconditioner<dim, number, OperatorType, VectorType>(
+        multiphase_scratch_data.flow_data.time_integrator.linear_solver_data.preconditioner_type,
+        &op,
+        multiphase_scratch_data.scratch_data,
+        multiphase_scratch_data.dof_idx);
+      },
+      cmp_operator);
   }
 
   template <int dim, typename number>
@@ -302,6 +316,8 @@ namespace MeltPoolDG::Multiphase
                                                                multiphase_scratch_data.dof_idx);
 
     compute_intersected_quadrature();
+
+    preconditioner.reinit();
   }
 
   template <int dim, typename number>
@@ -338,6 +354,8 @@ namespace MeltPoolDG::Multiphase
     // - reinit matrix-free object, rhs and solution vectors
     adapt_to_new_interface_position();
 
+    preconditioner.update();
+
     std::visit(
       [&](auto &op) {
         op.set_current_time(current_time);
@@ -349,11 +367,15 @@ namespace MeltPoolDG::Multiphase
                       multiphase_scratch_data.solution_history.get_current_solution());
 
         // solve linear and symmetric system of equations with CG
-        LinearSolver::solve<VectorType>(
+        int iter = LinearSolver::solve<VectorType>(
           op,
           multiphase_scratch_data.solution_history.get_current_solution(),
           rhs,
-          multiphase_scratch_data.flow_data.time_integrator.linear_solver_data);
+          multiphase_scratch_data.flow_data.time_integrator.linear_solver_data,
+          preconditioner,
+          "compressible_multiphase_operation");
+
+        std::cout << iter << std::endl;
       },
       cmp_operator);
   }

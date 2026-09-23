@@ -330,6 +330,9 @@ namespace MeltPoolDG::Multiphase
     /// Compressible multiphase operator object
     CompMultiphaseOperatorVariant cmp_operator;
 
+    /// Preconditioner for the linear solver
+    Preconditioner<dim, VectorType, number> preconditioner;
+
     /**
      * @brief Adapt the dof layout and solution vector to a new interface position, which is defined
      * by the zero-level-set-isosurface.

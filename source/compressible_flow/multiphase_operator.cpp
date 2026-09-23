@@ -100,6 +100,53 @@ namespace MeltPoolDG::Multiphase
   }
 
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  template <typename EvaluatorType>
+  inline void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::ghost_penalty_face_integral(
+      EvaluatorType                             &eval_m,
+      EvaluatorType                             &eval_p,
+      const unsigned int                        q,
+      const number  cell_side_length,
+      const number cell_side_length_pow_3,
+      const number cell_side_length_pow_5) const
+  {
+    const auto w_minus = eval_m.get_value(q);
+    const auto w_plus  = eval_p.get_value(q);
+
+    const auto w_normal_grad_minus = eval_m.get_normal_derivative(q);
+    const auto w_normal_grad_plus  = eval_p.get_normal_derivative(q);
+
+    const auto ghost_penalty_term_0 =
+      (w_minus - w_plus) *
+      multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_0 *
+      cell_side_length;
+
+    const auto ghost_penalty_term_1 =
+      (w_normal_grad_minus - w_normal_grad_plus) *
+      multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_1 *
+      cell_side_length_pow_3;
+
+    if (multiphase_scratch_data.flow_data.fe.degree == 2)
+      {
+        const auto w_normal_hessian_minus = eval_m.get_normal_hessian(q);
+        const auto w_normal_hessian_plus  = eval_p.get_normal_hessian(q);
+
+        const auto ghost_penalty_term_2 =
+          (w_normal_hessian_minus - w_normal_hessian_plus) *
+          multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_2 *
+          cell_side_length_pow_5;
+
+        eval_m.submit_normal_hessian(ghost_penalty_term_2, q);
+        eval_p.submit_normal_hessian(-ghost_penalty_term_2, q);
+      }
+    eval_m.submit_normal_derivative(ghost_penalty_term_1, q);
+    eval_p.submit_normal_derivative(-ghost_penalty_term_1, q);
+
+    eval_m.submit_value(ghost_penalty_term_0, q);
+    eval_p.submit_value(-ghost_penalty_term_0, q);
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
   void
   CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::create_rhs(
     const number     &time,
@@ -252,6 +299,11 @@ namespace MeltPoolDG::Multiphase
           case CutUtil::CellCategory::intersected: {
             constexpr unsigned int n_lanes = VectorizedArray<number>::size();
 
+            EvaluationFlags::EvaluationFlags evaluation_flags_domain_eval = EvaluationFlags::values | (is_viscous_liquid ? EvaluationFlags::gradients :
+                                                                     EvaluationFlags::nothing);
+            EvaluationFlags::EvaluationFlags evaluation_flags_interface_eval = EvaluationFlags::values | EvaluationFlags::gradients;
+            EvaluationFlags::EvaluationFlags evaluation_flags_interface_int = EvaluationFlags::values | EvaluationFlags::gradients;
+
             auto eval_liquid_intersected =
               create_cell_integrator(CutUtil::CellCategory::intersected, 0);
             auto eval_gas_intersected =
@@ -302,34 +354,16 @@ namespace MeltPoolDG::Multiphase
                      ++lane)
                   {
                     // evaluate for domain integral in liquid phase
-                    eval_point_liquid.reinit(cell_batch * n_lanes + lane);
-                    eval_point_liquid.evaluate(
-                      StridedArrayView<const number, n_lanes>(
-                        &eval_liquid_intersected.begin_dof_values()[0][lane], n_dofs_per_cell),
-                      EvaluationFlags::values | (is_viscous_liquid ? EvaluationFlags::gradients :
-                                                                     EvaluationFlags::nothing));
+                    CutUtil::evaluate_intersected_domain(eval_point_liquid, eval_liquid_intersected, evaluation_flags_domain_eval, cell_batch, lane, n_dofs_per_cell);
 
                     // evaluate for interface integral in liquid phase
-                    eval_point_interface_liquid.reinit(cell_batch * n_lanes + lane);
-                    eval_point_interface_liquid.evaluate(
-                      StridedArrayView<const number, n_lanes>(
-                        &eval_liquid_intersected.begin_dof_values()[0][lane], n_dofs_per_cell),
-                      EvaluationFlags::values | EvaluationFlags::gradients);
+                    CutUtil::evaluate_intersected_domain(eval_point_interface_liquid, eval_liquid_intersected, evaluation_flags_domain_eval, cell_batch, lane, n_dofs_per_cell);
 
                     // evaluate for domain integral in gas phase
-                    eval_point_gas.reinit(cell_batch * n_lanes + lane);
-                    eval_point_gas.evaluate(
-                      StridedArrayView<const number, n_lanes>(
-                        &eval_gas_intersected.begin_dof_values()[0][lane], n_dofs_per_cell),
-                      EvaluationFlags::values |
-                        (is_viscous_gas ? EvaluationFlags::gradients : EvaluationFlags::nothing));
+                    CutUtil::evaluate_intersected_domain(eval_point_gas, eval_gas_intersected, evaluation_flags_domain_eval, cell_batch, lane, n_dofs_per_cell);
 
                     // evaluate for interface integral in gas phase
-                    eval_point_interface_gas.reinit(cell_batch * n_lanes + lane);
-                    eval_point_interface_gas.evaluate(
-                      StridedArrayView<const number, n_lanes>(
-                        &eval_gas_intersected.begin_dof_values()[0][lane], n_dofs_per_cell),
-                      EvaluationFlags::values | EvaluationFlags::gradients);
+                    CutUtil::evaluate_intersected_domain(eval_point_interface_gas, eval_gas_intersected, evaluation_flags_domain_eval, cell_batch, lane, n_dofs_per_cell);
 
                     // do domain integral in liquid phase
                     process_cell.template operator()<false, is_viscous_liquid>(
@@ -338,7 +372,7 @@ namespace MeltPoolDG::Multiphase
                     eval_point_liquid.integrate(
                       StridedArrayView<number, n_lanes>(
                         &eval_liquid_intersected.begin_dof_values()[0][lane], n_dofs_per_cell),
-                      EvaluationFlags::values | EvaluationFlags::gradients);
+                      evaluation_flags_interface_int);
 
                     // do domain integral in gas phase
                     process_cell.template operator()<true, is_viscous_gas>(
@@ -347,7 +381,7 @@ namespace MeltPoolDG::Multiphase
                     eval_point_gas.integrate(StridedArrayView<number, n_lanes>(
                                                &eval_gas_intersected.begin_dof_values()[0][lane],
                                                n_dofs_per_cell),
-                                             EvaluationFlags::values | EvaluationFlags::gradients);
+                                             evaluation_flags_interface_int);
 
                     // do interface integral
                     if (multiphase_scratch_data.phase_coupling.type ==
@@ -1135,10 +1169,7 @@ namespace MeltPoolDG::Multiphase
                                                .n_active_entries_per_cell_batch(cell);
                ++lane)
             {
-              eval_point.reinit(cell * n_lanes + lane);
-              eval_point.evaluate(StridedArrayView<const number, n_lanes>(
-                                    &eval_intersected.begin_dof_values()[0][lane], n_dofs_per_cell),
-                                  dealii::EvaluationFlags::values);
+              CutUtil::evaluate_intersected_domain(eval_point, eval_intersected, EvaluationFlags::values, cell, lane, n_dofs_per_cell);
 
               for (const unsigned int q : eval_point.quadrature_point_indices())
                 eval_point.submit_value(eval_point.get_value(q), q);
@@ -1213,11 +1244,16 @@ namespace MeltPoolDG::Multiphase
                                             dealii::Utilities::fixed_power<5>(cell_side_length) :
                                             0.;
 
-    auto apply_ghost_penalty = [&](auto &eval_m, auto &eval_p) {
+    auto apply_ghost_penalty = [&](const CutUtil::CellCategory category_m,
+        const CutUtil::CellCategory category_p,
+        const unsigned int          component) {
       EvaluationFlags::EvaluationFlags evaluation_flags =
         dealii::EvaluationFlags::values | dealii::EvaluationFlags::gradients |
         ((multiphase_scratch_data.flow_data.fe.degree == 2) ? dealii::EvaluationFlags::hessians :
                                                               dealii::EvaluationFlags::nothing);
+
+      auto eval_m = create_face_integrator(true, category_m, component);
+      auto eval_p = create_face_integrator(false, category_p, component);
 
       for (unsigned int face = face_range.first; face < face_range.second; ++face)
         {
@@ -1228,42 +1264,8 @@ namespace MeltPoolDG::Multiphase
           eval_p.gather_evaluate(src, evaluation_flags);
 
           for (const unsigned int q : eval_m.quadrature_point_indices())
-            {
-              const auto w_minus = eval_m.get_value(q);
-              const auto w_plus  = eval_p.get_value(q);
+            ghost_penalty_face_integral(eval_m,eval_p,q,cell_side_length,cell_side_length_pow_3,cell_side_length_pow_5);
 
-              const auto w_normal_grad_minus = eval_m.get_normal_derivative(q);
-              const auto w_normal_grad_plus  = eval_p.get_normal_derivative(q);
-
-              const auto ghost_penalty_term_0 =
-                (w_minus - w_plus) *
-                multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_0 *
-                cell_side_length;
-
-              const auto ghost_penalty_term_1 =
-                (w_normal_grad_minus - w_normal_grad_plus) *
-                multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_1 *
-                cell_side_length_pow_3;
-
-              if (multiphase_scratch_data.flow_data.fe.degree == 2)
-                {
-                  const auto w_normal_hessian_minus = eval_m.get_normal_hessian(q);
-                  const auto w_normal_hessian_plus  = eval_p.get_normal_hessian(q);
-
-                  const auto ghost_penalty_term_2 =
-                    (w_normal_hessian_minus - w_normal_hessian_plus) *
-                    multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_2 *
-                    cell_side_length_pow_5;
-
-                  eval_m.submit_normal_hessian(ghost_penalty_term_2, q);
-                  eval_p.submit_normal_hessian(-ghost_penalty_term_2, q);
-                }
-              eval_m.submit_normal_derivative(ghost_penalty_term_1, q);
-              eval_p.submit_normal_derivative(-ghost_penalty_term_1, q);
-
-              eval_m.submit_value(ghost_penalty_term_0, q);
-              eval_p.submit_value(-ghost_penalty_term_0, q);
-            }
           eval_m.integrate_scatter(evaluation_flags, dst);
           eval_p.integrate_scatter(evaluation_flags, dst);
         }
@@ -1271,56 +1273,39 @@ namespace MeltPoolDG::Multiphase
 
     switch (face_type)
       {
-          case CutUtil::FaceType::mixed_face_liquid_intersected: {
-            auto eval_liquid_m = create_face_integrator(true, CutUtil::CellCategory::liquid, 0);
-            auto eval_liquid_p_intersected =
-              create_face_integrator(false, CutUtil::CellCategory::intersected, 0);
-            apply_ghost_penalty(eval_liquid_m, eval_liquid_p_intersected);
-          }
-          break;
+        case CutUtil::FaceType::mixed_face_liquid_intersected:
+          apply_ghost_penalty(CutUtil::CellCategory::liquid,
+                              CutUtil::CellCategory::intersected,
+                              0);
+        break;
 
-          case CutUtil::FaceType::mixed_face_intersected_liquid: {
-            auto eval_liquid_p = create_face_integrator(false, CutUtil::CellCategory::liquid, 0);
-            auto eval_liquid_m_intersected =
-              create_face_integrator(true, CutUtil::CellCategory::intersected, 0);
-            apply_ghost_penalty(eval_liquid_m_intersected, eval_liquid_p);
-          }
-          break;
+        case CutUtil::FaceType::mixed_face_intersected_liquid:
+          apply_ghost_penalty(CutUtil::CellCategory::intersected,
+                              CutUtil::CellCategory::liquid,
+                              0);
+        break;
 
-          case CutUtil::FaceType::mixed_face_gas_intersected: {
-            auto eval_gas_m = create_face_integrator(true,
-                                                     CutUtil::CellCategory::gas,
-                                                     CompressibleFlow::n_conserved_variables<dim>);
-            auto eval_gas_p_intersected =
-              create_face_integrator(false,
-                                     CutUtil::CellCategory::intersected,
-                                     CompressibleFlow::n_conserved_variables<dim>);
-            apply_ghost_penalty(eval_gas_m, eval_gas_p_intersected);
-          }
-          break;
+        case CutUtil::FaceType::mixed_face_gas_intersected:
+          apply_ghost_penalty(CutUtil::CellCategory::gas,
+                              CutUtil::CellCategory::intersected,
+                              CompressibleFlow::n_conserved_variables<dim>);
+        break;
 
-          case CutUtil::FaceType::mixed_face_intersected_gas: {
-            auto eval_gas_m_intersected =
-              create_face_integrator(true,
-                                     CutUtil::CellCategory::intersected,
-                                     CompressibleFlow::n_conserved_variables<dim>);
-            auto eval_gas_p = create_face_integrator(false,
-                                                     CutUtil::CellCategory::gas,
-                                                     CompressibleFlow::n_conserved_variables<dim>);
-            apply_ghost_penalty(eval_gas_m_intersected, eval_gas_p);
-          }
-          break;
+        case CutUtil::FaceType::mixed_face_intersected_gas:
+          apply_ghost_penalty(CutUtil::CellCategory::intersected,
+                              CutUtil::CellCategory::gas,
+                              CompressibleFlow::n_conserved_variables<dim>);
+        break;
 
-          case CutUtil::FaceType::intersected_face: {
-            auto [eval_liquid_m_intersected, eval_liquid_p_intersected] =
-              create_face_integrators(CutUtil::CellCategory::intersected, 0);
-            auto [eval_gas_m_intersected, eval_gas_p_intersected] =
-              create_face_integrators(CutUtil::CellCategory::intersected,
-                                      CompressibleFlow::n_conserved_variables<dim>);
-            apply_ghost_penalty(eval_liquid_m_intersected, eval_liquid_p_intersected);
-            apply_ghost_penalty(eval_gas_m_intersected, eval_gas_p_intersected);
-          }
-          break;
+        case CutUtil::FaceType::intersected_face:
+          apply_ghost_penalty(CutUtil::CellCategory::intersected,
+                              CutUtil::CellCategory::intersected,
+                              0);
+
+        apply_ghost_penalty(CutUtil::CellCategory::intersected,
+                            CutUtil::CellCategory::intersected,
+                            CompressibleFlow::n_conserved_variables<dim>);
+        break;
 
         default:
           break;
@@ -1337,6 +1322,299 @@ namespace MeltPoolDG::Multiphase
   {
     // nothing to do here
   }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::compute_inverse_diagonal_from_matrixfree(VectorType &diagonal) const
+  {
+    multiphase_scratch_data.scratch_data.initialize_dof_vector(diagonal, multiphase_scratch_data.dof_idx);
+
+    dealii::TrilinosWrappers::SparseMatrix dummy;
+    internal_compute_diagonal_or_system_matrix(diagonal, dummy, true);
+
+    // invert
+    const double linfty_norm = std::max(1.0, diagonal.linfty_norm());
+    for (auto &i : diagonal)
+      i = std::abs(i) > 1.0e-16 * linfty_norm ? 1.0 / i : 1.0;
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::compute_system_matrix_from_matrixfree(
+    dealii::TrilinosWrappers::SparseMatrix &system_matrix) const
+  {
+    system_matrix = 0.0;
+
+    VectorType dummy;
+    internal_compute_diagonal_or_system_matrix(dummy, system_matrix, false);
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::internal_compute_diagonal_or_system_matrix(
+    [[maybe_unused]] VectorType                             &diagonal,
+    [[maybe_unused]] dealii::TrilinosWrappers::SparseMatrix &system_matrix,
+    const bool                                               do_diagonal) const
+  {
+    const auto &matrix_free = multiphase_scratch_data.scratch_data.get_matrix_free();
+
+    dealii::MatrixFreeTools::internal::
+      ComputeMatrixScratchData<dim, dealii::VectorizedArray<number>, false /*is_face_*/>
+        data_cell;
+    dealii::MatrixFreeTools::internal::
+      ComputeMatrixScratchData<dim, dealii::VectorizedArray<number>, true /*is_face_*/>
+        data_face;
+
+    data_cell.dof_numbers               = {multiphase_scratch_data.dof_idx, multiphase_scratch_data.dof_idx};
+    data_cell.quad_numbers              = {multiphase_scratch_data.quad_idx, multiphase_scratch_data.quad_idx};
+    data_cell.n_components              = {CompressibleFlow::n_conserved_variables<dim>, CompressibleFlow::n_conserved_variables<dim>};
+    data_cell.first_selected_components = {0, CompressibleFlow::n_conserved_variables<dim>};
+    data_cell.batch_type                = {0, 0}; // 0 for cell
+
+    data_face.dof_numbers  = {multiphase_scratch_data.dof_idx,
+                              multiphase_scratch_data.dof_idx,
+                              multiphase_scratch_data.dof_idx,
+                              multiphase_scratch_data.dof_idx};
+    data_face.quad_numbers = {multiphase_scratch_data.quad_idx, multiphase_scratch_data.quad_idx, multiphase_scratch_data.quad_idx, multiphase_scratch_data.quad_idx};
+    data_face.n_components = {CompressibleFlow::n_conserved_variables<dim>, CompressibleFlow::n_conserved_variables<dim>, CompressibleFlow::n_conserved_variables<dim>, CompressibleFlow::n_conserved_variables<dim>};
+    data_face.first_selected_components = {0, 0, CompressibleFlow::n_conserved_variables<dim>, CompressibleFlow::n_conserved_variables<dim>};
+    data_face.batch_type = {1, 2, 1, 2}; // 1 for interior face, 2 for exterior face
+
+
+
+    data_cell.op_create = [&](const std::pair<unsigned int, unsigned int> &cell_range) {
+      std::vector<
+        std::unique_ptr<dealii::FEEvaluationData<dim, dealii::VectorizedArray<number>, false>>>
+        eval_data;
+
+      const auto emplace_eval = [&](const unsigned int index) {
+        eval_data.emplace_back(
+          std::make_unique<DomainEval<>>(matrix_free,
+                                         cell_range,
+                                         data_cell.dof_numbers[index],
+                                         data_cell.quad_numbers[index],
+                                         data_cell.first_selected_components[index]));
+      };
+
+      const auto cell_category = matrix_free.get_cell_range_category(cell_range);
+
+      if (cell_category == CutUtil::CellCategory::liquid or
+          cell_category == CutUtil::CellCategory::intersected)
+        {
+          emplace_eval(0);
+        }
+
+      if (cell_category == CutUtil::CellCategory::gas or
+           cell_category == CutUtil::CellCategory::intersected)
+        {
+          emplace_eval(1);
+        }
+
+      return eval_data;
+    };
+
+
+
+    data_cell.op_reinit = [&](auto &evaluators, const unsigned cell_index) {
+      for (unsigned int i = 0; i < evaluators.size(); ++i)
+        static_cast<DomainEval<> &>(*evaluators[i]).reinit(cell_index);
+    };
+
+    data_cell.op_compute = [&](auto &evaluators) {
+      auto &eval_1 = static_cast<DomainEval<> &>(*evaluators[0]);
+
+      const unsigned int cell_batch    = eval_1.get_current_cell_index();
+      const unsigned int cell_category = eval_1.get_active_fe_index();
+
+      if (cell_category == CutUtil::CellCategory::liquid)
+        {
+          eval_1.evaluate(EvaluationFlags::values);
+
+          for (const unsigned int q : eval_1.quadrature_point_indices())
+            eval_1.submit_value(eval_1.get_value(q), q);
+
+          eval_1.integrate(dealii::EvaluationFlags::values);
+        }
+      else if (cell_category == CutUtil::CellCategory::gas)
+        {
+          eval_1.evaluate(EvaluationFlags::values);
+
+          for (const unsigned int q : eval_1.quadrature_point_indices())
+            eval_1.submit_value(eval_1.get_value(q), q);
+
+          eval_1.integrate(dealii::EvaluationFlags::values);
+        }
+      else if (cell_category == CutUtil::CellCategory::intersected)
+        {
+          auto &eval_2 = static_cast<DomainEval<> &>(*evaluators[1]);
+
+          // Processing function for intersected cells
+          auto process_intersected_cell_range = [&](auto& eval, auto &eval_point) {
+            constexpr unsigned int n_lanes = VectorizedArray<number>::size();
+
+            for (unsigned int lane = 0; lane < multiphase_scratch_data.scratch_data.get_matrix_free()
+                                                 .n_active_entries_per_cell_batch(cell_batch);
+                 ++lane)
+              {
+                CutUtil::evaluate_intersected_domain(eval_point, eval, EvaluationFlags::values, cell_batch, lane, n_dofs_per_cell);
+
+                for (const unsigned int q : eval_point.quadrature_point_indices())
+                  eval_point.submit_value(eval_point.get_value(q), q);
+
+                eval_point.integrate(
+                  StridedArrayView<number, n_lanes>(&eval.begin_dof_values()[0][lane],
+                                                    n_dofs_per_cell),
+                  dealii::EvaluationFlags::values);
+              }
+          };
+
+          FEPointEvaluation<CompressibleFlow::n_conserved_variables<dim>,
+                            dim,
+                            dim,
+                            VectorizedArray<number>>
+            eval_point_liquid(*mapping_info_cells[0], fe_point_temp);
+          FEPointEvaluation<CompressibleFlow::n_conserved_variables<dim>,
+                            dim,
+                            dim,
+                            VectorizedArray<number>>
+            eval_point_gas(*mapping_info_cells[1], fe_point_temp);
+
+          process_intersected_cell_range(eval_1, eval_point_liquid);
+          process_intersected_cell_range(eval_2, eval_point_gas);
+        }
+    };
+
+    data_face.op_create = [&](const std::pair<unsigned int, unsigned int> &face_range) {
+      std::vector<
+        std::unique_ptr<dealii::FEEvaluationData<dim, dealii::VectorizedArray<number>, true>>>
+        eval_data;
+
+      const auto emplace_face_eval = [&](const unsigned int index) {
+        bool       is_interior_face;
+        const auto batch_type = data_face.batch_type[index];
+        if (batch_type == 1)
+          is_interior_face = true;
+        else if (batch_type == 2)
+          is_interior_face = false;
+        else
+          AssertThrow(
+            false,
+            dealii::ExcMessage(
+              "The face batch type must either be 1 (interior face) or 2 (exterior face)!"));
+        eval_data.emplace_back(
+          std::make_unique<FaceEval<> >(matrix_free,
+                                     face_range,
+                                     is_interior_face,
+                                     data_face.dof_numbers[index],
+                                     data_face.quad_numbers[index],
+                                     data_face.first_selected_components[index]));
+      };
+
+
+      const auto              face_category = matrix_free.get_face_range_category(face_range);
+      const CutUtil::FaceType face_type     = CutUtil::get_face_type(face_category);
+
+      if (face_type == CutUtil::FaceType ::intersected_face or
+          face_type == CutUtil::FaceType ::mixed_face_liquid_intersected or
+          face_type == CutUtil::FaceType ::mixed_face_intersected_liquid)
+        {
+          emplace_face_eval(0);
+          emplace_face_eval(1);
+        }
+      if (face_type == CutUtil::FaceType ::intersected_face or
+          face_type == CutUtil::FaceType ::mixed_face_gas_intersected or
+          face_type == CutUtil::FaceType ::mixed_face_intersected_gas)
+        {
+          emplace_face_eval(2);
+          emplace_face_eval(3);
+        }
+
+      return eval_data;
+    };
+
+    data_face.op_reinit = [](auto &evaluators, const unsigned face_index) {
+      for (unsigned int i = 0; i < evaluators.size(); ++i)
+        static_cast<FaceEval<> &>(*evaluators[i]).reinit(face_index);
+    };
+
+
+    data_face.op_compute = [&](auto &evaluators) {
+      auto &eval_minus_l = static_cast<FaceEval<> &>(*evaluators[0]);
+      auto &eval_plus_l  = static_cast<FaceEval<> &>(*evaluators[1]);
+
+      const unsigned int      face_batch    = eval_minus_l.get_cell_or_face_batch_id();
+      const auto              face_category = matrix_free.get_face_category(face_batch);
+      const CutUtil::FaceType face_type     = CutUtil::get_face_type(face_category);
+
+      EvaluationFlags::EvaluationFlags evaluation_flags =
+       dealii::EvaluationFlags::values | dealii::EvaluationFlags::gradients |
+       ((multiphase_scratch_data.flow_data.fe.degree == 2) ? dealii::EvaluationFlags::hessians :
+                                                             dealii::EvaluationFlags::nothing);
+
+      const number cell_side_length       = multiphase_scratch_data.scratch_data.get_min_cell_size();
+      const number cell_side_length_pow_3 = dealii::Utilities::fixed_power<3>(cell_side_length);
+      const number cell_side_length_pow_5 = (multiphase_scratch_data.flow_data.fe.degree == 2) ?
+                                              dealii::Utilities::fixed_power<5>(cell_side_length) :
+                                              0.;
+
+      const bool do_liquid_ghost_penalty = face_type_has_ghost_penalty(face_type, true /*is_liquid*/);
+      const bool do_gas_ghost_penalty = face_type_has_ghost_penalty(face_type, false /*is_liquid*/);
+
+      auto apply_ghost_penalty = [&](auto &eval_minus, auto &eval_plus) {
+        eval_minus.evaluate(evaluation_flags);
+        eval_plus.evaluate(evaluation_flags);
+
+        for (const unsigned int q : eval_minus.quadrature_point_indices())
+          ghost_penalty_face_integral(eval_minus,
+                                      eval_plus,
+                                      q,
+                                      cell_side_length,
+                                      cell_side_length_pow_3,
+                                      cell_side_length_pow_5);
+
+        eval_minus.integrate(evaluation_flags);
+        eval_plus.integrate(evaluation_flags);
+      };
+
+      if (do_liquid_ghost_penalty)
+        {
+          apply_ghost_penalty(eval_minus_l, eval_plus_l);
+        }
+
+      if (do_gas_ghost_penalty)
+        {
+          const int eval_idx = evaluators.size() == 4 ? 2 : 0;
+
+          auto &eval_minus_g = static_cast<FaceEval<> &>(*evaluators[eval_idx]);
+          auto &eval_plus_g  = static_cast<FaceEval<> &>(*evaluators[eval_idx + 1]);
+
+          apply_ghost_penalty(eval_minus_g, eval_plus_g);
+        }
+    };
+
+
+    if (do_diagonal)
+      {
+        std::vector<VectorType *> dummy(1);
+        dummy[0] = &diagonal;
+        dealii::MatrixFreeTools::internal::
+          compute_diagonal<dim, number, dealii::VectorizedArray<number>>(
+            matrix_free, data_cell, data_face, {} /*data_boundary*/, diagonal, dummy);
+      }
+    else // compute matrix
+      {
+        dealii::MatrixFreeTools::internal::
+          compute_matrix<dim, number, dealii::VectorizedArray<number>>(matrix_free,
+                                                                       multiphase_scratch_data.scratch_data.get_constraint(
+                                                                         multiphase_scratch_data.dof_idx),
+                                                                       data_cell,
+                                                                       data_face,
+                                                                       {} /*data_boundary*/,
+                                                                       system_matrix);
+      }
+  }
+
+
 
   template class CompressibleMultiphaseOperator<1, double, true, true>;
   template class CompressibleMultiphaseOperator<2, double, true, true>;

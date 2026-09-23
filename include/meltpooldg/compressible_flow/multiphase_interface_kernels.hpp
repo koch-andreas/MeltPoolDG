@@ -917,20 +917,26 @@ namespace MeltPoolDG::Multiphase
       CompressibleFlow::viscous_stress_tensor<dim, number>(gas_state.grad_velocity(),
                                                            gas_state.dynamic_viscosity());
 
-    const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> viscous_stress_tensor_times_velocity_liquid = contract_tensor_with_vector<dim, dim, number>(viscous_stress_tensor_liquid, liquid_state.velocity());
-    const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> viscous_stress_tensor_times_velocity_gas = contract_tensor_with_vector<dim, dim, number>(viscous_stress_tensor_gas, gas_state.velocity());
+    const dealii::Tensor<1, dim, dealii::VectorizedArray<number>>
+    viscous_stress_tensor_times_velocity_liquid = contract_tensor_with_vector<dim, dim,
+    number>(viscous_stress_tensor_liquid, liquid_state.velocity()); const dealii::Tensor<1, dim,
+    dealii::VectorizedArray<number>> viscous_stress_tensor_times_velocity_gas =
+    contract_tensor_with_vector<dim, dim, number>(viscous_stress_tensor_gas, gas_state.velocity());
 
     const number mass_flux = 10.;
     const number rho_g = 0.0977166666666666;
     const number rho_l = 3622.73669496764;
 
-    std::cout << std::setprecision(16) << -m_dot_evap * ((1.00350663797032e10 + 0.5 * rho_l * mass_flux / rho_l * mass_flux / rho_l)/rho_l
+    std::cout << std::setprecision(16) << -m_dot_evap * ((1.00350663797032e10 + 0.5 * rho_l *
+    mass_flux / rho_l * mass_flux / rho_l)/rho_l
       - (2.104084125e5 + 0.5 * rho_g * mass_flux / rho_g * mass_flux / rho_g)/rho_g)
     - (85186.7042732239 * mass_flux / rho_l - 84163.365 * mass_flux / rho_g) + mass_flux * 8.84e6 +
-      (scalar_product(viscous_stress_tensor_times_velocity_liquid - viscous_stress_tensor_times_velocity_gas, normal))
+      (scalar_product(viscous_stress_tensor_times_velocity_liquid -
+    viscous_stress_tensor_times_velocity_gas, normal))
     << std::endl;
 
-    std::cout << "viscous jump: " << scalar_product(viscous_stress_tensor_times_velocity_liquid - viscous_stress_tensor_times_velocity_gas, normal) << std::endl;
+    std::cout << "viscous jump: " << scalar_product(viscous_stress_tensor_times_velocity_liquid -
+    viscous_stress_tensor_times_velocity_gas, normal) << std::endl;
 
 
     /*std::vector<dealii::Tensor<1, dim, dealii::VectorizedArray<number>>> tangent;
@@ -951,7 +957,7 @@ namespace MeltPoolDG::Multiphase
     penalty_term_dT[1] = 1. * (vel_gas_x_tang - vel_liquid_x_tang);
     penalty_term_dT[2] = 1. * (vel_gas_y_tang - vel_liquid_y_tang);*/
 
-    //J_Rob[1]
+    // J_Rob[1]
 
     const ConservedVariablesType weighted_viscous_flux =
       UtilityFunctions::calculate_arithmetic_phase_weighted_average(

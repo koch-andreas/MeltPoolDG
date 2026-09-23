@@ -289,6 +289,20 @@ namespace MeltPoolDG::CutUtil
     return false;
   }
 
+  constexpr bool
+  face_type_has_ghost_penalty(const FaceType face_type, const bool is_liquid_phase)
+  {
+    if (face_type == FaceType::intersected_face)
+      return true;
+
+    if (is_liquid_phase)
+      return face_type == FaceType::mixed_face_gas_intersected ||
+             face_type == FaceType::mixed_face_intersected_gas;
+
+    return face_type == FaceType::mixed_face_liquid_intersected ||
+           face_type == FaceType::mixed_face_intersected_liquid;
+  }
+
   /**
    * @brief This function checks whether the considered face is a newly created intersected face.
    *
