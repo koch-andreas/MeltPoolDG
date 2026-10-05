@@ -905,6 +905,38 @@ namespace MeltPoolDG::Multiphase
       diffusive_kernel_gas.flux(gas_state.value(), gas_state.gradient_value());
 
     ConservedVariablesType penalty_term_dT;
+
+    // this also works
+    if (dim==2)
+      {
+        std::vector<dealii::Tensor<1, dim, dealii::VectorizedArray<number>>> tangent;
+        tangent.resize(dim - 1);
+
+        // compute tangential vector for dim=2 and dim=3
+        if constexpr (dim == 2)
+          {
+            tangent[0][0] = normal[1];
+            tangent[0][1] = -normal[0];
+          }
+
+        const dealii::VectorizedArray<number> vel_t_liquid = scalar_product(vel_liquid, tangent[0]);
+        const dealii::VectorizedArray<number> vel_t_gas    = scalar_product(vel_gas, tangent[0]);
+
+        penalty_term_dT[1] =  tangent[0][0] / std::abs(tangent[0][0]) * 0.5 * (liquid_state.density() + gas_state.density()) * 0.5
+          * ((vel_t_liquid - vel_t_gas) * tangent[0][0]) * ((vel_t_liquid - vel_t_gas) * tangent[0][0]);
+        penalty_term_dT[2] =  tangent[0][1] / std::abs(tangent[0][1]) * 0.5 * (liquid_state.density() + gas_state.density()) * 0.5
+          * ((vel_t_liquid - vel_t_gas) * tangent[0][1]) * ((vel_t_liquid - vel_t_gas) * tangent[0][1]);
+
+        J_Rob[1] = m_dot_evap * (vel_t_liquid - vel_t_gas) * tangent[0][0];
+        J_Rob[2] = m_dot_evap * (vel_t_liquid - vel_t_gas) * tangent[0][1];
+      }
+
+    // This works!
+    /*if (dim==2)
+      {:qt s
+        penalty_term_dT[1] = -10000. * gas_state.density() * (vel_gas[0] * vel_gas[0]);
+      }*/
+
     penalty_term_dT[Idx::energy] =
       multiphase_scratch_data.phase_coupling.hllp0_and_penalty.penalty_parameter_temperature_jump *
       (liquid_state.thermal_conductivity() + gas_state.thermal_conductivity()) / (2. * cell_size) *
