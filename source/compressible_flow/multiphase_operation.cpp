@@ -372,6 +372,11 @@ namespace MeltPoolDG::Multiphase
                       rhs,
                       multiphase_scratch_data.solution_history.get_current_solution());
 
+        AssertThrow(std::isfinite(rhs.l2_norm()),
+                    dealii::ExcMessage(
+                      "The right-hand side of the compressible multiphase flow solver "
+                      "contains NaN or Inf values."));
+
         unsigned int iter = 0;
 
         {

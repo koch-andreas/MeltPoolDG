@@ -25,6 +25,7 @@
 #include <meltpooldg/phase_change/evaporation_model_knight.hpp>
 #include <meltpooldg/utilities/utility_functions.hpp>
 
+#include <algorithm>
 #include <tuple>
 #include <utility>
 
@@ -903,6 +904,29 @@ namespace MeltPoolDG::Multiphase
       diffusive_kernel_gas.flux(gas_state.value(), gas_state.gradient_value());
 
     ConservedVariablesType penalty_term_dT;
+
+    // consider tangential no-slip for dim>1
+    if constexpr (dim > 1)
+      {
+        const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> jump_vel =
+          vel_liquid - vel_gas;
+        const dealii::Tensor<1, dim, dealii::VectorizedArray<number>> jump_vel_t =
+          jump_vel - (jump_vel * normal) * normal;
+
+        const number average_viscosity =
+          std::max(multiphase_scratch_data.material_liquid.dynamic_viscosity,
+                   multiphase_scratch_data.material_gas.dynamic_viscosity);
+        const number slip_penalty = multiphase_scratch_data.phase_coupling.hllp0_and_penalty
+                                      .penalty_parameter_tangential_no_slip *
+                                    average_viscosity / cell_size;
+
+        for (unsigned int d = 0; d < dim; ++d)
+          {
+            penalty_term_dT[Idx::momentum_x + d] = slip_penalty * jump_vel_t[d];
+            J_Rob[Idx::momentum_x + d]           = m_dot_evap * jump_vel_t[d];
+          }
+      }
+
     penalty_term_dT[Idx::energy] =
       multiphase_scratch_data.phase_coupling.hllp0_and_penalty.penalty_parameter_temperature_jump *
       (liquid_state.thermal_conductivity() + gas_state.thermal_conductivity()) / (2. * cell_size) *
