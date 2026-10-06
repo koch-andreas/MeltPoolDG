@@ -13,7 +13,10 @@ namespace MeltPoolDG
               // Incomplete LU factorization preconditioner from the Trilinos package ...
               ILU,
               // Use the inverse diagonal of the system matrix as preconditioner ...
-              Diagonal)
+              Diagonal,
+              // Use the inverse of the cell-wise diagonal blocks of the system matrix as
+              // preconditioner (matrix-free; only for operators that support it) ...
+              BlockJacobi)
 
   BETTER_ENUM(LinearSolverType,
               char,

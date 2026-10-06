@@ -5,9 +5,11 @@
 #include <meltpooldg/compressible_flow/convective_kernels.hpp>
 #include <meltpooldg/compressible_flow/data_types.hpp>
 #include <meltpooldg/compressible_flow/kernels.hpp>
+#include <meltpooldg/compressible_flow/multiphase_band_solver.hpp>
 #include <meltpooldg/compressible_flow/multiphase_level_set_advection.hpp>
 #include <meltpooldg/cut/util.hpp>
 #include <meltpooldg/flow/darcy_damping_model.hpp>
+#include <meltpooldg/linear_algebra/preconditioner_block_jacobi.hpp>
 #include <meltpooldg/phase_change/evaporation_model_knight.hpp>
 #include <meltpooldg/utilities/dg_generic_convection_diffusion_worker.hpp>
 #include <meltpooldg/utilities/vector_tools.hpp>
@@ -274,6 +276,93 @@ namespace MeltPoolDG::Multiphase
     void
     compute_system_matrix_from_matrixfree(
       dealii::TrilinosWrappers::SparseMatrix &system_matrix) const;
+
+    /// Storage type for the dense inverse cell blocks of the block-Jacobi preconditioner.
+    using BlockJacobiData = CellwiseBlockInverses<number>;
+
+    /**
+     * @brief Compute the inverse block diagonal of the system matrix.
+     *      Used by the block-Jacobi preconditioner.
+     *
+     * A block contains the DoFs of one scalar component of one phase on one cell. Since the system
+     * matrix (cut mass matrix + ghost penalty) acts identically on all conserved variables, a
+     * single scalar block per cell and phase is sufficient.
+     *
+     * Dense inverse blocks are computed and stored only for cells whose block differs from the
+     * standard cell mass matrix, i.e., intersected cells (cut mass matrix + ghost-penalty face
+     * terms) and bulk cells adjacent to a ghost-penalty face of their phase (mass matrix +
+     * ghost-penalty face terms). For all other cells, the inverse mass matrix is applied
+     * on-the-fly via sum factorization in apply_inverse_block_diagonal().
+     *
+     * @param block_inverses Output object containing the dense inverse blocks.
+     */
+    void
+    compute_inverse_block_diagonal_from_matrixfree(BlockJacobiData &block_inverses) const;
+
+    /**
+     * @brief Apply the inverse block diagonal of the system matrix.
+     *      Used by the block-Jacobi preconditioner.
+     *
+     * @param block_inverses Dense inverse blocks computed by
+     * compute_inverse_block_diagonal_from_matrixfree().
+     * @param dst Vector receiving the result.
+     * @param src Vector the inverse block diagonal is applied to.
+     */
+    void
+    apply_inverse_block_diagonal(const BlockJacobiData &block_inverses,
+                                 VectorType            &dst,
+                                 const VectorType      &src) const;
+
+    /**
+     * @brief Determine the band of the system matrix.
+     *      Used by the band solver (parameter "cut" -> "use band solver").
+     *
+     * The band consists of all cells and phases whose DoFs are coupled to other cells, i.e.,
+     * intersected cells (both phases) and bulk cells sharing a ghost-penalty face of their phase
+     * (same face selection as local_apply_face_lhs()). The system matrix does not couple the band
+     * with the remaining cells, whose diagonal blocks are plain cell mass matrices.
+     *
+     * In addition to the band cells, the local indices (within the locally owned range) of all
+     * DoFs of the band, i.e., all components of the band phases on each band cell, are stored.
+     *
+     * @param band Output object describing the band.
+     */
+    void
+    compute_band(BandData &band) const;
+
+    /**
+     * @brief Apply the inverse of the system matrix to all cells outside the band.
+     *      Used by the band solver (parameter "cut" -> "use band solver").
+     *
+     * Outside the band, the system matrix is block diagonal with the cell mass matrices as blocks.
+     * Their exact inverse is applied via sum factorization. Only the entries of @p dst outside the
+     * band are written.
+     *
+     * @param band Data defining the band, computed by compute_band().
+     * @param dst Vector receiving the result.
+     * @param src Vector the inverse mass matrix is applied to.
+     */
+    void
+    apply_inverse_mass_matrix_outside_band(const BandData   &band,
+                                           VectorType       &dst,
+                                           const VectorType &src) const;
+
+    /**
+     * @brief Matrix-vector product restricted to the band.
+     *      Used by the band solver (parameter "cut" -> "use band solver").
+     *
+     * Adds the action of the system matrix on the band cells (cut mass matrix and mass matrix)
+     * and on the ghost-penalty faces to @p dst. Since all ghost-penalty faces lie within the band,
+     * the band entries of @p dst equal (A_band src_band) if they are zero before the call and if
+     * all entries of @p src outside the band are zero. Cell batches without band cells are
+     * skipped.
+     *
+     * @param band Data defining the band, computed by compute_band().
+     * @param dst Vector to which the result is added.
+     * @param src Source vector (zero outside the band).
+     */
+    void
+    vmult_band(const BandData &band, VectorType &dst, const VectorType &src) const;
 
   private:
     /// Scratch data for multiphase case

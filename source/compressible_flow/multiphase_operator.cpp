@@ -1,9 +1,17 @@
 
+#include <deal.II/base/aligned_vector.h>
+#include <deal.II/base/mpi.h>
 #include <deal.II/base/vectorization.h>
+
+#include <deal.II/fe/fe_dgq.h>
+#include <deal.II/fe/fe_values.h>
+
+#include <deal.II/lac/full_matrix.h>
 
 #include <deal.II/matrix_free/fe_evaluation.h>
 #include <deal.II/matrix_free/fe_point_evaluation.h>
 #include <deal.II/matrix_free/matrix_free.h>
+#include <deal.II/matrix_free/operators.h>
 
 #include <meltpooldg/compressible_flow/explicit_time_integration_utils.hpp>
 #include <meltpooldg/compressible_flow/multiphase_interface_kernels.hpp>
@@ -11,13 +19,166 @@
 #include <meltpooldg/compressible_flow/operation_scratch_data.hpp>
 #include <meltpooldg/compressible_flow/utils.hpp>
 #include <meltpooldg/cut/util.hpp>
+#include <meltpooldg/utilities/journal.hpp>
 #include <meltpooldg/utilities/matrix_free_util.hpp>
 #include <meltpooldg/utilities/preprocessor_directives.hpp>
+
+#include <array>
+#include <bitset>
+#include <cmath>
+#include <functional>
+#include <optional>
+#include <string>
+#include <vector>
 
 
 namespace MeltPoolDG::Multiphase
 {
   using namespace dealii;
+
+  namespace
+  {
+    /**
+     * Invert the dense square matrix @p matrix with Gauss-Jordan elimination and partial pivoting.
+     *
+     * @return false if the matrix is (numerically) singular. In that case, @p inverse is undefined.
+     */
+    template <typename number>
+    bool
+    invert_dense_block(const FullMatrix<number> &matrix, FullMatrix<number> &inverse)
+    {
+      const unsigned int n = matrix.m();
+      AssertDimension(n, matrix.n());
+
+      FullMatrix<number> A(matrix);
+      inverse.reinit(n, n);
+      for (unsigned int i = 0; i < n; ++i)
+        inverse(i, i) = 1.;
+
+      number max_abs_diagonal = 0.;
+      for (unsigned int i = 0; i < n; ++i)
+        max_abs_diagonal = std::max(max_abs_diagonal, std::abs(A(i, i)));
+
+      if (!(max_abs_diagonal > 0.) || !std::isfinite(max_abs_diagonal))
+        return false;
+
+      const number tolerance = 1e-14 * max_abs_diagonal;
+
+      for (unsigned int k = 0; k < n; ++k)
+        {
+          // partial pivoting
+          unsigned int pivot = k;
+          for (unsigned int i = k + 1; i < n; ++i)
+            if (std::abs(A(i, k)) > std::abs(A(pivot, k)))
+              pivot = i;
+
+          if (!(std::abs(A(pivot, k)) > tolerance))
+            return false;
+
+          if (pivot != k)
+            {
+              A.swap_row(k, pivot);
+              inverse.swap_row(k, pivot);
+            }
+
+          const number inverse_pivot = 1. / A(k, k);
+          for (unsigned int j = 0; j < n; ++j)
+            {
+              A(k, j) *= inverse_pivot;
+              inverse(k, j) *= inverse_pivot;
+            }
+
+          for (unsigned int i = 0; i < n; ++i)
+            if (i != k && A(i, k) != number(0.))
+              {
+                const number factor = A(i, k);
+                for (unsigned int j = 0; j < n; ++j)
+                  {
+                    A(i, j) -= factor * A(k, j);
+                    inverse(i, j) -= factor * inverse(k, j);
+                  }
+              }
+        }
+
+      return true;
+    }
+
+    /**
+     * Return whether the cell category @p category (active FE index) contains DoFs of the phase
+     * @p phase (0: liquid, 1: gas).
+     */
+    inline bool
+    category_has_phase(const unsigned int category, const unsigned int phase)
+    {
+      return category == CutUtil::CellCategory::intersected ||
+             category == (phase == 0 ? CutUtil::CellCategory::liquid : CutUtil::CellCategory::gas);
+    }
+
+    /**
+     * Call @p face_worker(face_no, subface_no) for every (sub)face of the active cell @p cell at
+     * which the ghost-penalty stabilization of phase @p phase acts, i.e., faces to a neighbor
+     * containing the phase where at least one of the two cells is intersected (same face selection
+     * as CutUtil::face_type_has_ghost_penalty()). For faces to a neighbor on the same level or a
+     * coarser neighbor, subface_no is dealii::numbers::invalid_unsigned_int. Boundary faces (except
+     * for periodic ones) are skipped.
+     */
+    template <int dim, typename CellIteratorType, typename FaceWorker>
+    void
+    for_each_ghost_penalty_face(const CellIteratorType &cell,
+                                const unsigned int      phase,
+                                const FaceWorker       &face_worker)
+    {
+      const unsigned int category = cell->active_fe_index();
+
+      const auto is_ghost_penalty_face = [&](const unsigned int neighbor_category) {
+        return category_has_phase(neighbor_category, phase) &&
+               (category == CutUtil::CellCategory::intersected ||
+                neighbor_category == CutUtil::CellCategory::intersected);
+      };
+
+      for (const unsigned int f : cell->face_indices())
+        {
+          const bool is_periodic = cell->has_periodic_neighbor(f);
+          if (cell->at_boundary(f) && !is_periodic)
+            continue;
+
+          const auto neighbor = cell->neighbor_or_periodic_neighbor(f);
+
+          if (!neighbor->has_children())
+            {
+              // neighbor on the same level or coarser
+              if (is_ghost_penalty_face(neighbor->active_fe_index()))
+                face_worker(f, dealii::numbers::invalid_unsigned_int);
+            }
+          else if constexpr (dim == 1)
+            {
+              // a face is a point: only the category of the adjacent active child matters
+              auto child = neighbor;
+              while (child->has_children())
+                child = child->child(1 - f);
+
+              if (is_ghost_penalty_face(child->active_fe_index()))
+                face_worker(f, dealii::numbers::invalid_unsigned_int);
+            }
+          else
+            {
+              // finer neighbor: visit the subfaces adjacent to ghost-penalty neighbors
+              const unsigned int n_subfaces = is_periodic ?
+                                                GeometryInfo<dim>::max_children_per_face :
+                                                cell->face(f)->n_children();
+              for (unsigned int subface = 0; subface < n_subfaces; ++subface)
+                {
+                  const auto child = is_periodic ?
+                                       cell->periodic_neighbor_child_on_subface(f, subface) :
+                                       cell->neighbor_child_on_subface(f, subface);
+
+                  if (is_ghost_penalty_face(child->active_fe_index()))
+                    face_worker(f, subface);
+                }
+            }
+        }
+    }
+  } // namespace
 
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
   CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
@@ -1528,6 +1689,611 @@ namespace MeltPoolDG::Multiphase
               system_matrix);
           }
       }
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+    compute_inverse_block_diagonal_from_matrixfree(BlockJacobiData &block_inverses) const
+  {
+    const auto        &matrix_free = multiphase_scratch_data.scratch_data.get_matrix_free();
+    const unsigned int dof_idx     = multiphase_scratch_data.dof_idx;
+    const unsigned int quad_idx    = multiphase_scratch_data.quad_idx;
+    const unsigned int fe_degree   = multiphase_scratch_data.flow_data.fe.degree;
+
+    constexpr unsigned int n_lanes       = VectorizedArray<number>::size();
+    constexpr unsigned int n_components  = CompressibleFlow::n_conserved_variables<dim>;
+    const unsigned int     n_scalar_dofs = dealii::Utilities::pow(fe_degree + 1, dim);
+
+    // The inverse mass matrix of the bulk cells is applied via sum factorization in
+    // apply_inverse_block_diagonal(), which is exact only for as many quadrature points as DoFs.
+    AssertThrow(matrix_free.get_quadrature(quad_idx, CutUtil::CellCategory::liquid).size() ==
+                  n_scalar_dofs,
+                ExcMessage("The block-Jacobi preconditioner requires a cell quadrature rule with "
+                           "fe_degree + 1 points per coordinate direction."));
+
+    // one block per cell and phase (0: liquid, 1: gas)
+    block_inverses.reinit(matrix_free.n_cell_batches(), n_lanes, 2, n_scalar_dofs);
+
+    // ghost-penalty parameters, identical to local_apply_face_lhs()
+    // TODO: use local face size and not globally minimum cell size for ghost penalty scaling
+    const number h                 = multiphase_scratch_data.scratch_data.get_min_cell_size();
+    const number h_pow3            = dealii::Utilities::fixed_power<3>(h);
+    const number h_pow5            = dealii::Utilities::fixed_power<5>(h);
+    const auto  &ghost_penalty     = multiphase_scratch_data.cut.stabilization.ghost_penalty;
+    const bool   with_hessian_term = (fe_degree == 2);
+
+    // All conserved variables share the same scalar block. Thus, scalar evaluators are sufficient.
+    const FE_DGQ<dim> fe_scalar(fe_degree);
+
+    // (a) face integrals: ghost-penalty contributions of the cell to itself
+    UpdateFlags face_update_flags =
+      update_values | update_gradients | update_JxW_values | update_normal_vectors;
+    if (with_hessian_term)
+      face_update_flags = face_update_flags | update_hessians;
+
+    const Quadrature<dim - 1> &face_quadrature =
+      matrix_free.get_face_quadrature(quad_idx, CutUtil::CellCategory::liquid);
+    const Mapping<dim> &mapping = multiphase_scratch_data.scratch_data.get_mapping();
+
+    FEFaceValues<dim> fe_face_values(mapping, fe_scalar, face_quadrature, face_update_flags);
+
+    // subfaces (hanging faces) do not exist in 1d
+    std::optional<FESubfaceValues<dim>> fe_subface_values;
+    if constexpr (dim > 1)
+      fe_subface_values.emplace(mapping, fe_scalar, face_quadrature, face_update_flags);
+
+    std::vector<number> phi(n_scalar_dofs), normal_grad_phi(n_scalar_dofs),
+      normal_hessian_phi(n_scalar_dofs, 0.);
+
+    // Add the self-coupling part of the ghost-penalty bilinear form on one face (see
+    // ghost_penalty_face_integral()). Test and trial functions both belong to the current cell,
+    // so the neighbor's shape functions and the orientation of the normal vector do not matter.
+    const auto add_ghost_penalty_self_block = [&](const FEFaceValuesBase<dim> &fe_values,
+                                                  FullMatrix<number>          &block) {
+      for (const unsigned int q : fe_values.quadrature_point_indices())
+        {
+          const Tensor<1, dim> normal = fe_values.normal_vector(q);
+
+          for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+            {
+              phi[i]             = fe_values.shape_value(i, q);
+              normal_grad_phi[i] = fe_values.shape_grad(i, q) * normal;
+              if (with_hessian_term)
+                normal_hessian_phi[i] = normal * (fe_values.shape_hessian(i, q) * normal);
+            }
+
+          const number JxW = fe_values.JxW(q);
+          const number c_0 = ghost_penalty.gamma_M_degree_0 * h * JxW;
+          const number c_1 = ghost_penalty.gamma_M_degree_1 * h_pow3 * JxW;
+          const number c_2 = with_hessian_term ? ghost_penalty.gamma_M_degree_2 * h_pow5 * JxW : 0.;
+
+          for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+            for (unsigned int j = 0; j < n_scalar_dofs; ++j)
+              block(i, j) += c_0 * phi[i] * phi[j] + c_1 * normal_grad_phi[i] * normal_grad_phi[j] +
+                             c_2 * normal_hessian_phi[i] * normal_hessian_phi[j];
+        }
+    };
+
+    // Add the ghost-penalty contributions of all faces of @p cell for @p phase to @p block (see
+    // for_each_ghost_penalty_face()). The block is set to zero before the first contribution is
+    // added and is not touched if the cell has no ghost-penalty face. Return whether the cell has a
+    // ghost-penalty face.
+    const auto add_ghost_penalty_faces = [&](const typename DoFHandler<dim>::cell_iterator &cell,
+                                             const unsigned int                             phase,
+                                             FullMatrix<number> &block) -> bool {
+      // FEValues objects are set up for a scalar element; reinitialize them with a triangulation
+      // iterator to bypass the check against the finite element of the DoFHandler
+      const typename Triangulation<dim>::cell_iterator tria_cell(cell);
+
+      bool has_ghost_penalty_face = false;
+
+      for_each_ghost_penalty_face<dim>(
+        cell, phase, [&](const unsigned int face_no, const unsigned int subface_no) {
+          if (!has_ghost_penalty_face)
+            block.reinit(n_scalar_dofs, n_scalar_dofs);
+          has_ghost_penalty_face = true;
+
+          if (subface_no == dealii::numbers::invalid_unsigned_int)
+            {
+              fe_face_values.reinit(tria_cell, face_no);
+              add_ghost_penalty_self_block(fe_face_values, block);
+            }
+          else
+            {
+              // subfaces (hanging faces) do not exist in 1d
+              if constexpr (dim > 1)
+                {
+                  fe_subface_values->reinit(tria_cell, face_no, subface_no);
+                  add_ghost_penalty_self_block(*fe_subface_values, block);
+                }
+              else
+                Assert(false, ExcInternalError());
+            }
+        });
+
+      return has_ghost_penalty_face;
+    };
+
+    // (b) cell integrals: mass matrix of bulk cells (vectorized over the cells of a batch) and cut
+    // mass matrix of intersected cells (one cell at a time)
+    std::array<FECellIntegrator<dim, 1, number>, 2> eval_bulk = {
+      {FECellIntegrator<dim, 1, number>(
+         matrix_free, dof_idx, quad_idx, 0, CutUtil::CellCategory::liquid),
+       FECellIntegrator<dim, 1, number>(
+         matrix_free, dof_idx, quad_idx, n_components, CutUtil::CellCategory::gas)}};
+
+    std::array<PointDomainEval<1>, 2> eval_point_intersected = {
+      {PointDomainEval<1>(*mapping_info_cells[0], fe_scalar),
+       PointDomainEval<1>(*mapping_info_cells[1], fe_scalar)}};
+
+    AlignedVector<VectorizedArray<number>>  bulk_mass_matrix(n_scalar_dofs * n_scalar_dofs);
+    std::vector<number>                     unit_vector(n_scalar_dofs, 0.);
+    std::vector<number>                     column(n_scalar_dofs, 0.);
+    std::array<FullMatrix<number>, n_lanes> blocks;
+    std::array<bool, n_lanes>               needs_dense_block;
+    FullMatrix<number>                      inverse_block(n_scalar_dofs, n_scalar_dofs);
+    unsigned int                            n_singular_blocks = 0;
+
+    // invert the block and store it
+    const auto store_inverse_block = [&](const unsigned int  cell_batch,
+                                         const unsigned int  lane,
+                                         const unsigned int  phase,
+                                         FullMatrix<number> &block) {
+      if (!invert_dense_block(block, inverse_block))
+        {
+          // Fall back to the inverse diagonal. This is only expected for a singular system matrix,
+          // e.g., if a cell has a vanishing cut and no ghost-penalty stabilization.
+          ++n_singular_blocks;
+
+          number max_abs_diagonal = 0.;
+          for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+            max_abs_diagonal = std::max(max_abs_diagonal, std::abs(block(i, i)));
+
+          inverse_block = 0.;
+          for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+            inverse_block(i, i) = std::abs(block(i, i)) > 1e-14 * max_abs_diagonal ?
+                                    1. / block(i, i) :
+                                    (max_abs_diagonal > 0. ? 1. / max_abs_diagonal : 1.);
+        }
+
+      number *data = block_inverses.add_block(cell_batch, lane, phase);
+      for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+        for (unsigned int j = 0; j < n_scalar_dofs; ++j)
+          data[i * n_scalar_dofs + j] = inverse_block(i, j);
+    };
+
+    for (unsigned int cell_batch = 0; cell_batch < matrix_free.n_cell_batches(); ++cell_batch)
+      {
+        const unsigned int category       = matrix_free.get_cell_category(cell_batch);
+        const unsigned int n_active_lanes = matrix_free.n_active_entries_per_cell_batch(cell_batch);
+
+        for (const unsigned int phase : {0u, 1u})
+          {
+            if (!category_has_phase(category, phase))
+              continue;
+
+            // 1) ghost-penalty contributions; find the cells that need a dense block
+            bool any_dense_block = false;
+            for (unsigned int lane = 0; lane < n_active_lanes; ++lane)
+              {
+                const bool has_ghost_penalty_face =
+                  add_ghost_penalty_faces(matrix_free.get_cell_iterator(cell_batch, lane, dof_idx),
+                                          phase,
+                                          blocks[lane]);
+
+                needs_dense_block[lane] =
+                  (category == CutUtil::CellCategory::intersected) || has_ghost_penalty_face;
+                any_dense_block = any_dense_block || needs_dense_block[lane];
+
+                // intersected cell without ghost-penalty face: start from a zero block
+                if (needs_dense_block[lane] && !has_ghost_penalty_face)
+                  blocks[lane].reinit(n_scalar_dofs, n_scalar_dofs);
+              }
+
+            // pure bulk cells: the inverse mass matrix is applied via sum factorization
+            if (!any_dense_block)
+              continue;
+
+            // 2) add the (cut) mass matrix, invert and store the blocks
+            if (category == CutUtil::CellCategory::intersected)
+              {
+                auto &eval_point = eval_point_intersected[phase];
+
+                for (unsigned int lane = 0; lane < n_active_lanes; ++lane)
+                  {
+                    eval_point.reinit(cell_batch * n_lanes + lane);
+
+                    for (unsigned int j = 0; j < n_scalar_dofs; ++j)
+                      {
+                        std::fill(unit_vector.begin(), unit_vector.end(), number(0.));
+                        unit_vector[j] = 1.;
+
+                        eval_point.evaluate(ArrayView<const number>(unit_vector.data(),
+                                                                    unit_vector.size()),
+                                            EvaluationFlags::values);
+                        for (const unsigned int q : eval_point.quadrature_point_indices())
+                          eval_point.submit_value(eval_point.get_value(q), q);
+                        eval_point.integrate(ArrayView<number>(column.data(), column.size()),
+                                             EvaluationFlags::values);
+
+                        for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+                          blocks[lane](i, j) += column[i];
+                      }
+
+                    store_inverse_block(cell_batch, lane, phase, blocks[lane]);
+                  }
+              }
+            else
+              {
+                auto &eval = eval_bulk[phase];
+                eval.reinit(cell_batch);
+
+                for (unsigned int j = 0; j < n_scalar_dofs; ++j)
+                  {
+                    for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+                      eval.begin_dof_values()[i] = (i == j) ? number(1.) : number(0.);
+
+                    eval.evaluate(EvaluationFlags::values);
+                    for (const unsigned int q : eval.quadrature_point_indices())
+                      eval.submit_value(eval.get_value(q), q);
+                    eval.integrate(EvaluationFlags::values);
+
+                    for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+                      bulk_mass_matrix[j * n_scalar_dofs + i] = eval.begin_dof_values()[i];
+                  }
+
+                for (unsigned int lane = 0; lane < n_active_lanes; ++lane)
+                  if (needs_dense_block[lane])
+                    {
+                      for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+                        for (unsigned int j = 0; j < n_scalar_dofs; ++j)
+                          blocks[lane](i, j) += bulk_mass_matrix[j * n_scalar_dofs + i][lane];
+
+                      store_inverse_block(cell_batch, lane, phase, blocks[lane]);
+                    }
+              }
+          }
+      }
+
+    n_singular_blocks =
+      dealii::Utilities::MPI::sum(n_singular_blocks,
+                                  multiphase_scratch_data.scratch_data.get_mpi_comm());
+    if (n_singular_blocks > 0)
+      Journal::print_line(multiphase_scratch_data.scratch_data.get_pcout(1),
+                          "WARNING: " + std::to_string(n_singular_blocks) +
+                            " singular cell block(s) replaced by their inverse diagonal",
+                          "block-Jacobi preconditioner");
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+    apply_inverse_block_diagonal(const BlockJacobiData &block_inverses,
+                                 VectorType            &dst,
+                                 const VectorType      &src) const
+  {
+    const auto &matrix_free = multiphase_scratch_data.scratch_data.get_matrix_free();
+
+    Assert(block_inverses.n_cell_batches() == matrix_free.n_cell_batches(),
+           ExcMessage("The block-Jacobi data does not match the MatrixFree object. Update the "
+                      "preconditioner after the DoF layout has changed."));
+
+    constexpr unsigned int n_components  = CompressibleFlow::n_conserved_variables<dim>;
+    const unsigned int     n_scalar_dofs = block_inverses.block_size();
+    const unsigned int     n_dofs        = n_components * n_scalar_dofs;
+
+    using InverseMassType =
+      MatrixFreeOperators::CellwiseInverseMassMatrix<dim, -1, n_components, number>;
+
+    // evaluators for all combinations of cell category and phase
+    DomainEval<> eval_liquid = create_cell_integrator(CutUtil::CellCategory::liquid, 0);
+    DomainEval<> eval_liquid_intersected =
+      create_cell_integrator(CutUtil::CellCategory::intersected, 0);
+    DomainEval<> eval_gas_intersected =
+      create_cell_integrator(CutUtil::CellCategory::intersected, n_components);
+    DomainEval<> eval_gas = create_cell_integrator(CutUtil::CellCategory::gas, n_components);
+
+    // exact inverse of the mass matrix of bulk cells via sum factorization (requires
+    // n_q_points_1d = fe_degree + 1, which is the case for FE_DGQ)
+    const InverseMassType inverse_mass_liquid(eval_liquid);
+    const InverseMassType inverse_mass_gas(eval_gas);
+
+    AlignedVector<VectorizedArray<number>> src_values(n_dofs);
+
+    const auto process_cell_batch = [&](DomainEval<>          &eval,
+                                        const InverseMassType *inverse_mass,
+                                        const unsigned int     cell_batch,
+                                        const unsigned int     phase) {
+      eval.reinit(cell_batch);
+      eval.read_dof_values(src);
+
+      VectorizedArray<number> *values = eval.begin_dof_values();
+      for (unsigned int i = 0; i < n_dofs; ++i)
+        src_values[i] = values[i];
+
+      // bulk cells: inverse mass matrix (vectorized over all cells of the batch)
+      if (inverse_mass != nullptr)
+        inverse_mass->apply(src_values.data(), values);
+
+      // cells with a dense block (intersected cells, cells at ghost-penalty faces)
+      for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
+           ++lane)
+        {
+          const number *block = block_inverses.get_block(cell_batch, lane, phase);
+
+          if (block == nullptr)
+            {
+              Assert(inverse_mass != nullptr, ExcInternalError());
+              continue;
+            }
+
+          for (unsigned int c = 0; c < n_components; ++c)
+            {
+              const VectorizedArray<number> *in  = src_values.data() + c * n_scalar_dofs;
+              VectorizedArray<number>       *out = values + c * n_scalar_dofs;
+
+              for (unsigned int i = 0; i < n_scalar_dofs; ++i)
+                {
+                  const number *block_row = block + i * n_scalar_dofs;
+                  number        sum       = 0.;
+                  for (unsigned int j = 0; j < n_scalar_dofs; ++j)
+                    sum += block_row[j] * in[j][lane];
+                  out[i][lane] = sum;
+                }
+            }
+        }
+
+      // DG: every DoF belongs to exactly one cell and phase, so the values can be set directly
+      eval.set_dof_values(dst);
+    };
+
+    for (unsigned int cell_batch = 0; cell_batch < matrix_free.n_cell_batches(); ++cell_batch)
+      switch (matrix_free.get_cell_category(cell_batch))
+        {
+          case CutUtil::CellCategory::liquid:
+            process_cell_batch(eval_liquid, &inverse_mass_liquid, cell_batch, 0);
+            break;
+          case CutUtil::CellCategory::intersected:
+            process_cell_batch(eval_liquid_intersected, nullptr, cell_batch, 0);
+            process_cell_batch(eval_gas_intersected, nullptr, cell_batch, 1);
+            break;
+          case CutUtil::CellCategory::gas:
+            process_cell_batch(eval_gas, &inverse_mass_gas, cell_batch, 1);
+            break;
+          default:
+            DEAL_II_NOT_IMPLEMENTED();
+        }
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::compute_band(
+    BandData &band) const
+  {
+    const auto        &matrix_free = multiphase_scratch_data.scratch_data.get_matrix_free();
+    const unsigned int dof_idx     = multiphase_scratch_data.dof_idx;
+    const unsigned int quad_idx    = multiphase_scratch_data.quad_idx;
+    const unsigned int fe_degree   = multiphase_scratch_data.flow_data.fe.degree;
+
+    constexpr unsigned int n_lanes      = VectorizedArray<number>::size();
+    constexpr unsigned int n_components = CompressibleFlow::n_conserved_variables<dim>;
+    const unsigned int     n_dofs       = n_components * dealii::Utilities::pow(fe_degree + 1, dim);
+
+    // The inverse mass matrix of the cells outside the band is applied via sum factorization in
+    // apply_inverse_mass_matrix_outside_band(), which is exact only for as many quadrature points
+    // as DoFs.
+    AssertThrow(matrix_free.get_quadrature(quad_idx, CutUtil::CellCategory::liquid).size() ==
+                  dealii::Utilities::pow(fe_degree + 1, dim),
+                ExcMessage("The band solver requires a cell quadrature rule with fe_degree + 1 "
+                           "points per coordinate direction."));
+
+    // 1) band cells: one entry per cell and phase (0: liquid, 1: gas)
+    band.reinit(matrix_free.n_cell_batches(), n_lanes, 2);
+
+    for (unsigned int cell_batch = 0; cell_batch < matrix_free.n_cell_batches(); ++cell_batch)
+      {
+        const unsigned int category = matrix_free.get_cell_category(cell_batch);
+
+        for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
+             ++lane)
+          {
+            const auto cell = matrix_free.get_cell_iterator(cell_batch, lane, dof_idx);
+
+            for (const unsigned int phase : {0u, 1u})
+              {
+                if (!category_has_phase(category, phase))
+                  continue;
+
+                // intersected cells always belong to the band, bulk cells only if they share a
+                // ghost-penalty face of their phase with an intersected cell
+                bool is_band_cell = (category == CutUtil::CellCategory::intersected);
+                if (!is_band_cell)
+                  for_each_ghost_penalty_face<dim>(cell,
+                                                   phase,
+                                                   [&](const unsigned int, const unsigned int) {
+                                                     is_band_cell = true;
+                                                   });
+
+                if (is_band_cell)
+                  band.add(cell_batch, lane, phase);
+              }
+          }
+      }
+
+    // 2) DoFs of the band: mark the DoFs of all band cells (and phases) with 1
+    VectorType band_marker;
+    multiphase_scratch_data.scratch_data.initialize_dof_vector(band_marker,
+                                                               multiphase_scratch_data.dof_idx);
+
+    DomainEval<> eval_liquid = create_cell_integrator(CutUtil::CellCategory::liquid, 0);
+    DomainEval<> eval_liquid_intersected =
+      create_cell_integrator(CutUtil::CellCategory::intersected, 0);
+    DomainEval<> eval_gas_intersected =
+      create_cell_integrator(CutUtil::CellCategory::intersected, n_components);
+    DomainEval<> eval_gas = create_cell_integrator(CutUtil::CellCategory::gas, n_components);
+
+    const auto mark_cell_batch =
+      [&](DomainEval<> &eval, const unsigned int cell_batch, const unsigned int phase) {
+        std::bitset<n_lanes> band_lanes;
+        for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
+             ++lane)
+          band_lanes[lane] = band.contains(cell_batch, lane, phase);
+
+        if (band_lanes.none())
+          return;
+
+        eval.reinit(cell_batch);
+        for (unsigned int i = 0; i < n_dofs; ++i)
+          eval.begin_dof_values()[i] = number(1.);
+        eval.set_dof_values_plain(band_marker, 0, band_lanes);
+      };
+
+    for (const unsigned int cell_batch : band.get_cell_batches())
+      switch (matrix_free.get_cell_category(cell_batch))
+        {
+          case CutUtil::CellCategory::liquid:
+            mark_cell_batch(eval_liquid, cell_batch, 0);
+            break;
+          case CutUtil::CellCategory::intersected:
+            mark_cell_batch(eval_liquid_intersected, cell_batch, 0);
+            mark_cell_batch(eval_gas_intersected, cell_batch, 1);
+            break;
+          case CutUtil::CellCategory::gas:
+            mark_cell_batch(eval_gas, cell_batch, 1);
+            break;
+          default:
+            DEAL_II_NOT_IMPLEMENTED();
+        }
+
+    // collect the local indices of the marked DoFs
+    std::vector<unsigned int> &band_dof_indices = band.get_dof_indices();
+    band_dof_indices.clear();
+    for (unsigned int i = 0; i < band_marker.locally_owned_size(); ++i)
+      if (band_marker.local_element(i) != number(0.))
+        band_dof_indices.push_back(i);
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+    apply_inverse_mass_matrix_outside_band(const BandData   &band,
+                                           VectorType       &dst,
+                                           const VectorType &src) const
+  {
+    const auto &matrix_free = multiphase_scratch_data.scratch_data.get_matrix_free();
+
+    Assert(band.n_cell_batches() == matrix_free.n_cell_batches(),
+           ExcMessage("The band data does not match the MatrixFree object. Update the band "
+                      "solver after the DoF layout has changed."));
+
+    constexpr unsigned int n_lanes      = VectorizedArray<number>::size();
+    constexpr unsigned int n_components = CompressibleFlow::n_conserved_variables<dim>;
+
+    using InverseMassType =
+      MatrixFreeOperators::CellwiseInverseMassMatrix<dim, -1, n_components, number>;
+
+    DomainEval<> eval_liquid = create_cell_integrator(CutUtil::CellCategory::liquid, 0);
+    DomainEval<> eval_gas    = create_cell_integrator(CutUtil::CellCategory::gas, n_components);
+
+    // exact inverse of the cell mass matrix via sum factorization (requires
+    // n_q_points_1d = fe_degree + 1, checked in compute_band())
+    const InverseMassType inverse_mass_liquid(eval_liquid);
+    const InverseMassType inverse_mass_gas(eval_gas);
+
+    const auto process_cell_batch = [&](DomainEval<>          &eval,
+                                        const InverseMassType &inverse_mass,
+                                        const unsigned int     cell_batch,
+                                        const unsigned int     phase) {
+      // lanes (cells) outside the band
+      std::bitset<n_lanes> lanes_outside_band;
+      for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
+           ++lane)
+        lanes_outside_band[lane] = !band.contains(cell_batch, lane, phase);
+
+      if (lanes_outside_band.none())
+        return;
+
+      eval.reinit(cell_batch);
+      eval.read_dof_values(src);
+      inverse_mass.apply(eval.begin_dof_values(), eval.begin_dof_values());
+
+      // DG: every DoF belongs to exactly one cell and phase, so the values can be set directly
+      eval.set_dof_values(dst, 0, lanes_outside_band);
+    };
+
+    for (unsigned int cell_batch = 0; cell_batch < matrix_free.n_cell_batches(); ++cell_batch)
+      switch (matrix_free.get_cell_category(cell_batch))
+        {
+          case CutUtil::CellCategory::liquid:
+            process_cell_batch(eval_liquid, inverse_mass_liquid, cell_batch, 0);
+            break;
+          case CutUtil::CellCategory::intersected:
+            // intersected cells always belong to the band
+            break;
+          case CutUtil::CellCategory::gas:
+            process_cell_batch(eval_gas, inverse_mass_gas, cell_batch, 1);
+            break;
+          default:
+            DEAL_II_NOT_IMPLEMENTED();
+        }
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::vmult_band(
+    const BandData   &band,
+    VectorType       &dst,
+    const VectorType &src) const
+  {
+    const auto &matrix_free = multiphase_scratch_data.scratch_data.get_matrix_free();
+
+    Assert(band.n_cell_batches() == matrix_free.n_cell_batches(),
+           ExcMessage("The band data does not match the MatrixFree object. Update the band "
+                      "solver after the DoF layout has changed."));
+
+    using local_applier_type = std::function<void(const dealii::MatrixFree<dim, number> &,
+                                                  VectorType &,
+                                                  const VectorType &,
+                                                  const std::pair<unsigned int, unsigned int> &)>;
+
+    // cells: only the cell batches of the band are processed; contiguous runs of band batches are
+    // passed to local_apply_cell_lhs() at once
+    local_applier_type cell = [&](const dealii::MatrixFree<dim, number>       &mf,
+                                  VectorType                                  &cell_dst,
+                                  const VectorType                            &cell_src,
+                                  const std::pair<unsigned int, unsigned int> &cell_range) {
+      unsigned int first = cell_range.first;
+      while (first < cell_range.second)
+        {
+          if (!band.contains_cell_batch(first))
+            {
+              ++first;
+              continue;
+            }
+
+          unsigned int last = first + 1;
+          while (last < cell_range.second && band.contains_cell_batch(last))
+            ++last;
+
+          this->local_apply_cell_lhs(mf, cell_dst, cell_src, std::make_pair(first, last));
+          first = last;
+        }
+    };
+
+    // faces: the operator only acts on ghost-penalty faces, which all lie within the band
+    local_applier_type face          = MPDG_LAMBDA_WRAPPER(this->local_apply_face_lhs);
+    local_applier_type boundary_face = MPDG_LAMBDA_WRAPPER(this->local_apply_boundary_face_lhs);
+
+    // dst is not zeroed: only the band entries are relevant, which are set to zero by the caller
+    matrix_free.loop(cell,
+                     face,
+                     boundary_face,
+                     dst,
+                     src,
+                     false /*zero_dst_vector*/,
+                     MatrixFree<dim, number>::DataAccessOnFaces::gradients,
+                     MatrixFree<dim, number>::DataAccessOnFaces::gradients);
   }
 
 

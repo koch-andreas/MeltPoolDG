@@ -11,6 +11,7 @@
 #include "meltpooldg/core/scratch_data.hpp"
 #include <meltpooldg/linear_algebra/linear_solver_data.hpp>
 #include <meltpooldg/linear_algebra/preconditioner.hpp>
+#include <meltpooldg/linear_algebra/preconditioner_block_jacobi.hpp>
 #include <meltpooldg/linear_algebra/preconditioner_jacobi.hpp>
 #include <meltpooldg/linear_algebra/preconditioner_trilinos_wrapper.hpp>
 
@@ -81,6 +82,26 @@ namespace MeltPoolDG
                                           VectorType,
                                           dealii::TrilinosWrappers::PreconditionJacobi,
                                           OperatorType>(operator_in, scratch_data, dof_idx, false));
+          }
+          case PreconditionerType::BlockJacobi: {
+            if constexpr (BlockJacobiPreconditionerOperatorType<OperatorType, VectorType>)
+              {
+                AssertThrow(do_matrix_free,
+                            dealii::ExcMessage(
+                              "The block-Jacobi preconditioner is only available for matrix-free "
+                              "operators."));
+                return Preconditioner<dim, VectorType, number>(
+                  BlockJacobiPreconditioner<dim, number, VectorType, OperatorType>(*operator_in));
+              }
+            else
+              {
+                AssertThrow(
+                  false,
+                  dealii::ExcMessage(
+                    "The block-Jacobi preconditioner is not supported by this operator."));
+                return Preconditioner<dim, VectorType, number>(
+                  IdentityPreconditioner<dim, VectorType, number>());
+              }
           }
           default: {
             AssertThrow(false,

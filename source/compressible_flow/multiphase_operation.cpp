@@ -125,15 +125,26 @@ namespace MeltPoolDG::Multiphase
       std::make_shared<NonMatching::MappingInfo<dim, dim, VectorizedArray<number>>>(
         this->multiphase_scratch_data.scratch_data.get_mapping(), update_flags_faces));
 
+    const auto &linear_solver_data =
+      multiphase_scratch_data.flow_data.time_integrator.linear_solver_data;
+
+    AssertThrow(!multiphase_scratch_data.cut.use_band_solver ||
+                  (linear_solver_data.solver_type == LinearSolverType::CG &&
+                   linear_solver_data.preconditioner_type == PreconditionerType::Identity),
+                ExcMessage("The band solver (\"cut\" -> \"use band solver\") solves the band "
+                           "with an unpreconditioned CG method. Set the linear solver type to CG "
+                           "and the preconditioner type to Identity."));
+
     std::visit(
       [&](auto &op) {
         using OperatorType = std::decay_t<decltype(op)>;
 
         preconditioner = make_preconditioner<dim, number, OperatorType, VectorType>(
-          multiphase_scratch_data.flow_data.time_integrator.linear_solver_data.preconditioner_type,
+          linear_solver_data.preconditioner_type,
           &op,
           multiphase_scratch_data.scratch_data,
-          multiphase_scratch_data.dof_idx);
+          multiphase_scratch_data.dof_idx,
+          true /*do_matrix_free*/);
       },
       cmp_operator);
 
@@ -322,6 +333,8 @@ namespace MeltPoolDG::Multiphase
 
     preconditioner.reinit();
     preconditioner_update_flag = true;
+
+    band_solver.reinit();
   }
 
   template <int dim, typename number>
@@ -358,7 +371,7 @@ namespace MeltPoolDG::Multiphase
     //   level set):
     //   - setup new dof layout, transfer/extrapolate the solution
     //   - reinit matrix-free object, rhs and solution vectors
-    //   - reinit preconditioner
+    //   - reinit preconditioner and band solver
     adapt_to_new_interface_position();
 
     // update preconditioner if required
@@ -381,14 +394,36 @@ namespace MeltPoolDG::Multiphase
                       rhs,
                       multiphase_scratch_data.solution_history.get_current_solution());
 
-        // solve linear and symmetric system of equations with CG
-        int iter = LinearSolver::solve<VectorType>(
-          op,
-          multiphase_scratch_data.solution_history.get_current_solution(),
-          rhs,
-          multiphase_scratch_data.flow_data.time_integrator.linear_solver_data,
-          preconditioner,
-          "compressible_multiphase_operation");
+        const auto &linear_solver_data =
+          multiphase_scratch_data.flow_data.time_integrator.linear_solver_data;
+
+        unsigned int iter = 0;
+
+        if (multiphase_scratch_data.cut.use_band_solver)
+          {
+            // exact cell-wise inverse away from the interface and CG on the band of cut cells and
+            // their ghost-penalty neighbors; the band only changes with the DoF layout
+            if (!band_solver.is_initialized())
+              band_solver.update(op);
+
+            iter =
+              band_solver.solve(op,
+                                multiphase_scratch_data.solution_history.get_current_solution(),
+                                rhs,
+                                linear_solver_data,
+                                "compressible_multiphase_operation");
+          }
+        else
+          {
+            // solve linear and symmetric system of equations with CG
+            iter = LinearSolver::solve<VectorType>(
+              op,
+              multiphase_scratch_data.solution_history.get_current_solution(),
+              rhs,
+              linear_solver_data,
+              preconditioner,
+              "compressible_multiphase_operation");
+          }
 
         Journal::print_line(multiphase_scratch_data.scratch_data.get_pcout(2),
                             "Linear solver iterations: " + std::to_string(iter),
@@ -474,8 +509,12 @@ namespace MeltPoolDG::Multiphase
     multiphase_scratch_data.solution_history.get_current_solution().swap(
       cut_solution_transfer.get_updated_solution());
 
-    // reinit the preconditioner's data structures
+    // reinit the preconditioner's and the band solver's data structures; the preconditioner has to
+    // be updated before the next solve
     preconditioner.reinit();
+    preconditioner_update_flag = true;
+
+    band_solver.reinit();
   }
 
   template <int dim, typename number>

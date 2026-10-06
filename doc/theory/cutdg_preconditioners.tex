@@ -1,0 +1,505 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
+\Urlmuskip=0mu\relax
+
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+
+% notation
+\newcommand{\Th}{\mathcal{T}_h}
+\newcommand{\TG}{\mathcal{T}_\Gamma}
+\newcommand{\B}{\mathcal{B}}
+\newcommand{\Ou}{\mathcal{O}}
+\newcommand{\FGP}{\mathcal{F}^{\mathrm{GP}}}
+\newcommand{\jump}[1]{[\![#1]\!]}
+\newcommand{\PBJ}{P_{\mathrm{BJ}}}
+\newcommand{\PBS}{P_{\mathrm{BS}}}
+\newcommand{\code}[1]{\nolinkurl{#1}}
+\newcommand{\param}[1]{\texttt{#1}}
+
+\title{Block-Jacobi and band-solve preconditioners\\
+for the cutDG multiphase mass system}
+\author{MeltPoolDG -- compressible multiphase cutDG solver}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+  In every explicit Euler step, the compressible multiphase cutDG solver solves a linear system with
+  a cut DG mass matrix stabilized by ghost-penalty terms. These notes summarize two matrix-free
+  preconditioners for this system: a block-Jacobi preconditioner (\param{BlockJacobi}) that inverts
+  the cell-wise and phase-wise diagonal blocks, and a band-solve preconditioner (\param{BandSolve})
+  that exploits an exact decoupling of the system into cells away from the interface and a narrow
+  band of cells around it. Neither preconditioner assembles a matrix, and their setup cost scales
+  with the number of cells near the interface rather than with the total number of cells.
+\end{abstract}
+
+\tableofcontents
+
+%=================================================================================================
+\section{Problem setting}
+\label{sec:setting}
+
+\paragraph{Mesh and phases.}
+Let $\Th$ be the mesh and $\phi_h$ the discrete level-set function. With respect to the zero level
+set $\Gamma$, each cell $K\in\Th$ is classified as \emph{liquid} (inside), \emph{intersected} or
+\emph{gas} (outside); this classification defines the active FE index of the cell (0, 1, 2 in
+\code{CutUtil::CellCategory}). We write $\TG$ for the intersected cells and, for a phase
+$q\in\{\ell,g\}$,
+\begin{equation*}
+  \Th^q = \{K\in\Th : K \text{ is a bulk cell of phase } q\} \cup \TG
+\end{equation*}
+for the active mesh of phase $q$. Each phase carries $d+2$ conserved variables, discretized with
+FE\_DGQ elements of degree $p$ on the cells of $\Th^q$ and FE\_Nothing elsewhere. Every active cell
+therefore holds
+\begin{equation*}
+  n_s = (p+1)^d
+\end{equation*}
+scalar DoFs per conserved variable and phase.
+
+\paragraph{Linear system.}
+In each explicit Euler step, the new state $U^{n+1}$ solves
+\begin{equation}
+  a(U^{n+1},V) = \ell^n(V) \qquad \forall V,
+  \label{eq:system}
+\end{equation}
+where $\ell^n$ collects the old mass term and the explicitly evaluated fluxes, and
+\begin{equation}
+  a(W,V) = \sum_{q\in\{\ell,g\}}\Bigl[
+    \sum_{K\in\Th^q} \int_{K\cap\Omega_q} W_q\cdot V_q \,\mathrm{d}x
+    + \sum_{F\in\FGP_q} g_F(W_q,V_q) \Bigr].
+  \label{eq:bilinear}
+\end{equation}
+On bulk cells, the first term is the standard DG mass matrix; on intersected cells, it is the cut
+mass matrix integrated with the non-matching quadrature of \code{NonMatching::MappingInfo}.
+
+\paragraph{Ghost penalty.}
+The ghost-penalty faces of phase $q$ are the interior faces with phase $q$ present on both sides and
+at least one intersected neighbor,
+\begin{equation}
+  \FGP_q = \bigl\{ F = \partial K^-\cap\partial K^+ :\; K^\pm\in\Th^q,\; K^-\in\TG \text{ or } K^+\in\TG \bigr\},
+  \label{eq:gp_faces}
+\end{equation}
+as implemented in \code{CutUtil::face_type_has_ghost_penalty()}. On these faces,
+\begin{equation}
+  g_F(w,v) = \sum_{j=0}^{J} \gamma_j\, h^{2j+1} \int_F \jump{\partial_n^j w}\,\jump{\partial_n^j v}\,\mathrm{d}s,
+  \qquad
+  J = \begin{cases} 2, & p = 2,\\ 1, & \text{otherwise,}\end{cases}
+  \label{eq:gp}
+\end{equation}
+with $\jump{\cdot} = (\cdot)^- - (\cdot)^+$, $\partial_n^0 w = w$, $\partial_n^1 w = \nabla w\cdot n$,
+$\partial_n^2 w = n^\top \nabla^2 w\, n$, penalty parameters $\gamma_j$ (\code{gamma_M_degree_j})
+and $h = h_{\min}$ the global minimum cell size, as in \code{ghost_penalty_face_integral()}.
+
+\paragraph{Algebraic structure.}
+The form \eqref{eq:bilinear} acts identically on all conserved variables and never couples the two
+phases. With $A^q\in\mathbb{R}^{N_q\times N_q}$ the scalar matrix of phase $q$, the system matrix
+is
+\begin{equation}
+  A = \bigl(A^\ell\otimes I_{d+2}\bigr) \oplus \bigl(A^g\otimes I_{d+2}\bigr).
+  \label{eq:kronecker}
+\end{equation}
+$A$ is symmetric positive definite and well conditioned: the condition number of a DG mass matrix
+depends on $p$ but not on $h$ (quasi-uniform meshes), and the ghost penalty keeps it bounded
+independently of how the interface cuts the cells. Unpreconditioned CG therefore already converges
+in a moderate, mesh-independent number of iterations (31 in the test of Section~\ref{sec:results}).
+
+\paragraph{Consequences for preconditioning.}
+\begin{itemize}[leftmargin=*]
+  \item Matrix-based preconditioners (AMG, ILU) must assemble the matrix from the matrix-free
+        operator and set up the hierarchy or factorization. Whenever a cell changes its category,
+        the DoF layout changes and this setup has to be repeated, which for a moving interface
+        happens almost every time step. Moreover, AMG targets smooth low-energy error modes of
+        elliptic operators, which a mass matrix does not have.
+  \item A preconditioner can save at most the $\approx 30$ operator applications of
+        unpreconditioned CG. It must be cheap to set up and to apply, and its setup should not
+        scale with the whole mesh.
+\end{itemize}
+
+%=================================================================================================
+\section{Block-Jacobi preconditioner (\texorpdfstring{\param{BlockJacobi}}{BlockJacobi})}
+\label{sec:bj}
+
+\subsection{Blocks}
+A block contains the $n_s$ DoFs of one scalar component of one phase on one cell. Because of
+\eqref{eq:kronecker}, one scalar block per cell and phase suffices; it is applied to all $d+2$
+conserved variables. For $K\in\Th^q$ with Lagrange basis $\{\varphi_i\}_{i=1}^{n_s}$ (lexicographic
+numbering of FE\_DGQ, identical to the numbering inside \code{FEEvaluation}), the diagonal block is
+\begin{equation}
+  \bigl(A^q_{KK}\bigr)_{ij}
+  = \underbrace{\int_{K\cap\Omega_q}\varphi_j\,\varphi_i\,\mathrm{d}x}_{(M^q_K)_{ij}}
+  \;+\; \sum_{\substack{F\in\FGP_q\\ F\subset\partial K}} \underbrace{\int_F \sum_{l=0}^{J}\gamma_l\,h^{2l+1}\,
+     \partial_n^l\varphi_j\,\partial_n^l\varphi_i\,\mathrm{d}s}_{(G^{KK}_F)_{ij}} .
+  \label{eq:block}
+\end{equation}
+The face term is the self-coupling part of \eqref{eq:gp}: if test and trial function both live on
+$K$, each jump reduces to $\pm\partial_n^l\varphi$ and the product of the two jumps is positive.
+Since $\partial_n^1\varphi_i\,\partial_n^1\varphi_j$ and $\partial_n^2\varphi_i\,\partial_n^2\varphi_j$
+are invariant under $n\mapsto-n$, $G_F^{KK}$ depends neither on the neighbor nor on the orientation
+of the normal vector and can be computed cell-locally.
+
+The block-Jacobi preconditioner is
+\begin{equation}
+  \PBJ = \bigoplus_{q}\,\bigoplus_{K\in\Th^q} A^q_{KK}\otimes I_{d+2}.
+\end{equation}
+
+\subsection{Band cells and outer cells}
+We split the active cells of each phase into the \emph{band} and the \emph{outer cells},
+\begin{align}
+  \B_q &= \TG \;\cup\; \bigl\{K\in\Th^q\setminus\TG : \exists F\in\FGP_q \text{ with } F\subset\partial K\bigr\},
+  \label{eq:band}\\
+  \Ou_q &= \Th^q\setminus\B_q .
+\end{align}
+For $K\in\Ou_q$ the block \eqref{eq:block} is just the cell mass matrix, $A^q_{KK} = M_K$. Only band
+cells need a dense block.
+
+\paragraph{Outer cells: inverse mass matrix by sum factorization.}
+With the Gauss quadrature of $n_q = p+1$ points per direction used by the operator,
+\begin{equation}
+  M_K = S^\top W_K S,\qquad S_{\mu i} = \varphi_i(\hat x_\mu),\qquad
+  W_K = \operatorname{diag}\bigl(|\det J_K(\hat x_\mu)|\,w_\mu\bigr),
+\end{equation}
+where $S = S_1\otimes\dots\otimes S_1$ is square and invertible. Hence
+\begin{equation}
+  M_K^{-1} = S^{-1}\,W_K^{-1}\,S^{-\top},
+\end{equation}
+which is applied by sum factorization with the inverse 1D shape matrices
+(\code{MatrixFreeOperators::CellwiseInverseMassMatrix}). This is the exact inverse of the
+quadrature-based mass matrix of the operator, also on curved cells. It costs about one mass operator
+application and needs neither setup nor storage. The implementation checks that $n_q = p+1$.
+
+\paragraph{Band cells: dense blocks.}
+For $K\in\B_q$, the block \eqref{eq:block} is assembled column by column:
+\begin{itemize}[leftmargin=*]
+  \item mass part of bulk band cells: the cell mass operator applied to unit vectors $e_j$
+        (\code{FEEvaluation}, vectorized over the cells of a batch);
+  \item cut mass part of intersected cells: evaluation and integration of $e_j$ with the
+        non-matching quadrature of phase $q$ (\code{FEPointEvaluation} on
+        \code{mapping_info_cells[q]});
+  \item ghost-penalty part: \code{FEFaceValues} on the faces of $K$, or \code{FESubfaceValues} if the
+        neighbor is refined, with the same face quadrature and mapping as the matrix-free face loop.
+        Periodic neighbors are supported.
+\end{itemize}
+Each block is inverted by Gauss--Jordan elimination with partial pivoting. A numerically singular
+block, which is only expected for a singular system (e.g.\ a vanishing cut without stabilization),
+is replaced by its inverse diagonal and a warning is printed.
+
+\subsection{Spectral properties}
+Since outer cells do not couple to any other cell (Lemma~\ref{lem:decoupling}), the preconditioned
+operator decomposes as
+\begin{equation}
+  \PBJ^{-1}A = I_{\Ou} \;\oplus\; P_{\B}^{-1}A_{\B},
+  \label{eq:bj_spectrum}
+\end{equation}
+where $A_\B$ is the band matrix and $P_\B$ its block diagonal. All eigenvalues associated with the
+outer cells are exactly one; the remaining spectrum stems from the ghost-penalty coupling between
+neighboring band cells. CG convergence is governed by this small part of the spectrum, which
+explains why the iteration count drops to that of AMG (11) although the estimated condition number
+($\approx 10$) is larger than for AMG ($\approx 2.3$).
+
+\subsection{Cost}
+\begin{itemize}[leftmargin=*]
+  \item \emph{Setup} (\code{update()}): one pass over the faces of all cells to identify the band,
+        plus $\mathcal{O}(n_s)$ cell and face evaluations and an $\mathcal{O}(n_s^3)$ inversion per
+        band cell and phase.
+  \item \emph{Memory}: $n_s^2$ values per band cell and phase (64 for $p=1$, 729 for $p=2$ in 3D).
+  \item \emph{Application}: one inverse mass application on all bulk cells ($\approx$ one operator
+        application) plus a dense $n_s\times n_s$ product per band cell, phase and conserved variable.
+\end{itemize}
+One preconditioned CG iteration therefore costs about two operator applications: with 11 instead of
+31 iterations, the solve costs about 22 instead of 31 operator applications, before counting the
+setup.
+
+%=================================================================================================
+\section{Exact decoupling of the system}
+\label{sec:decoupling}
+
+\begin{lemma}[Decoupling]\label{lem:decoupling}
+  For each phase $q$, every ghost-penalty face lies inside the band: if
+  $F = \partial K^-\cap\partial K^+\in\FGP_q$, then $K^-,K^+\in\B_q$. Consequently, after a
+  permutation of the DoFs,
+  \begin{equation}
+    A^q = \Bigl(\bigoplus_{K\in\Ou_q} M_K\Bigr) \;\oplus\; A^q_{\B},
+    \label{eq:decoupling}
+  \end{equation}
+  where $A^q_\B$ contains the (cut) mass matrices of the band cells and all ghost-penalty terms.
+\end{lemma}
+\begin{proof}
+  If $K^\pm$ is intersected, it belongs to $\B_q$ by \eqref{eq:band}. Otherwise it is a bulk cell of
+  phase $q$ with the ghost-penalty face $F\subset\partial K^\pm$, so it belongs to $\B_q$ as well. The
+  DG mass matrix couples only DoFs of the same cell, and the only face terms of \eqref{eq:bilinear}
+  are the ghost-penalty terms. Hence an outer cell couples to no other cell, and band cells couple
+  only among themselves.
+\end{proof}
+
+Consequently,
+\begin{equation}
+  A^{-1} r = \bigl(M_{\Ou}^{-1} r_{\Ou}\bigr) \oplus \bigl(A_\B^{-1} r_\B\bigr),
+  \label{eq:exact_inverse}
+\end{equation}
+where $M_\Ou^{-1}$ is the cell-wise inverse mass matrix of Section~\ref{sec:bj}. The outer part is
+solved exactly by one sum-factorized application. Only the band system $A_\B$ requires an
+iterative (or direct) solver. Its size is proportional to the number of cells near the interface:
+for a band of fixed width in cells, $|\B|/|\Th| = \mathcal{O}(h) = \mathcal{O}(N^{-1/d})$.
+
+\begin{remark}
+  The decoupling also explains \eqref{eq:bj_spectrum}: block-Jacobi is exact on $\Ou$, and all
+  remaining CG iterations are spent on the band, while every iteration still processes all cells.
+  \param{BandSolve} removes this mismatch.
+\end{remark}
+
+%=================================================================================================
+\section{Band-solve preconditioner (\texorpdfstring{\param{BandSolve}}{BandSolve})}
+\label{sec:bs}
+
+\subsection{Definition}
+Based on \eqref{eq:exact_inverse}, the band-solve preconditioner is
+\begin{equation}
+  \PBS^{-1} r = \bigl(M_{\Ou}^{-1} r_{\Ou}\bigr) \oplus \operatorname{PCG}_\tau\bigl(A_\B, P_\B; r_\B\bigr),
+  \label{eq:bandsolve}
+\end{equation}
+where $\operatorname{PCG}_\tau(A_\B,P_\B;r_\B)$ denotes the approximate solution of $A_\B x = r_\B$ by
+the conjugate gradient method, preconditioned with the dense block inverses of the band and stopped
+at tolerance $\tau$. With an exact inner solve, $\PBS = A$, and the outer CG converges in one
+iteration. Since the inner CG works on the band only, both the operator applications and the vector
+operations of the inner solver scale with $|\B|$, not with $|\Th|$.
+
+\begin{algorithm}[htb]
+  \caption{Application $z = \PBS^{-1} r$ (\code{BandSolvePreconditioner::vmult()})}
+  \label{alg:bandsolve}
+  \begin{algorithmic}[1]
+    \State $z \gets \PBJ^{-1} r$ \Comment{exact on $\Ou$; band entries are overwritten below}
+    \State $x \gets 0$, \; $s \gets r_\B$ \Comment{band vectors}
+    \State $\tau \gets \max\bigl(\tfrac12\varepsilon_{\mathrm{rel}}\|s\|,\; \tfrac12\varepsilon_{\mathrm{abs}},\; 10^{-14}\|s\|\bigr)$
+    \If{$\|s\|\le\tau$} \State $z_\B \gets 0$; \Return \EndIf
+    \State $y \gets P_\B^{-1}s$, \; $d\gets y$, \; $\rho\gets s^\top y$
+    \For{$k = 1,\dots,k_{\max}$} \Comment{$k_{\max} = \min(200,\text{outer max.\ iterations})$}
+      \State $w \gets A_\B d$ \Comment{\code{vmult_band()}: band cells and ghost-penalty faces}
+      \State $\sigma \gets d^\top w$; \textbf{if} $\sigma\le 0$ \textbf{break} \Comment{safeguard}
+      \State $\alpha \gets \rho/\sigma$, \; $x\gets x+\alpha d$, \; $s\gets s-\alpha w$
+      \State $y \gets P_\B^{-1}s$ \Comment{\code{apply_inverse_block_diagonal_band()}}
+      \State $(\rho_{\mathrm{new}},\|s\|^2) \gets (s^\top y,\; s^\top s)$ \Comment{one reduction}
+      \If{$\|s\|\le\tau$} \textbf{break} \EndIf
+      \State $d \gets y + (\rho_{\mathrm{new}}/\rho)\,d$, \; $\rho\gets\rho_{\mathrm{new}}$
+    \EndFor
+    \State $z_\B \gets x$
+  \end{algorithmic}
+\end{algorithm}
+
+\subsection{Inner tolerance and outer convergence}
+The inner tolerance is derived from the tolerances $\varepsilon_{\mathrm{rel}}$,
+$\varepsilon_{\mathrm{abs}}$ of the outer solver (Algorithm~\ref{alg:bandsolve}, line 3). The factor
+$\tfrac12$ makes the inner residual smaller than the outer target. The floor $10^{-14}\|s\|$ avoids
+iterating below the attainable accuracy in double precision.
+
+\paragraph{Why one outer iteration suffices.}
+Let the inner solver leave the band residual $e = r_\B - A_\B z_\B$, and let $\hat e$ be $e$ extended
+by zero. Then $z = A^{-1}(r_0-\hat e)$, and the first outer CG step gives
+\begin{equation}
+  \alpha = \frac{r_0^\top z}{z^\top A z} = 1 + \frac{\hat e^\top A^{-1}(r_0-\hat e)}{(r_0-\hat e)^\top A^{-1}(r_0-\hat e)},
+  \qquad
+  r_1 = r_0 - \alpha A z = (1-\alpha)\,r_0 + \alpha\,\hat e .
+\end{equation}
+By the Cauchy--Schwarz inequality, $|1-\alpha|\le \|\hat e\|_{A^{-1}}/\|r_0-\hat e\|_{A^{-1}}$, so
+\begin{equation}
+  \|r_1\| \lesssim \bigl(1 + C\sqrt{\kappa(A)}\bigr)\,\|e\|, \qquad C = \|r_0\|/\|r_0-\hat e\| \approx 1.
+\end{equation}
+The outer residual after one iteration is thus of the size of the inner residual, up to a factor
+that depends on $\sqrt{\kappa(A)}$. In practice, one outer iteration is expected, occasionally two.
+
+\begin{remark}[Variable preconditioning]
+  Because the inner solve stops at a tolerance, $\PBS^{-1}$ depends slightly nonlinearly on its
+  argument. With one or two outer iterations this has no practical effect. If many outer iterations
+  were observed, a flexible CG variant would be the safe choice.
+\end{remark}
+
+\subsection{Implementation}
+\begin{itemize}[leftmargin=*]
+  \item \emph{Band definition}: a cell (and phase) belongs to the band if and only if
+        \code{compute_inverse_block_diagonal_from_matrixfree()} stored a dense block for it.
+        \code{CellwiseBlockInverses} additionally records which cell batches contain band cells.
+  \item \emph{Band DoFs} (\code{extract_band_dof_indices()}): a marker vector is set to one on the
+        band cells via \code{FEEvaluation::set_dof_values_plain()} with a lane mask; the local
+        indices of the marked entries form the index list used by all inner vector operations.
+  \item \emph{Band operator} (\code{vmult_band()}): a \code{MatrixFree::loop()} without zeroing the
+        destination. The cell worker processes only cell batches with band cells (contiguous runs
+        are passed to \code{local_apply_cell_lhs()}), and the face worker is the regular
+        ghost-penalty face worker. Bulk lanes outside the band contribute zero because the
+        input vector vanishes outside the band.
+  \item \emph{Invariant}: the four work vectors of the inner solver are full-size
+        \code{LinearAlgebra::distributed::Vector}s for compatibility with \code{MatrixFree}, but they
+        are zero outside the band, and only band entries are ever written by the inner solver.
+  \item \emph{Monitoring}: the inner iteration counts are recorded in the \code{IterationMonitor}
+        under the label \code{band_solve}.
+\end{itemize}
+
+\subsection{Cost and scalability}
+Let $C_A$ denote the cost of one full operator application, $f_\B = |\B|/|\Th|$ the band fraction,
+$n_{\mathrm{out}}$ the number of outer and $n_{\mathrm{in}}$ the number of inner iterations. Per
+linear solve,
+\begin{equation}
+  C_{\mathrm{BS}} \approx (1+n_{\mathrm{out}})\,C_A + n_{\mathrm{out}}\,C_{M^{-1}}
+  + n_{\mathrm{out}}\,n_{\mathrm{in}}\,\bigl(C_{A_\B}+C_{P_\B}\bigr),
+  \qquad C_{A_\B}, C_{P_\B} = \mathcal{O}(f_\B\,C_A),
+\end{equation}
+where the first term accounts for the initial residual of the outer CG. With $C_{M^{-1}}\approx C_A$,
+$n_{\mathrm{out}}\approx 1$ and $n_{\mathrm{in}}\approx 11$, this is about $3 + 22 f_\B$ operator
+applications. Table~\ref{tab:cost} compares the estimates.
+
+\begin{table}[htb]
+  \centering
+  \caption{Estimated cost of one linear solve in units of full operator applications (vector
+    operations and setup not included).}
+  \label{tab:cost}
+  \begin{tabular}{@{}lcl@{}}
+    \toprule
+    Preconditioner & Iterations & Cost estimate \\
+    \midrule
+    Identity    & 31 & $\approx 31$ \\
+    Diagonal    & 19 & $\approx 19$ + diagonal setup \\
+    BlockJacobi & 11 & $\approx 22$ + band setup \\
+    AMG / ILU   & 11 / 15 & iterations + matrix assembly and setup (dominant) \\
+    BandSolve   & 1--2 outer, $\approx 11$ inner & $\approx 3 + 22 f_\B$ + band setup \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Scalability.}
+\begin{itemize}[leftmargin=*]
+  \item The inner iteration count is expected to be independent of $h$, since the ghost penalty
+        bounds the conditioning of the band system independently of mesh size and cut position.
+  \item The band fraction decreases under refinement, $f_\B = \mathcal{O}(N^{-1/d})$, so the
+        advantage over \param{BlockJacobi} grows with the problem size.
+  \item Communication per inner iteration: two global reductions and one ghost exchange. The ghost
+        exchange currently covers the full ghost layer; restricting it to band DoFs (with a separate
+        partitioner) is the next optimization if profiling on many ranks shows a need.
+  \item Ranks without band cells wait during the inner solve. Weighting intersected cells in the
+        load balancing keeps this imbalance small.
+\end{itemize}
+
+\subsection{Alternatives considered}
+\begin{itemize}[leftmargin=*]
+  \item \emph{Additive Schwarz} with patches of a cut cell and its ghost-penalty neighbors would
+        capture the neighbor coupling and reduce the iteration count to perhaps 5--7. However, it
+        has a larger setup ($(1+2d)\,n_s$ unknowns per patch), overlapping and more expensive
+        applications, patches crossing MPI boundaries, and it needs the symmetric variant for CG.
+        Every iteration still processes all cells.
+  \item \emph{Direct solve of the band} (e.g.\ Amesos/KLU, MUMPS) would make $\PBS$ exact. However,
+        the band grows like $N^{(d-1)/d}$, it has to be refactorized almost every step, KLU gathers
+        the matrix on one rank, and distributed direct solvers scale poorly to many ranks. The
+        iterative band solve was therefore chosen for large-scale runs.
+\end{itemize}
+
+%=================================================================================================
+\section{Interaction with the DoF layout and the update frequency}
+\label{sec:layout}
+
+\begin{itemize}[leftmargin=*]
+  \item The DoF layout is fully determined by the cell categories. If no cell changes its category
+        (\code{CutUtil::cell_locations_changed()}), the solution transfer, \code{setup_dof_system()}
+        and the preconditioner \code{reinit()} are skipped. Only the cut quadrature is recomputed.
+  \item \code{reinit()} clears the block data, because the blocks are addressed by the matrix-free
+        cell-batch numbering, which changes with the DoF layout. The subsequent \code{update()} is
+        enforced by \code{preconditioner_update_flag}.
+  \item Between layout changes, only the values change (cut geometry). Outdated blocks remain
+        symmetric positive definite, so \param{preconditioner update frequency} $>1$ is admissible
+        for both preconditioners at the price of slightly more iterations.
+\end{itemize}
+
+%=================================================================================================
+\section{Measured results}
+\label{sec:results}
+
+Table~\ref{tab:results} lists the results of the first test case ($524\,288$ DoFs, solver
+tolerance $10^{-18}$, preconditioner update frequency 50). The condition numbers are CG-based
+estimates. The run times include more than the linear solve; their near independence of the
+iteration count (Identity vs.\ BlockJacobi) indicates that the linear solve is not the dominant cost
+of a time step in this test.
+
+\begin{table}[htb]
+  \centering
+  \caption{Iterations, run time and estimated condition number for the test case.}
+  \label{tab:results}
+  \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    Preconditioner & Iterations & Time [s] & Condition number \\
+    \midrule
+    Identity    & 31 &  4.18 & 75.02 \\
+    Diagonal    & 19 &  3.89 & 20.49 \\
+    AMG         & 11 & 21.53 &  2.32 \\
+    ILU         & 15 & 10.74 & 12.37 \\
+    BlockJacobi & 11 &  4.16 & 10.15 \\
+    BandSolve   & \multicolumn{3}{c}{to be measured} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Recommended checks for \param{BandSolve}.}
+\begin{enumerate}[leftmargin=*]
+  \item The solution agrees with \param{BlockJacobi} up to the solver tolerance.
+  \item The outer CG (\code{linear_solve}) takes 1--2 iterations, and the inner solver
+        (\code{band_solve}) takes about as many iterations as \param{BlockJacobi}.
+  \item A timing breakdown (\code{preconditioner.update()}, linear solve, \code{create_rhs()},
+        \code{adapt_to_new_interface_position()}) shows the share of the linear solve.
+\end{enumerate}
+
+%=================================================================================================
+\section{Usage and implementation overview}
+\label{sec:usage}
+
+\paragraph{Parameters.}
+\begin{verbatim}
+"linear solver": {
+  "preconditioner type": "BandSolve",
+  "solver type": "CG"
+}
+\end{verbatim}
+Use \param{"BlockJacobi"} for the block-Jacobi preconditioner.
+Requirements: FE\_DGQ, cell quadrature with $p+1$ points per direction, matrix-free operator.
+For \param{BandSolve}, the inner tolerances are derived from the outer \param{rel tolerance},
+\param{abs tolerance} and \param{max iterations}.
+
+\paragraph{Files and interfaces.}
+{\sloppy
+\begin{itemize}[leftmargin=*]
+  \item \code{linear_algebra/preconditioner_block_jacobi.hpp}: storage
+        \code{CellwiseBlockInverses}, concept \code{BlockJacobiPreconditionerOperatorType}, class
+        \code{BlockJacobiPreconditioner}.
+  \item \code{linear_algebra/preconditioner_band_solve.hpp}: concept
+        \code{BandSolvePreconditionerOperatorType}, class \code{BandSolvePreconditioner} (inner PCG).
+  \item \code{linear_algebra/preconditioner_factory.hpp}, \code{linear_solver_data.hpp}: enum values
+        \param{BlockJacobi}, \param{BandSolve}; optional argument \code{linear_solver_data} of
+        \code{make_preconditioner()}.
+  \item \code{compressible_flow/multiphase_operator.hpp/.cpp}: operator interface
+        \code{compute_inverse_block_diagonal_from_matrixfree()},
+        \code{apply_inverse_block_diagonal()}, \code{apply_inverse_block_diagonal_band()},
+        \code{vmult_band()}, \code{extract_band_dof_indices()}.
+\end{itemize}
+\par}
+
+\paragraph{Open points.}
+\begin{itemize}[leftmargin=*]
+  \item Ghost exchange restricted to band DoFs (separate partitioner).
+  \item Grouping band cells into separate cell batches (additional FE indices) to avoid partially
+        filled SIMD lanes in the band operator.
+  \item Reuse of the dense blocks of bulk band cells between updates; they change only with the DoF
+        layout.
+  \item Local instead of global cell size $h$ in the ghost-penalty scaling (marked as TODO in the
+        operator; the preconditioner uses the same $h$ as the operator).
+\end{itemize}
+
+\end{document}

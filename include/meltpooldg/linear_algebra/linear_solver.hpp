@@ -106,6 +106,12 @@ namespace MeltPoolDG
                 case (LinearSolverType::CG): {
                   dealii::SolverCG<VectorType> solver(solver_control);
 
+                  solver.connect_condition_number_slot([&](const double condition_number) {
+                    Journal::print_line(std::cout,
+                                        "Condition number: " + std::to_string(condition_number),
+                                        "linear solver");
+                  });
+
                   solver.solve(system_matrix, solution, rhs, preconditioner);
                   break;
                 }
