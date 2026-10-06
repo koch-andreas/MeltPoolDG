@@ -182,6 +182,12 @@ namespace MeltPoolDG::CompressibleFlow
     /// cut-related stabilization parameters
     CutStabilizationData<number> stabilization;
 
+    /// Solve the ghost-penalty stabilized mass matrix system with the band solver: exact cell-wise
+    /// inverse for all cells away from the interface and a linear solver for the band
+    /// of intersected cells and their ghost-penalty neighbors (only relevant for explicit time
+    /// integration)
+    bool use_band_solver = false;
+
     /**
      * @brief Add cut parameters in the parameter handler.
      *
@@ -196,6 +202,12 @@ namespace MeltPoolDG::CompressibleFlow
                           unfitted_flow_boundary_condition,
                           "Flow boundary condition type at the unfitted boundary. "
                           "Choose between 'no_slip_wall' and 'inflow'.");
+        prm.add_parameter(
+          "use band solver",
+          use_band_solver,
+          "Solve the ghost-penalty stabilized mass matrix system by inverting all cells away from "
+          "the interface exactly and solving only the band of intersected cells and their "
+          "ghost-penalty neighbors with a linear solver.");
         stabilization.add_parameters(prm);
       }
       prm.leave_subsection();
