@@ -27,84 +27,6 @@ namespace MeltPoolDG::Multiphase
 {
   using namespace dealii;
 
-  namespace
-  {
-    /**
-     * Return whether the cell category @p category (active FE index) contains DoFs of the phase
-     * @p phase (0: liquid, 1: gas).
-     */
-    inline bool
-    category_has_phase(const unsigned int category, const unsigned int phase)
-    {
-      return category == CutUtil::CellCategory::intersected ||
-             category == (phase == 0 ? CutUtil::CellCategory::liquid : CutUtil::CellCategory::gas);
-    }
-
-    /**
-     * Return whether the active cell @p cell has at least one (sub)face at which the ghost-penalty
-     * stabilization of phase @p phase acts, i.e., a face to a neighbor containing the phase where
-     * at least one of the two cells is intersected (same face selection as
-     * CutUtil::face_type_has_ghost_penalty()). Boundary faces (except for periodic ones) are
-     * skipped.
-     */
-    template <int dim, typename CellIteratorType>
-    bool
-    has_ghost_penalty_face(const CellIteratorType &cell, const unsigned int phase)
-    {
-      const unsigned int category = cell->active_fe_index();
-
-      const auto is_ghost_penalty_face = [&](const unsigned int neighbor_category) {
-        return category_has_phase(neighbor_category, phase) &&
-               (category == CutUtil::CellCategory::intersected ||
-                neighbor_category == CutUtil::CellCategory::intersected);
-      };
-
-      for (const unsigned int f : cell->face_indices())
-        {
-          const bool is_periodic = cell->has_periodic_neighbor(f);
-          if (cell->at_boundary(f) && !is_periodic)
-            continue;
-
-          const auto neighbor = cell->neighbor_or_periodic_neighbor(f);
-
-          if (!neighbor->has_children())
-            {
-              // neighbor on the same level or coarser
-              if (is_ghost_penalty_face(neighbor->active_fe_index()))
-                return true;
-            }
-          else if constexpr (dim == 1)
-            {
-              // a face is a point: only the category of the adjacent active child matters
-              auto child = neighbor;
-              while (child->has_children())
-                child = child->child(1 - f);
-
-              if (is_ghost_penalty_face(child->active_fe_index()))
-                return true;
-            }
-          else
-            {
-              // finer neighbor: check the subfaces
-              const unsigned int n_subfaces = is_periodic ?
-                                                GeometryInfo<dim>::max_children_per_face :
-                                                cell->face(f)->n_children();
-              for (unsigned int subface = 0; subface < n_subfaces; ++subface)
-                {
-                  const auto child = is_periodic ?
-                                       cell->periodic_neighbor_child_on_subface(f, subface) :
-                                       cell->neighbor_child_on_subface(f, subface);
-
-                  if (is_ghost_penalty_face(child->active_fe_index()))
-                    return true;
-                }
-            }
-        }
-
-      return false;
-    }
-  } // namespace
-
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
   CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
     CompressibleMultiphaseOperator(
@@ -1233,6 +1155,17 @@ namespace MeltPoolDG::Multiphase
                          const VectorType                    &src,
                          const std::pair<unsigned, unsigned> &cell_range) const
   {
+    apply_cell_lhs(dst, src, cell_range, multiphase_scratch_data.dof_idx);
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::apply_cell_lhs(
+    VectorType                                  &dst,
+    const VectorType                            &src,
+    const std::pair<unsigned int, unsigned int> &cell_range,
+    const unsigned int                           dof_idx) const
+  {
     const auto cell_category =
       multiphase_scratch_data.scratch_data.get_cell_range_category(cell_range);
 
@@ -1281,15 +1214,17 @@ namespace MeltPoolDG::Multiphase
     switch (cell_category)
       {
           case CutUtil::CellCategory::liquid: {
-            auto eval_liquid =
-              create_cell_integrator(CutUtil::CellCategory::liquid, first_component[Phase::liquid]);
+            auto eval_liquid = create_cell_integrator(CutUtil::CellCategory::liquid,
+                                                      first_component[Phase::liquid],
+                                                      dof_idx);
             process_bulk_cell_range(eval_liquid);
           }
           break;
 
           case CutUtil::CellCategory::gas: {
-            auto eval_gas =
-              create_cell_integrator(CutUtil::CellCategory::gas, first_component[Phase::gas]);
+            auto eval_gas = create_cell_integrator(CutUtil::CellCategory::gas,
+                                                   first_component[Phase::gas],
+                                                   dof_idx);
             process_bulk_cell_range(eval_gas);
           }
           break;
@@ -1297,9 +1232,11 @@ namespace MeltPoolDG::Multiphase
           case CutUtil::CellCategory::intersected: {
             auto eval_liquid_intersected =
               create_cell_integrator(CutUtil::CellCategory::intersected,
-                                     first_component[Phase::liquid]);
+                                     first_component[Phase::liquid],
+                                     dof_idx);
             auto eval_gas_intersected = create_cell_integrator(CutUtil::CellCategory::intersected,
-                                                               first_component[Phase::gas]);
+                                                               first_component[Phase::gas],
+                                                               dof_idx);
 
             DomainPointEval eval_point_liquid(*mapping_info_cells[Phase::liquid], fe_point_temp);
             DomainPointEval eval_point_gas(*mapping_info_cells[Phase::gas], fe_point_temp);
@@ -1322,6 +1259,17 @@ namespace MeltPoolDG::Multiphase
                          const VectorType                            &src,
                          const std::pair<unsigned int, unsigned int> &face_range) const
   {
+    apply_face_lhs(dst, src, face_range, multiphase_scratch_data.dof_idx);
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::apply_face_lhs(
+    VectorType                                  &dst,
+    const VectorType                            &src,
+    const std::pair<unsigned int, unsigned int> &face_range,
+    const unsigned int                           dof_idx) const
+  {
     const auto face_category =
       multiphase_scratch_data.scratch_data.get_face_range_category(face_range);
     const CutUtil::FaceType face_type = CutUtil::get_face_type(face_category);
@@ -1341,8 +1289,8 @@ namespace MeltPoolDG::Multiphase
         ((multiphase_scratch_data.flow_data.fe.degree == 2) ? dealii::EvaluationFlags::hessians :
                                                               dealii::EvaluationFlags::nothing);
 
-      auto eval_m = create_face_integrator(true, category_m, component);
-      auto eval_p = create_face_integrator(false, category_p, component);
+      auto eval_m = create_face_integrator(true, category_m, component, dof_idx);
+      auto eval_p = create_face_integrator(false, category_p, component, dof_idx);
 
       for (unsigned int face = face_range.first; face < face_range.second; ++face)
         {
@@ -1633,14 +1581,16 @@ namespace MeltPoolDG::Multiphase
   CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::compute_band(
     BandData &band) const
   {
-    const auto        &matrix_free = multiphase_scratch_data.scratch_data.get_matrix_free();
-    const unsigned int dof_idx     = multiphase_scratch_data.dof_idx;
-    const unsigned int quad_idx    = multiphase_scratch_data.quad_idx;
-    const unsigned int fe_degree   = multiphase_scratch_data.flow_data.fe.degree;
+    const auto        &matrix_free  = multiphase_scratch_data.scratch_data.get_matrix_free();
+    const unsigned int band_dof_idx = multiphase_scratch_data.band_dof_idx;
+    const unsigned int quad_idx     = multiphase_scratch_data.quad_idx;
+    const unsigned int fe_degree    = multiphase_scratch_data.flow_data.fe.degree;
 
-    constexpr unsigned int n_lanes      = VectorizedArray<number>::size();
-    constexpr unsigned int n_components = CompressibleFlow::n_conserved_variables<dim>;
-    const unsigned int     n_dofs       = n_components * dealii::Utilities::pow(fe_degree + 1, dim);
+    constexpr unsigned int n_lanes = VectorizedArray<number>::size();
+
+    AssertThrow(band_dof_idx != dealii::numbers::invalid_unsigned_int,
+                ExcMessage("The band solver requires a DoF index with band constraints (see "
+                           "make_band_constraints())."));
 
     // The inverse mass matrix of the cells outside the band is applied via sum factorization in
     // apply_inverse_mass_matrix_outside_band(), which is exact only for as many quadrature points
@@ -1650,82 +1600,28 @@ namespace MeltPoolDG::Multiphase
                 ExcMessage("The band solver requires a cell quadrature rule with fe_degree + 1 "
                            "points per coordinate direction."));
 
-    // 1) band cells: one entry per cell and phase (0: liquid, 1: gas)
-    band.reinit(matrix_free.n_cell_batches(), n_lanes, 2);
+    // 1) band cells: intersected cells and bulk cells sharing a ghost-penalty face with an
+    // intersected cell (same criterion as in make_band_constraints())
+    band.reinit(matrix_free.n_cell_batches(), n_lanes);
 
     for (unsigned int cell_batch = 0; cell_batch < matrix_free.n_cell_batches(); ++cell_batch)
-      {
-        const unsigned int category = matrix_free.get_cell_category(cell_batch);
+      for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
+           ++lane)
+        if (is_band_cell<dim>(matrix_free.get_cell_iterator(cell_batch, lane, band_dof_idx)))
+          band.add(cell_batch, lane);
 
-        for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
-             ++lane)
-          {
-            const auto cell = matrix_free.get_cell_iterator(cell_batch, lane, dof_idx);
+    // 2) DoFs of the band: all locally owned DoFs that are not constrained by the band constraints
+    const unsigned int n_locally_owned_dofs =
+      matrix_free.get_vector_partitioner(band_dof_idx)->locally_owned_size();
 
-            for (const unsigned int phase : {0u, 1u})
-              {
-                if (!category_has_phase(category, phase))
-                  continue;
+    std::vector<bool> is_band_dof(n_locally_owned_dofs, true);
+    for (const unsigned int i : matrix_free.get_constrained_dofs(band_dof_idx))
+      is_band_dof[i] = false;
 
-                // intersected cells always belong to the band, bulk cells only if they share a
-                // ghost-penalty face of their phase with an intersected cell
-                if (category == CutUtil::CellCategory::intersected ||
-                    has_ghost_penalty_face<dim>(cell, phase))
-                  band.add(cell_batch, lane, phase);
-              }
-          }
-      }
-
-    // 2) DoFs of the band: mark the DoFs of all band cells (and phases) with 1
-    VectorType band_marker;
-    multiphase_scratch_data.scratch_data.initialize_dof_vector(band_marker,
-                                                               multiphase_scratch_data.dof_idx);
-
-    DomainEval<> eval_liquid = create_cell_integrator(CutUtil::CellCategory::liquid, 0);
-    DomainEval<> eval_liquid_intersected =
-      create_cell_integrator(CutUtil::CellCategory::intersected, 0);
-    DomainEval<> eval_gas_intersected =
-      create_cell_integrator(CutUtil::CellCategory::intersected, n_components);
-    DomainEval<> eval_gas = create_cell_integrator(CutUtil::CellCategory::gas, n_components);
-
-    const auto mark_cell_batch =
-      [&](DomainEval<> &eval, const unsigned int cell_batch, const unsigned int phase) {
-        std::bitset<n_lanes> band_lanes;
-        for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
-             ++lane)
-          band_lanes[lane] = band.contains(cell_batch, lane, phase);
-
-        if (band_lanes.none())
-          return;
-
-        eval.reinit(cell_batch);
-        for (unsigned int i = 0; i < n_dofs; ++i)
-          eval.begin_dof_values()[i] = number(1.);
-        eval.set_dof_values_plain(band_marker, 0, band_lanes);
-      };
-
-    for (const unsigned int cell_batch : band.get_cell_batches())
-      switch (matrix_free.get_cell_category(cell_batch))
-        {
-          case CutUtil::CellCategory::liquid:
-            mark_cell_batch(eval_liquid, cell_batch, 0);
-            break;
-          case CutUtil::CellCategory::intersected:
-            mark_cell_batch(eval_liquid_intersected, cell_batch, 0);
-            mark_cell_batch(eval_gas_intersected, cell_batch, 1);
-            break;
-          case CutUtil::CellCategory::gas:
-            mark_cell_batch(eval_gas, cell_batch, 1);
-            break;
-          default:
-            DEAL_II_NOT_IMPLEMENTED();
-        }
-
-    // collect the local indices of the marked DoFs
     std::vector<unsigned int> &band_dof_indices = band.get_dof_indices();
     band_dof_indices.clear();
-    for (unsigned int i = 0; i < band_marker.locally_owned_size(); ++i)
-      if (band_marker.local_element(i) != number(0.))
+    for (unsigned int i = 0; i < n_locally_owned_dofs; ++i)
+      if (is_band_dof[i])
         band_dof_indices.push_back(i);
   }
 
@@ -1756,38 +1652,36 @@ namespace MeltPoolDG::Multiphase
     const InverseMassType inverse_mass_liquid(eval_liquid);
     const InverseMassType inverse_mass_gas(eval_gas);
 
-    const auto process_cell_batch = [&](DomainEval<>          &eval,
-                                        const InverseMassType &inverse_mass,
-                                        const unsigned int     cell_batch,
-                                        const unsigned int     phase) {
-      // lanes (cells) outside the band
-      std::bitset<n_lanes> lanes_outside_band;
-      for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
-           ++lane)
-        lanes_outside_band[lane] = !band.contains(cell_batch, lane, phase);
+    const auto process_cell_batch =
+      [&](DomainEval<> &eval, const InverseMassType &inverse_mass, const unsigned int cell_batch) {
+        // lanes (cells) outside the band
+        std::bitset<n_lanes> lanes_outside_band;
+        for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
+             ++lane)
+          lanes_outside_band[lane] = !band.contains(cell_batch, lane);
 
-      if (lanes_outside_band.none())
-        return;
+        if (lanes_outside_band.none())
+          return;
 
-      eval.reinit(cell_batch);
-      eval.read_dof_values(src);
-      inverse_mass.apply(eval.begin_dof_values(), eval.begin_dof_values());
+        eval.reinit(cell_batch);
+        eval.read_dof_values(src);
+        inverse_mass.apply(eval.begin_dof_values(), eval.begin_dof_values());
 
-      // DG: every DoF belongs to exactly one cell and phase, so the values can be set directly
-      eval.set_dof_values(dst, 0, lanes_outside_band);
-    };
+        // DG: every DoF belongs to exactly one cell and phase, so the values can be set directly
+        eval.set_dof_values(dst, 0, lanes_outside_band);
+      };
 
     for (unsigned int cell_batch = 0; cell_batch < matrix_free.n_cell_batches(); ++cell_batch)
       switch (matrix_free.get_cell_category(cell_batch))
         {
           case CutUtil::CellCategory::liquid:
-            process_cell_batch(eval_liquid, inverse_mass_liquid, cell_batch, 0);
+            process_cell_batch(eval_liquid, inverse_mass_liquid, cell_batch);
             break;
           case CutUtil::CellCategory::intersected:
             // intersected cells always belong to the band
             break;
           case CutUtil::CellCategory::gas:
-            process_cell_batch(eval_gas, inverse_mass_gas, cell_batch, 1);
+            process_cell_batch(eval_gas, inverse_mass_gas, cell_batch);
             break;
           default:
             DEAL_II_NOT_IMPLEMENTED();
@@ -1812,9 +1706,15 @@ namespace MeltPoolDG::Multiphase
                                                   const VectorType &,
                                                   const std::pair<unsigned int, unsigned int> &)>;
 
+    // DoF index with band constraints: all DoFs outside the band are skipped by the matrix-free
+    // gather and scatter operations
+    const unsigned int dof_idx = multiphase_scratch_data.band_dof_idx;
+    Assert(dof_idx != dealii::numbers::invalid_unsigned_int,
+           ExcMessage("The band solver requires a DoF index with band constraints."));
+
     // cells: only the cell batches of the band are processed; contiguous runs of band batches are
-    // passed to local_apply_cell_lhs() at once
-    local_applier_type cell = [&](const dealii::MatrixFree<dim, number>       &mf,
+    // evaluated at once
+    local_applier_type cell = [&](const dealii::MatrixFree<dim, number> &,
                                   VectorType                                  &cell_dst,
                                   const VectorType                            &cell_src,
                                   const std::pair<unsigned int, unsigned int> &cell_range) {
@@ -1831,13 +1731,18 @@ namespace MeltPoolDG::Multiphase
           while (last < cell_range.second && band.contains_cell_batch(last))
             ++last;
 
-          this->local_apply_cell_lhs(mf, cell_dst, cell_src, std::make_pair(first, last));
+          this->apply_cell_lhs(cell_dst, cell_src, std::make_pair(first, last), dof_idx);
           first = last;
         }
     };
 
     // faces: the operator only acts on ghost-penalty faces, which all lie within the band
-    local_applier_type face          = MPDG_LAMBDA_WRAPPER(this->local_apply_face_lhs);
+    local_applier_type face = [&](const dealii::MatrixFree<dim, number> &,
+                                  VectorType                                  &face_dst,
+                                  const VectorType                            &face_src,
+                                  const std::pair<unsigned int, unsigned int> &face_range) {
+      this->apply_face_lhs(face_dst, face_src, face_range, dof_idx);
+    };
     local_applier_type boundary_face = MPDG_LAMBDA_WRAPPER(this->local_apply_boundary_face_lhs);
 
     // dst is not zeroed: only the band entries are relevant, which are set to zero by the caller
@@ -1849,6 +1754,17 @@ namespace MeltPoolDG::Multiphase
                      false /*zero_dst_vector*/,
                      MatrixFree<dim, number>::DataAccessOnFaces::gradients,
                      MatrixFree<dim, number>::DataAccessOnFaces::gradients);
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  void
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
+    initialize_band_dof_vector(VectorType &vec) const
+  {
+    Assert(multiphase_scratch_data.band_dof_idx != dealii::numbers::invalid_unsigned_int,
+           ExcMessage("The band solver requires a DoF index with band constraints."));
+    multiphase_scratch_data.scratch_data.initialize_dof_vector(
+      vec, multiphase_scratch_data.band_dof_idx);
   }
 
 

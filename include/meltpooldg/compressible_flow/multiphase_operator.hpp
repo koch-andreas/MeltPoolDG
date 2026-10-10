@@ -277,11 +277,12 @@ namespace MeltPoolDG::Multiphase
      *
      * The band consists of all cells whose DoFs are coupled to other cells, i.e.,
      * intersected cells (both phases) and bulk cells sharing a ghost-penalty face of their phase
-     * (same face selection as local_apply_face_lhs()). The system matrix does not couple the band
+     * with an intersected cell (see is_band_cell()). The system matrix does not couple the band
      * with the remaining cells, whose diagonal blocks are plain cell mass matrices.
      *
      * In addition to the band cells, the local indices (within the locally owned range) of all
-     * DoFs of the band are stored.
+     * DoFs of the band, i.e., all DoFs not constrained by the band constraints (see
+     * make_band_constraints()), are stored.
      *
      * @param band Object describing the band data structure information.
      */
@@ -306,18 +307,31 @@ namespace MeltPoolDG::Multiphase
                                            const VectorType &src) const;
 
     /**
+     * @brief Initialize a vector with the layout required by vmult_band().
+     *      Used by the band solver.
+     *
+     * This is the layout of the DoF index with band constraints, i.e., all DoFs outside the band
+     * are constrained to zero (see make_band_constraints()).
+     *
+     * @param vec Vector to be initialized.
+     */
+    void
+    initialize_band_dof_vector(VectorType &vec) const;
+
+    /**
      * @brief Matrix-vector product restricted to the band.
      *      Used by the band solver.
      *
      * Adds the action of the system matrix on the band cells (cut mass matrix and mass matrix)
      * and on the ghost-penalty faces to @p dst. Since all ghost-penalty faces lie within the band,
-     * the band entries of @p dst equal (A_band src_band) if they are zero before the call and if
-     * all entries of @p src outside the band are zero. Cell batches without band cells are
-     * skipped.
+     * the band entries of @p dst equal (A_band src_band) if they are zero before the call. The
+     * system matrix is evaluated on the DoF index with band constraints, i.e., all DoFs outside
+     * the band are skipped by the matrix-free gather and scatter operations. Cell batches without
+     * band cells are skipped.
      *
      * @param band Object describing the band data structure information.
-     * @param dst Vector to which the result is added.
-     * @param src Source vector (zero outside the band).
+     * @param dst Vector to which the result is added (see initialize_band_dof_vector()).
+     * @param src Source vector (see initialize_band_dof_vector()).
      */
     void
     vmult_band(const BandData &band, VectorType &dst, const VectorType &src) const;
@@ -379,16 +393,20 @@ namespace MeltPoolDG::Multiphase
      *
      * @param category Category of the considered cell range (liquid/intersected/gas).
      * @param offset Offset for the first selected component in a FESystem.
+     * @param dof_idx DoF index within the matrix-free object. Defaults to the DoF index of the
+     * flow solution.
      *
      * @return Generated FECellIntegrator object.
      */
     FECellIntegrator<dim, dim + 2, number>
     create_cell_integrator(const CutUtil::CellCategory category,
-                           const unsigned int          offset = 0) const
+                           const unsigned int          offset = 0,
+                           const unsigned int dof_idx = dealii::numbers::invalid_unsigned_int) const
     {
       return FECellIntegrator<dim, dim + 2, number>(
         multiphase_scratch_data.scratch_data.get_matrix_free(),
-        multiphase_scratch_data.dof_idx,
+        dof_idx == dealii::numbers::invalid_unsigned_int ? multiphase_scratch_data.dof_idx :
+                                                           dof_idx,
         multiphase_scratch_data.quad_idx,
         offset,
         category);
@@ -403,18 +421,22 @@ namespace MeltPoolDG::Multiphase
      * @param category Category of the considered cell adjacent to the face
      * (liquid/intersected/gas).
      * @param offset Offset for the first selected component in a FESystem.
+     * @param dof_idx DoF index within the matrix-free object. Defaults to the DoF index of the
+     * flow solution.
      *
      * @return Generated FEFaceIntegrator object.
      */
     FEFaceIntegrator<dim, dim + 2, number>
     create_face_integrator(const bool                  is_inner_face,
                            const CutUtil::CellCategory category,
-                           const unsigned int          offset = 0) const
+                           const unsigned int          offset = 0,
+                           const unsigned int dof_idx = dealii::numbers::invalid_unsigned_int) const
     {
       return FEFaceIntegrator<dim, dim + 2, number>(
         multiphase_scratch_data.scratch_data.get_matrix_free(),
         is_inner_face,
-        multiphase_scratch_data.dof_idx,
+        dof_idx == dealii::numbers::invalid_unsigned_int ? multiphase_scratch_data.dof_idx :
+                                                           dof_idx,
         multiphase_scratch_data.quad_idx,
         offset,
         category);
@@ -440,6 +462,35 @@ namespace MeltPoolDG::Multiphase
       return {create_face_integrator(true, category, offset),
               create_face_integrator(false, category, offset)};
     };
+
+    /**
+     * @brief Cell integrals of the left-hand side matrix-vector product, see local_apply_cell_lhs().
+     *
+     * @param dst Destination vector, in which the result is written.
+     * @param src Source vector for the operator evaluation.
+     * @param cell_range Considered cell range.
+     * @param dof_idx DoF index within the matrix-free object (flow solution or band).
+     */
+    void
+    apply_cell_lhs(VectorType                                  &dst,
+                   const VectorType                            &src,
+                   const std::pair<unsigned int, unsigned int> &cell_range,
+                   const unsigned int                           dof_idx) const;
+
+    /**
+     * @brief Face integrals (ghost penalty) of the left-hand side matrix-vector product, see
+     * local_apply_face_lhs().
+     *
+     * @param dst Destination vector, in which the result is written.
+     * @param src Source vector for the operator evaluation.
+     * @param face_range Considered face range.
+     * @param dof_idx DoF index within the matrix-free object (flow solution or band).
+     */
+    void
+    apply_face_lhs(VectorType                                  &dst,
+                   const VectorType                            &src,
+                   const std::pair<unsigned int, unsigned int> &face_range,
+                   const unsigned int                           dof_idx) const;
 
     /**
      * @brief Shared implementation of the matrix-free diagonal and system matrix assembly.

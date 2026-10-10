@@ -50,7 +50,8 @@ namespace MeltPoolDG::Multiphase
     const VectorType                                  &level_set_in,
     const unsigned int                                 comp_flow_dof_idx_in,
     const unsigned int                                 level_set_dof_idx_in,
-    const unsigned int                                 comp_flow_quad_idx_in)
+    const unsigned int                                 comp_flow_quad_idx_in,
+    const unsigned int                                 comp_flow_band_dof_idx_in)
     : multiphase_scratch_data(comp_flow_data_in,
                               material_data_gas_in,
                               material_data_liquid_in,
@@ -60,7 +61,8 @@ namespace MeltPoolDG::Multiphase
                               darcy_damping_data_in,
                               scratch_data_in,
                               comp_flow_dof_idx_in,
-                              comp_flow_quad_idx_in)
+                              comp_flow_quad_idx_in,
+                              comp_flow_band_dof_idx_in)
     , time_iterator(time_iterator_in)
     , level_set_dof_idx(level_set_dof_idx_in)
     , level_set(level_set_in)
@@ -133,6 +135,10 @@ namespace MeltPoolDG::Multiphase
                 ExcMessage(
                   "The band solver (\"cut\" -> \"use band solver\") solves the band "
                   "with an unpreconditioned solver. Set preconditioner type to Identity."));
+    AssertThrow(!multiphase_scratch_data.cut.use_band_solver ||
+                  comp_flow_band_dof_idx_in != dealii::numbers::invalid_unsigned_int,
+                ExcMessage("The band solver requires a DoF index for the solution with band "
+                           "constraints (see Multiphase::make_band_constraints())."));
 
     std::visit(
       [&](auto &op) {

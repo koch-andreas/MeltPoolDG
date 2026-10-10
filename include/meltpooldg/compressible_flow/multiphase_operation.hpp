@@ -91,6 +91,9 @@ namespace MeltPoolDG::Multiphase
      * @param comp_flow_dof_idx_in Index of the used dof handler for solution in @p scratch_data_in.
      * @param level_set_dof_idx_in Index of the used dof handler for level-set in @p scratch_data_in.
      * @param comp_flow_quad_idx_in Index of the used quadrature object in @p scratch_data_in.
+     * @param comp_flow_band_dof_idx_in Index of the dof handler for the solution with band
+     * constraints (see make_band_constraints()) in @p scratch_data_in. Only required for the band
+     * solver (parameter "cut" -> "use band solver").
      *
      * @note This constructor assumes that explicit time stepping is used. Only one solution is
      * stored in the history, and ghost-penalty stabilization is enabled.
@@ -107,9 +110,10 @@ namespace MeltPoolDG::Multiphase
       const TimeIntegration::TimeIterator<number>       &time_iterator_in,
       const std::function<void()>                       &setup_dof_system_in,
       const VectorType                                  &level_set_in,
-      unsigned int comp_flow_dof_idx_in  = dealii::numbers::invalid_unsigned_int,
-      unsigned int level_set_dof_idx_in  = dealii::numbers::invalid_unsigned_int,
-      unsigned int comp_flow_quad_idx_in = dealii::numbers::invalid_unsigned_int);
+      unsigned int comp_flow_dof_idx_in      = dealii::numbers::invalid_unsigned_int,
+      unsigned int level_set_dof_idx_in      = dealii::numbers::invalid_unsigned_int,
+      unsigned int comp_flow_quad_idx_in     = dealii::numbers::invalid_unsigned_int,
+      unsigned int comp_flow_band_dof_idx_in = dealii::numbers::invalid_unsigned_int);
 
     /**
      * @brief Set up the required internal data structures.

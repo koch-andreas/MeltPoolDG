@@ -7,12 +7,19 @@
 #pragma once
 
 #include <deal.II/base/exceptions.h>
+#include <deal.II/base/geometry_info.h>
 #include <deal.II/base/index_set.h>
 #include <deal.II/base/mpi.h>
 #include <deal.II/base/types.h>
 
+#include <deal.II/dofs/dof_handler.h>
+#include <deal.II/dofs/dof_tools.h>
+
+#include <deal.II/lac/affine_constraints.h>
+#include <deal.II/lac/la_parallel_vector.h>
 #include <deal.II/lac/precondition.h>
 
+#include <meltpooldg/cut/util.hpp>
 #include <meltpooldg/linear_algebra/linear_solver.hpp>
 #include <meltpooldg/linear_algebra/linear_solver_data.hpp>
 
@@ -24,14 +31,150 @@
 namespace MeltPoolDG::Multiphase
 {
   /**
+   * Return whether the cell category @p category (active FE index) contains DoFs of the phase
+   * @p phase (0: liquid, 1: gas).
+   */
+  inline bool
+  category_has_phase(const unsigned int category, const unsigned int phase)
+  {
+    return category == CutUtil::CellCategory::intersected ||
+           category == (phase == 0 ? CutUtil::CellCategory::liquid : CutUtil::CellCategory::gas);
+  }
+
+  /**
+   * Return whether the active cell @p cell has at least one (sub)face at which the ghost-penalty
+   * stabilization of phase @p phase (0: liquid, 1: gas) acts, i.e., a face to a neighbor
+   * containing the phase where at least one of the two cells is intersected (same face selection
+   * as CutUtil::face_type_has_ghost_penalty()). Boundary faces (except for periodic ones) are
+   * skipped.
+   */
+  template <int dim, typename CellIteratorType>
+  bool
+  has_ghost_penalty_face(const CellIteratorType &cell, const unsigned int phase)
+  {
+    const unsigned int category = cell->active_fe_index();
+
+    const auto is_ghost_penalty_face = [&](const unsigned int neighbor_category) {
+      return category_has_phase(neighbor_category, phase) &&
+             (category == CutUtil::CellCategory::intersected ||
+              neighbor_category == CutUtil::CellCategory::intersected);
+    };
+
+    for (const unsigned int f : cell->face_indices())
+      {
+        const bool is_periodic = cell->has_periodic_neighbor(f);
+        if (cell->at_boundary(f) && !is_periodic)
+          continue;
+
+        const auto neighbor = cell->neighbor_or_periodic_neighbor(f);
+
+        if (!neighbor->has_children())
+          {
+            // neighbor on the same level or coarser
+            if (is_ghost_penalty_face(neighbor->active_fe_index()))
+              return true;
+          }
+        else if constexpr (dim == 1)
+          {
+            // a face is a point: only the category of the adjacent active child matters
+            auto child = neighbor;
+            while (child->has_children())
+              child = child->child(1 - f);
+
+            if (is_ghost_penalty_face(child->active_fe_index()))
+              return true;
+          }
+        else
+          {
+            // finer neighbor: check the subfaces
+            const unsigned int n_subfaces = is_periodic ?
+                                              dealii::GeometryInfo<dim>::max_children_per_face :
+                                              cell->face(f)->n_children();
+            for (unsigned int subface = 0; subface < n_subfaces; ++subface)
+              {
+                const auto child = is_periodic ?
+                                     cell->periodic_neighbor_child_on_subface(f, subface) :
+                                     cell->neighbor_child_on_subface(f, subface);
+
+                if (is_ghost_penalty_face(child->active_fe_index()))
+                  return true;
+              }
+          }
+      }
+
+    return false;
+  }
+
+  /**
+   * Return whether the active cell @p cell belongs to the band, i.e., whether it is intersected or
+   * shares a ghost-penalty face of its phase with an intersected cell.
+   */
+  template <int dim, typename CellIteratorType>
+  bool
+  is_band_cell(const CellIteratorType &cell)
+  {
+    const unsigned int category = cell->active_fe_index();
+
+    if (category == CutUtil::CellCategory::intersected)
+      return true;
+
+    return has_ghost_penalty_face<dim>(cell, category == CutUtil::CellCategory::liquid ? 0 : 1);
+  }
+
+  /**
+   * Set up the constraints of the band solver: all DoFs outside the band (see is_band_cell()) are
+   * constrained to zero, the DoFs of the band remain unconstrained. A MatrixFree object set up with
+   * these constraints (as an additional DoF index for the same DoFHandler) restricts the system
+   * matrix to the band, i.e., the matrix-free gather and scatter operations skip all DoFs outside
+   * the band.
+   *
+   * The constraints only depend on the cell categories (active FE indices) and have to be
+   * recomputed whenever the DoFs are distributed anew, before the MatrixFree object is built.
+   *
+   * @param dof_handler DoFHandler of the compressible multiphase flow solution.
+   * @param constraints Output constraints; cleared and reinitialized for the locally relevant DoFs.
+   */
+  template <int dim, typename number>
+  void
+  make_band_constraints(const dealii::DoFHandler<dim>     &dof_handler,
+                        dealii::AffineConstraints<number> &constraints)
+  {
+    const dealii::IndexSet &locally_owned_dofs = dof_handler.locally_owned_dofs();
+    const dealii::IndexSet  locally_relevant_dofs =
+      dealii::DoFTools::extract_locally_relevant_dofs(dof_handler);
+
+    // mark the DoFs of all locally owned band cells; the ghost values provide the information for
+    // the DoFs of ghost cells, whose neighbors might not be known on this process
+    dealii::LinearAlgebra::distributed::Vector<number> band_marker(
+      locally_owned_dofs, locally_relevant_dofs, dof_handler.get_mpi_communicator());
+
+    std::vector<dealii::types::global_dof_index> dof_indices;
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      if (cell->is_locally_owned() && is_band_cell<dim>(cell))
+        {
+          dof_indices.resize(cell->get_fe().n_dofs_per_cell());
+          cell->get_dof_indices(dof_indices);
+          for (const auto i : dof_indices)
+            band_marker(i) = number(1.);
+        }
+    band_marker.update_ghost_values();
+
+    constraints.clear();
+    constraints.reinit(locally_owned_dofs, locally_relevant_dofs);
+    for (const auto i : locally_relevant_dofs)
+      if (band_marker(i) == number(0.))
+        constraints.constrain_dof_to_zero(i);
+    constraints.close();
+  }
+
+  /**
    * Description of the "band" of a cutDG mass-type operator, i.e., of the cells whose degrees of
    * freedom are coupled to the degrees of freedom of other cells (intersected cells and cells
-   * sharing a ghost-penalty face with them).
+   * sharing a ghost-penalty face with them, see is_band_cell()).
    *
-   * A band cell is identified by the matrix-free cell batch, the SIMD lane within that batch and a
-   * block index within the cell, e.g., the phase in a two-phase cutDG discretization. In addition,
-   * the object stores the local indices (within the locally owned range of a vector) of all DoFs of
-   * the band.
+   * A band cell is identified by the matrix-free cell batch and the SIMD lane within that batch. In
+   * addition, the object stores the local indices (within the locally owned range of a vector) of
+   * all DoFs of the band.
    *
    * @note The cells are addressed via the matrix-free cell batch numbering. Thus, the data becomes
    * invalid whenever the MatrixFree object is reinitialized and has to be recomputed.
@@ -44,21 +187,15 @@ namespace MeltPoolDG::Multiphase
      *
      * @param n_cell_batches_in Number of cell batches of the MatrixFree object.
      * @param n_lanes_in Number of SIMD lanes per cell batch.
-     * @param n_blocks_per_cell_in Number of blocks per cell (e.g., number of phases).
      */
     void
-    reinit(const unsigned int n_cell_batches_in,
-           const unsigned int n_lanes_in,
-           const unsigned int n_blocks_per_cell_in)
+    reinit(const unsigned int n_cell_batches_in, const unsigned int n_lanes_in)
     {
-      n_cell_batches_   = n_cell_batches_in;
-      n_lanes           = n_lanes_in;
-      n_blocks_per_cell = n_blocks_per_cell_in;
+      n_cell_batches_ = n_cell_batches_in;
+      n_lanes         = n_lanes_in;
 
-      cell_in_band.assign(static_cast<std::size_t>(n_cell_batches_) * n_lanes * n_blocks_per_cell,
-                          false);
+      cell_in_band.assign(static_cast<std::size_t>(n_cell_batches_) * n_lanes, false);
       batch_in_band.assign(n_cell_batches_, false);
-      batches_in_band.clear();
       dof_indices.clear();
       initialized = true;
     }
@@ -73,8 +210,6 @@ namespace MeltPoolDG::Multiphase
       cell_in_band.shrink_to_fit();
       batch_in_band.clear();
       batch_in_band.shrink_to_fit();
-      batches_in_band.clear();
-      batches_in_band.shrink_to_fit();
       dof_indices.clear();
       dof_indices.shrink_to_fit();
       n_cell_batches_ = 0;
@@ -91,27 +226,22 @@ namespace MeltPoolDG::Multiphase
     }
 
     /**
-     * Add the given cell (and block) to the band.
+     * Add the given cell to the band.
      */
     void
-    add(const unsigned int cell_batch, const unsigned int lane, const unsigned int block)
+    add(const unsigned int cell_batch, const unsigned int lane)
     {
-      cell_in_band[index(cell_batch, lane, block)] = true;
-
-      if (!batch_in_band[cell_batch])
-        {
-          batch_in_band[cell_batch] = true;
-          batches_in_band.push_back(cell_batch);
-        }
+      cell_in_band[index(cell_batch, lane)] = true;
+      batch_in_band[cell_batch]             = true;
     }
 
     /**
-     * Return whether the given cell (and block) belongs to the band.
+     * Return whether the given cell belongs to the band.
      */
     bool
-    contains(const unsigned int cell_batch, const unsigned int lane, const unsigned int block) const
+    contains(const unsigned int cell_batch, const unsigned int lane) const
     {
-      return cell_in_band[index(cell_batch, lane, block)];
+      return cell_in_band[index(cell_batch, lane)];
     }
 
     /**
@@ -122,16 +252,6 @@ namespace MeltPoolDG::Multiphase
     {
       AssertIndexRange(cell_batch, n_cell_batches_);
       return batch_in_band[cell_batch];
-    }
-
-    /**
-     * Return the cell batches that contain at least one band cell, in the order in which the first
-     * cell of each batch was added.
-     */
-    const std::vector<unsigned int> &
-    get_cell_batches() const
-    {
-      return batches_in_band;
     }
 
     /**
@@ -163,27 +283,22 @@ namespace MeltPoolDG::Multiphase
 
   private:
     std::size_t
-    index(const unsigned int cell_batch, const unsigned int lane, const unsigned int block) const
+    index(const unsigned int cell_batch, const unsigned int lane) const
     {
       AssertIndexRange(cell_batch, n_cell_batches_);
       AssertIndexRange(lane, n_lanes);
-      AssertIndexRange(block, n_blocks_per_cell);
-      return (static_cast<std::size_t>(cell_batch) * n_lanes + lane) * n_blocks_per_cell + block;
+      return static_cast<std::size_t>(cell_batch) * n_lanes + lane;
     }
 
-    unsigned int n_cell_batches_   = 0;
-    unsigned int n_lanes           = 0;
-    unsigned int n_blocks_per_cell = 0;
-    bool         initialized       = false;
+    unsigned int n_cell_batches_ = 0;
+    unsigned int n_lanes         = 0;
+    bool         initialized     = false;
 
-    // Flag for each (cell batch, lane, block) whether it belongs to the band
+    // Flag for each (cell batch, lane) whether the cell belongs to the band
     std::vector<bool> cell_in_band;
 
     // Flag for each cell batch whether it contains at least one band cell
     std::vector<bool> batch_in_band;
-
-    // Cell batches that contain at least one band cell
-    std::vector<unsigned int> batches_in_band;
 
     // Local indices of all DoFs of the band
     std::vector<unsigned int> dof_indices;
@@ -211,6 +326,12 @@ namespace MeltPoolDG::Multiphase
     op.compute_band(band);
 
     /**
+     * Initialize a vector with the layout required by vmult_band(), i.e., the layout of the DoF
+     * index with band constraints (see make_band_constraints()).
+     */
+    op.initialize_band_dof_vector(dst);
+
+    /**
      * Apply the exact (cell-wise) inverse of the system matrix to the entries of @p src outside
      * the band and write the result into the corresponding entries of @p dst. The band entries
      * of @p dst remain untouched.
@@ -218,8 +339,8 @@ namespace MeltPoolDG::Multiphase
     op.apply_inverse_mass_matrix_outside_band(const_band, dst, src);
 
     /**
-     * Add the action of the system matrix restricted to the band to @p dst. Entries of @p src
-     * outside the band must be zero.
+     * Add the action of the system matrix restricted to the band to @p dst (vectors initialized
+     * with initialize_band_dof_vector()). Entries outside the band are neither read nor written.
      */
     op.vmult_band(const_band, dst, src);
   };
@@ -235,8 +356,10 @@ namespace MeltPoolDG::Multiphase
    * The band system is formulated on compressed vectors, which only contain the band DoFs (with a
    * contiguous global numbering of the band DoFs). The operator of the band system copies the
    * entries of a compressed vector into a vector with the layout of the full system, applies the
-   * system matrix restricted to the band and copies the band entries of the result back. Thus,
-   * the vector operations of the CG solver and the operator applications only touch the band.
+   * system matrix restricted to the band and copies the band entries of the result back. The
+   * system matrix restricted to the band is evaluated on an additional DoF index in which all DoFs
+   * outside the band are constrained (see make_band_constraints()). Thus, the vector operations of
+   * the CG solver and the operator applications only touch the band.
    *
    * The CG solver starts from a zero initial guess and stops as soon as the residual satisfies
    * |r| <= max(rel_tolerance * |b_band|, abs_tolerance), where the relative tolerance is bounded
@@ -327,8 +450,10 @@ namespace MeltPoolDG::Multiphase
 
       const std::vector<unsigned int> &band_dof_indices = band.get_dof_indices();
 
-      if (!vectors_valid || !p_full.partitioners_are_compatible(*b.get_partitioner()))
-        setup_vectors(b);
+      if (!vectors_valid)
+        setup_vectors(op, b);
+
+      AssertDimension(p_full.locally_owned_size(), b.locally_owned_size());
 
       // 1) band system: compressed right-hand side, zero initial guess
       for (unsigned int k = 0; k < band_dof_indices.size(); ++k)
@@ -379,7 +504,7 @@ namespace MeltPoolDG::Multiphase
       const OperatorType &op;
       const BandData     &band;
 
-      // Work vectors with the layout of the full system (zero outside the band)
+      // Work vectors with the layout of the DoF index with band constraints
       VectorType &p_full;
       VectorType &q_full;
 
@@ -388,7 +513,8 @@ namespace MeltPoolDG::Multiphase
       {
         const std::vector<unsigned int> &band_dof_indices = band.get_dof_indices();
 
-        // expand: band entries of the full vector, entries outside the band remain zero
+        // expand: band entries of the full vector (the constrained entries outside the band are
+        // ignored by vmult_band())
         for (unsigned int k = 0; k < band_dof_indices.size(); ++k)
           {
             p_full.local_element(band_dof_indices[k]) = src.local_element(k);
@@ -406,10 +532,11 @@ namespace MeltPoolDG::Multiphase
 
     /**
      * Set up the compressed vectors (band DoFs only, contiguous global numbering of the band DoFs)
-     * and the work vectors with the layout of @p full_vector (zero outside the band).
+     * and the work vectors of the band operator (layout of the DoF index with band constraints).
      */
+    template <typename OperatorType>
     void
-    setup_vectors(const VectorType &full_vector)
+    setup_vectors(const OperatorType &op, const VectorType &full_vector)
     {
       const MPI_Comm mpi_comm = full_vector.get_mpi_communicator();
 
@@ -434,8 +561,8 @@ namespace MeltPoolDG::Multiphase
       x_band.reinit(locally_owned_band_dofs, mpi_comm);
       b_band.reinit(locally_owned_band_dofs, mpi_comm);
 
-      p_full.reinit(full_vector);
-      q_full.reinit(full_vector);
+      op.initialize_band_dof_vector(p_full);
+      op.initialize_band_dof_vector(q_full);
 
       vectors_valid = true;
     }
@@ -449,7 +576,7 @@ namespace MeltPoolDG::Multiphase
     // Compressed solution and right-hand side vectors of the band system (band DoFs only)
     VectorType x_band, b_band;
 
-    // Work vectors of the band operator with the layout of the full system (zero outside the band)
+    // Work vectors of the band operator with the layout of the DoF index with band constraints
     VectorType p_full, q_full;
 
     // Flag indicating whether the vectors match the current band
