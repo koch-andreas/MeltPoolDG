@@ -146,6 +146,9 @@ namespace MeltPoolDG::CutUtil
    * quadrature rules, for the immersed geometry described by discrete level-set function
    * via a (@p level_set_dof_handler, @p level_set) pair.
    *
+   * Non-intersected cells/faces and unused lanes of partially filled batches get empty
+   * quadratures, as not needed.
+   *
    * @tparam dim Dimension in which this function is to be used.
    * @tparam number Floating-point value type used for this function.
    * @tparam VectorType Vector type used for this function.
@@ -196,6 +199,9 @@ namespace MeltPoolDG::CutUtil
    * The class NonMatching::DiscreteQuadratureGenerator<dim> is used to generate the immersed
    * quadrature rules, for the immersed geometry described by discrete level-set function
    * via a (@p level_set_dof_handler, @p level_set) pair.
+   *
+   * Non-intersected cell batches and unused lanes of partially filled batches get empty
+   * quadratures, as not needed.
    *
    * @tparam dim Dimension in which this function is to be used.
    * @tparam number Floating-point value type used for this function.
