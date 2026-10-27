@@ -254,13 +254,20 @@ namespace MeltPoolDG
           *this->mapping, this->dof_handler, this->constraint, this->quad, additional_data);
 
         this->cell_sizes.clear();
+        this->cell_sizes_including_ghost_cells.clear();
 
         /*
          *  create vector of cell sizes for matrix free
          */
-        this->cell_sizes.resize(this->matrix_free.n_cell_batches());
+        const unsigned int n_batches =
+          matrix_free.n_cell_batches() + matrix_free.n_ghost_cell_batches();
+        this->cell_sizes.resize(matrix_free.n_cell_batches());
+        this->cell_sizes_including_ghost_cells.resize(matrix_free.n_cell_batches() +
+                                                      matrix_free.n_ghost_cell_batches());
 
-        for (unsigned int cell = 0; cell < this->matrix_free.n_cell_batches(); ++cell)
+        constexpr number one_over_sqrt_dim = sqrt(dim);
+
+        for (unsigned int cell = 0; cell < matrix_free.n_cell_batches(); ++cell)
           {
             VectorizedArrayType cell_size = VectorizedArrayType();
             for (unsigned int v = 0; v < matrix_free.n_active_entries_per_cell_batch(cell); ++v)
@@ -268,13 +275,33 @@ namespace MeltPoolDG
                 // the diameter is subdivided by sqrt(dim) to get the edge length for quadratic
                 // elements
                 cell_size[v] =
-                  this->matrix_free.get_cell_iterator(cell, v, 0 /*dof_idx*/)->diameter() /
-                  sqrt(dim);
+                  this->matrix_free.get_cell_iterator(cell, v, 0 /*dof_idx*/)->diameter() *
+                  one_over_sqrt_dim;
 
                 Assert(cell_size[v] > 0.0,
                        dealii::ExcMessage("The calculated diameter should be larger than zero."));
               }
-            this->cell_sizes[cell] = cell_size;
+            this->cell_sizes[cell]                       = cell_size;
+            this->cell_sizes_including_ghost_cells[cell] = cell_size;
+          }
+
+        for (unsigned int cell = matrix_free.n_cell_batches();
+             cell < matrix_free.n_cell_batches() + matrix_free.n_ghost_cell_batches();
+             ++cell)
+          {
+            VectorizedArrayType cell_size = VectorizedArrayType();
+            for (unsigned int v = 0; v < matrix_free.n_active_entries_per_cell_batch(cell); ++v)
+              {
+                // the diameter is subdivided by sqrt(dim) to get the edge length for quadratic
+                // elements
+                cell_size[v] =
+                  this->matrix_free.get_cell_iterator(cell, v, 0 /*dof_idx*/)->diameter() *
+                  one_over_sqrt_dim;
+
+                Assert(cell_size[v] > 0.0,
+                       dealii::ExcMessage("The calculated diameter should be larger than zero."));
+              }
+            this->cell_sizes_including_ghost_cells[cell] = cell_size;
           }
       }
   }
@@ -527,6 +554,13 @@ namespace MeltPoolDG
   ScratchData<dim, spacedim, number>::get_cell_sizes() const
   {
     return this->cell_sizes;
+  }
+
+  template <int dim, int spacedim, typename number>
+  const dealii::AlignedVector<dealii::VectorizedArray<number>> &
+  ScratchData<dim, spacedim, number>::get_cell_sizes_including_ghost_cells() const
+  {
+    return this->cell_sizes_including_ghost_cells;
   }
 
   template <int dim, int spacedim, typename number>

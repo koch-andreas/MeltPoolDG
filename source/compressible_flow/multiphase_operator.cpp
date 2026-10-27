@@ -107,12 +107,12 @@ namespace MeltPoolDG::Multiphase
   template <typename EvaluatorType>
   inline void
   CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::
-    ghost_penalty_face_integral(EvaluatorType     &eval_m,
-                                EvaluatorType     &eval_p,
-                                const unsigned int q,
-                                const number       cell_side_length,
-                                const number       cell_side_length_pow_3,
-                                const number       cell_side_length_pow_5) const
+    ghost_penalty_face_integral(EvaluatorType                         &eval_m,
+                                EvaluatorType                         &eval_p,
+                                const unsigned int                     q,
+                                const dealii::VectorizedArray<number> &face_size,
+                                const dealii::VectorizedArray<number> &face_size_pow_3,
+                                const dealii::VectorizedArray<number> &face_size_pow_5) const
   {
     const auto w_minus = eval_m.get_value(q);
     const auto w_plus  = eval_p.get_value(q);
@@ -122,12 +122,11 @@ namespace MeltPoolDG::Multiphase
 
     const auto ghost_penalty_term_0 =
       (w_minus - w_plus) *
-      multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_0 * cell_side_length;
+      multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_0 * face_size;
 
     const auto ghost_penalty_term_1 =
       (w_normal_grad_minus - w_normal_grad_plus) *
-      multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_1 *
-      cell_side_length_pow_3;
+      multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_1 * face_size_pow_3;
 
     if (multiphase_scratch_data.flow_data.fe.degree == 2)
       {
@@ -137,7 +136,7 @@ namespace MeltPoolDG::Multiphase
         const auto ghost_penalty_term_2 =
           (w_normal_hessian_minus - w_normal_hessian_plus) *
           multiphase_scratch_data.cut.stabilization.ghost_penalty.gamma_M_degree_2 *
-          cell_side_length_pow_5;
+          face_size_pow_5;
 
         eval_m.submit_normal_hessian(ghost_penalty_term_2, q);
         eval_p.submit_normal_hessian(-ghost_penalty_term_2, q);
@@ -147,6 +146,22 @@ namespace MeltPoolDG::Multiphase
 
     eval_m.submit_value(ghost_penalty_term_0, q);
     eval_p.submit_value(-ghost_penalty_term_0, q);
+  }
+
+  template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
+  template <typename EvaluatorType>
+  dealii::VectorizedArray<number>
+  CompressibleMultiphaseOperator<dim, number, is_viscous_gas, is_viscous_liquid>::compute_face_size(
+    const EvaluatorType &eval_m,
+    const EvaluatorType &eval_p) const
+  {
+    // minimum of the adjacent cell sizes, i.e., the size of the (sub)face for hypercube elements
+    const dealii::VectorizedArray<number> face_size =
+      std::min(eval_m.read_cell_data(
+                 multiphase_scratch_data.scratch_data.get_cell_sizes_including_ghost_cells()),
+               eval_p.read_cell_data(
+                 multiphase_scratch_data.scratch_data.get_cell_sizes_including_ghost_cells()));
+    return face_size;
   }
 
   template <int dim, typename number, bool is_viscous_gas, bool is_viscous_liquid>
@@ -1285,13 +1300,6 @@ namespace MeltPoolDG::Multiphase
       multiphase_scratch_data.scratch_data.get_face_range_category(face_range);
     const CutUtil::FaceType face_type = CutUtil::get_face_type(face_category);
 
-    // TODO: use local face size and not globally minimum cell size for ghost penalty scaling
-    const number cell_side_length       = multiphase_scratch_data.scratch_data.get_min_cell_size();
-    const number cell_side_length_pow_3 = dealii::Utilities::fixed_power<3>(cell_side_length);
-    const number cell_side_length_pow_5 = (multiphase_scratch_data.flow_data.fe.degree == 2) ?
-                                            dealii::Utilities::fixed_power<5>(cell_side_length) :
-                                            0.;
-
     auto apply_ghost_penalty = [&](const CutUtil::CellCategory category_m,
                                    const CutUtil::CellCategory category_p,
                                    const unsigned int          component) {
@@ -1311,9 +1319,18 @@ namespace MeltPoolDG::Multiphase
           eval_p.reinit(face);
           eval_p.gather_evaluate(src, evaluation_flags);
 
+          const dealii::VectorizedArray<number> face_size = compute_face_size(eval_m, eval_p);
+
+          const dealii::VectorizedArray<number> face_size_pow_3 =
+            dealii::Utilities::fixed_power<3>(face_size);
+          const dealii::VectorizedArray<number> face_size_pow_5 =
+            (multiphase_scratch_data.flow_data.fe.degree == 2) ?
+              dealii::Utilities::fixed_power<5>(face_size) :
+              0.;
+
           for (const unsigned int q : eval_m.quadrature_point_indices())
             ghost_penalty_face_integral(
-              eval_m, eval_p, q, cell_side_length, cell_side_length_pow_3, cell_side_length_pow_5);
+              eval_m, eval_p, q, face_size, face_size_pow_3, face_size_pow_5);
 
           eval_m.integrate_scatter(evaluation_flags, dst);
           eval_p.integrate_scatter(evaluation_flags, dst);
@@ -1421,13 +1438,6 @@ namespace MeltPoolDG::Multiphase
       EvaluationFlags::values | EvaluationFlags::gradients |
       (multiphase_scratch_data.flow_data.fe.degree == 2 ? EvaluationFlags::hessians :
                                                           EvaluationFlags::nothing);
-
-    // TODO: use local face size and not globally minimum cell size for ghost penalty scaling
-    const number cell_side_length       = multiphase_scratch_data.scratch_data.get_min_cell_size();
-    const number cell_side_length_pow_3 = dealii::Utilities::fixed_power<3>(cell_side_length);
-    const number cell_side_length_pow_5 = (multiphase_scratch_data.flow_data.fe.degree == 2) ?
-                                            dealii::Utilities::fixed_power<5>(cell_side_length) :
-                                            0.;
 
     // assemble each phase separately
     for (const auto phase : Phase::_values())
@@ -1555,13 +1565,19 @@ namespace MeltPoolDG::Multiphase
           eval_minus.evaluate(face_evaluation_flags);
           eval_plus.evaluate(face_evaluation_flags);
 
+          const dealii::VectorizedArray<number> face_size =
+            compute_face_size(eval_minus, eval_plus);
+
+          const dealii::VectorizedArray<number> face_size_pow_3 =
+            dealii::Utilities::fixed_power<3>(face_size);
+          const dealii::VectorizedArray<number> face_size_pow_5 =
+            (multiphase_scratch_data.flow_data.fe.degree == 2) ?
+              dealii::Utilities::fixed_power<5>(face_size) :
+              0.;
+
           for (const unsigned int q : eval_minus.quadrature_point_indices())
-            ghost_penalty_face_integral(eval_minus,
-                                        eval_plus,
-                                        q,
-                                        cell_side_length,
-                                        cell_side_length_pow_3,
-                                        cell_side_length_pow_5);
+            ghost_penalty_face_integral(
+              eval_minus, eval_plus, q, face_size, face_size_pow_3, face_size_pow_5);
 
           eval_minus.integrate(face_evaluation_flags);
           eval_plus.integrate(face_evaluation_flags);

@@ -236,21 +236,21 @@ namespace MeltPoolDG::Multiphase
      * @tparam EvaluatorType Face evaluator type (e.g. FEFaceEvaluation) that
      *         provides values, normal derivatives and normal Hessians (for FE degree = 2).
      *
-     * @param eval_m                  Evaluator on the interior ("minus") side of the face.
-     * @param eval_p                  Evaluator on the exterior ("plus") side of the face.
-     * @param q                       Index of the face quadrature point.
-     * @param cell_side_length        Characteristic cell size @f$h@f$.
-     * @param cell_side_length_pow_3  Precomputed @f$h^3@f$.
-     * @param cell_side_length_pow_5  Precomputed @f$h^5@f$.
+     * @param eval_m           Evaluator on the interior ("minus") side of the face.
+     * @param eval_p           Evaluator on the exterior ("plus") side of the face.
+     * @param q                Index of the face quadrature point.
+     * @param face_size        Local (characteristic) face size @f$h_F@f$.
+     * @param face_size_pow_3  Precomputed @f$h_F^3@f$.
+     * @param face_size_pow_5  Precomputed @f$h_F^5@f$.
      */
     template <typename EvaluatorType>
     inline void
-    ghost_penalty_face_integral(EvaluatorType     &eval_m,
-                                EvaluatorType     &eval_p,
-                                const unsigned int q,
-                                const number       cell_side_length,
-                                const number       cell_side_length_pow_3,
-                                const number       cell_side_length_pow_5) const;
+    ghost_penalty_face_integral(EvaluatorType                         &eval_m,
+                                EvaluatorType                         &eval_p,
+                                const unsigned int                     q,
+                                const dealii::VectorizedArray<number> &face_size,
+                                const dealii::VectorizedArray<number> &face_size_pow_3,
+                                const dealii::VectorizedArray<number> &face_size_pow_5) const;
 
     /**
      * @brief Compute the inverse diagonal of the system matrix.
@@ -389,6 +389,25 @@ namespace MeltPoolDG::Multiphase
       return {create_face_integrator(true, category, offset),
               create_face_integrator(false, category, offset)};
     };
+
+    /**
+     * @brief Compute the local characteristic face size @f$h_F@f$ and its powers for the
+     * ghost-penalty scaling of the face batch the evaluators are currently initialized for.
+     *
+     * @f$h_F@f$ is defined as the minimum of the sizes of the two cells adjacent to the face. For
+     * (isotropic) hypercube elements, this corresponds to the edge length of the face, also at
+     * faces with hanging nodes, where the face of the coarser neighbor cell is subdivided.
+     *
+     * @tparam EvaluatorType Face evaluator type (e.g. FEFaceEvaluation).
+     *
+     * @param eval_m Evaluator on the interior ("minus") side of the face.
+     * @param eval_p Evaluator on the exterior ("plus") side of the face.
+     *
+     * @return Array containing @f$h_F@f$ (per lane of the face batch).
+     */
+    template <typename EvaluatorType>
+    dealii::VectorizedArray<number>
+    compute_face_size(const EvaluatorType &eval_m, const EvaluatorType &eval_p) const;
 
     /**
      * @brief Shared implementation of the matrix-free diagonal and system matrix assembly.

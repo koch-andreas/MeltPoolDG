@@ -502,6 +502,17 @@ namespace MeltPoolDG
     get_cell_sizes() const;
 
     /**
+     * @brief Get the vector of cell sizes used by the MatrixFree object.
+     *
+     * Each entry corresponds to a cell batch and stores the cell size in a
+     * @ref dealii::VectorizedArray. Ghost cell batches are included after the locally owned batches.
+     *
+     * @return Constant reference to the cell size vector.
+     */
+    const dealii::AlignedVector<dealii::VectorizedArray<number>> &
+    get_cell_sizes_including_ghost_cells() const;
+
+    /**
      * @brief Get the MPI communicator for a given DoFHandler.
      *
      * @param dof_idx Index of the DoFHandler (defaults to 0).
@@ -662,9 +673,10 @@ namespace MeltPoolDG
     number                                                 min_cell_size;
     number max_cell_size; // only computed in case of matrixfree
     number min_diameter;
-    dealii::AlignedVector<dealii::VectorizedArray<number>>            cell_sizes;
-    std::vector<dealii::IndexSet>                                     locally_owned_dofs;
-    std::vector<dealii::IndexSet>                                     locally_relevant_dofs;
+    dealii::AlignedVector<dealii::VectorizedArray<number>> cell_sizes;
+    dealii::AlignedVector<dealii::VectorizedArray<number>> cell_sizes_including_ghost_cells;
+    std::vector<dealii::IndexSet>                          locally_owned_dofs;
+    std::vector<dealii::IndexSet>                          locally_relevant_dofs;
     std::vector<std::shared_ptr<dealii::Utilities::MPI::Partitioner>> partitioner;
     std::map<unsigned int, std::shared_ptr<dealii::Utilities::MPI::RemotePointEvaluation<dim, dim>>>
                        rpe;
