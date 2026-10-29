@@ -47,6 +47,14 @@ namespace MeltPoolDG::LevelSet
     std::string nonlinear_solver_type           = "fixed point";
     number      interior_penalty_scaling_factor = 10.;
 
+    /**
+     * If true, the level-set field is only defined on the cells intersected by the zero level-set
+     * iso-surface (hp-DoFHandler with FE_DGQ on the intersected cells and FE_Nothing elsewhere)
+     * and the elliptic reinitialization problem is solved on these cells only. Requires FE_DGQ
+     * elements and the fixed-point solver.
+     */
+    bool intersected_cells_only = false;
+
     NonlinearSolverData<number> nlsolve{
       .max_nonlinear_iterations       = 5,
       .field_correction_tolerance     = std::numeric_limits<number>::min(),

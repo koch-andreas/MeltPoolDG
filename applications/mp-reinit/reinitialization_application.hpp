@@ -69,6 +69,15 @@ namespace MeltPoolDG
       void
       setup_dof_system();
 
+      /**
+       * Distribute the DoFs for a level-set field, which is only defined on the cells intersected
+       * by the zero level-set iso-surface of the initial condition: FE_DGQ on the intersected
+       * cells and FE_Nothing on all other cells (cell categories according to
+       * CutUtil::CellCategory).
+       */
+      void
+      distribute_dofs_on_intersected_cells();
+
       void
       refine_mesh();
 

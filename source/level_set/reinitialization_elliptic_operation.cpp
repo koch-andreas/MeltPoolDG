@@ -28,6 +28,17 @@ namespace MeltPoolDG::LevelSet
     , reinit_quad_idx(reinit_quad_idx_in)
     , ls_dof_idx(ls_dof_idx_in)
   {
+    if (reinit_data.elliptic.intersected_cells_only)
+      {
+        AssertThrow(reinit_data.fe.type == FiniteElementType::FE_DGQ and
+                      reinit_data.elliptic.nonlinear_solver_type == "fixed point",
+                    ExcMessage("The elliptic reinitialization on intersected cells only is "
+                               "implemented for FE_DGQ elements and the fixed point solver."));
+        AssertThrow(reinit_dof_idx == ls_dof_idx,
+                    ExcMessage("The elliptic reinitialization on intersected cells only requires "
+                               "the same DoFHandler for the reinitialization and the level set."));
+      }
+
     if (reinit_data.elliptic.nonlinear_solver_type == "fixed point")
       {
         fixed_point.emplace(reinit_data.elliptic.nlsolve);
@@ -49,12 +60,12 @@ namespace MeltPoolDG::LevelSet
   ReinitializationEllipticOperation<dim, number>::setup_fixed_point()
   {
     fixed_point->create_rhs = [&](const VectorType &src, VectorType &dst) {
-      fixed_point_operator->create_rhs(dst, src);
+      get_fixed_point_operator().create_rhs(dst, src);
     };
 
     fixed_point->solve_fixed_point = [&](const VectorType &rhs, VectorType &dst) -> int {
       return LinearSolver::solve<VectorType, OperatorMatrixFree<dim, number>>(
-        *fixed_point_operator,
+        get_fixed_point_operator(),
         dst,
         rhs,
         reinit_data.linear_solver,
@@ -145,14 +156,39 @@ namespace MeltPoolDG::LevelSet
     scratch_data.initialize_dof_vector(rhs, ls_dof_idx);
     scratch_data.initialize_dof_vector(level_set_old, ls_dof_idx);
 
-    if (not(fixed_point_operator or newton_operator))
+    if (not(fixed_point_operator or newton_operator or fixed_point_intersected_cells_operator))
       create_operator();
 
-    if (fixed_point)
+    if (fixed_point_intersected_cells_operator)
+      fixed_point_intersected_cells_operator->reinit();
+    else if (fixed_point)
       fixed_point_operator->reinit();
     else
       newton_operator->reinit();
     preconditioner.reinit();
+  }
+
+  template <int dim, typename number>
+  const OperatorMatrixFree<dim, number> &
+  ReinitializationEllipticOperation<dim, number>::get_fixed_point_operator() const
+  {
+    if (fixed_point_intersected_cells_operator)
+      return *fixed_point_intersected_cells_operator;
+
+    Assert(fixed_point_operator, ExcMessage("The fixed point operator has not been created."));
+    return *fixed_point_operator;
+  }
+
+  template <int dim, typename number>
+  unsigned int
+  ReinitializationEllipticOperation<dim, number>::get_level_set_degree() const
+  {
+    // For an hp-DoFHandler (level set only on intersected cells), the FE with index 0 is
+    // FE_Nothing. Thus, the degree is taken from the FE of the intersected cells.
+    if (fixed_point_intersected_cells_operator)
+      return fixed_point_intersected_cells_operator->get_fe_degree();
+
+    return scratch_data.get_degree(ls_dof_idx);
   }
 
   template <int dim, typename number>
@@ -249,7 +285,22 @@ namespace MeltPoolDG::LevelSet
   void
   ReinitializationEllipticOperation<dim, number>::create_operator()
   {
-    if (fixed_point)
+    if (reinit_data.elliptic.intersected_cells_only)
+      {
+        fixed_point_intersected_cells_operator =
+          std::make_unique<ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>>(
+            scratch_data, reinit_data, ls_dof_idx, reinit_quad_idx, mapping_info_surface);
+        preconditioner = make_preconditioner<
+          dim,
+          number,
+          ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>,
+          VectorType>(reinit_data.linear_solver.preconditioner_type,
+                      fixed_point_intersected_cells_operator.get(),
+                      scratch_data,
+                      ls_dof_idx,
+                      reinit_data.linear_solver.do_matrix_free);
+      }
+    else if (fixed_point)
       {
         fixed_point_operator =
           std::make_unique<ReinitializationEllipticOperatorFixedPoint<dim, number>>(
@@ -298,11 +349,19 @@ namespace MeltPoolDG::LevelSet
   {
     level_set_old.update_ghost_values();
 
-    CutUtil::compute_immersed_surface_quadrature(mapping_info_surface,
-                                                 scratch_data.get_dof_handler(ls_dof_idx),
-                                                 level_set_old,
-                                                 scratch_data.get_matrix_free(),
-                                                 scratch_data.get_degree(ls_dof_idx));
+    if (reinit_data.elliptic.intersected_cells_only)
+      CutUtil::compute_immersed_surface_quadrature_intersected_cells(mapping_info_surface,
+                                                                     scratch_data.get_dof_handler(
+                                                                       ls_dof_idx),
+                                                                     level_set_old,
+                                                                     scratch_data.get_matrix_free(),
+                                                                     get_level_set_degree());
+    else
+      CutUtil::compute_immersed_surface_quadrature(mapping_info_surface,
+                                                   scratch_data.get_dof_handler(ls_dof_idx),
+                                                   level_set_old,
+                                                   scratch_data.get_matrix_free(),
+                                                   scratch_data.get_degree(ls_dof_idx));
   }
 
 

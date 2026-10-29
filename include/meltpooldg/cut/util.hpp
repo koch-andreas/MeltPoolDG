@@ -243,6 +243,9 @@ namespace MeltPoolDG::CutUtil
    * the case of a two-domain problem.
    * @note Keep attention of the definition of the level-set field orientation. Currently, the single-phase region
    * is assigned to the positive level-set region.
+   * @note If @p level_set_dof_handler has hp-capabilities, the level-set field is assumed to be
+   * only defined on the intersected cells and the call is forwarded to
+   * compute_immersed_surface_quadrature_intersected_cells().
    *
    */
   template <int dim, typename number, typename VectorType>
@@ -251,6 +254,33 @@ namespace MeltPoolDG::CutUtil
     MappingInfoType<dim, number>                                           &mapping_info_surface,
     const dealii::DoFHandler<dim>                                          &level_set_dof_handler,
     const VectorType                                                       &level_set_in,
+    const dealii::MatrixFree<dim, number, dealii::VectorizedArray<number>> &matrix_free,
+    const int                                                               fe_degree);
+
+  /**
+   * @brief Generate the immersed surface quadrature rules for a discrete level-set field, which
+   * is only defined on the intersected cells.
+   *
+   * The level-set field is described by an hp-DoFHandler, where the cells with the FE index
+   * CellCategory::intersected hold the (discontinuous) level-set element and all other cells hold
+   * FE_Nothing elements. The surface quadrature is generated for all locally owned cells with the
+   * FE index CellCategory::intersected. All other cells (non-intersected cells, ghost cells and
+   * unused lanes of partially filled cell batches) get empty quadratures.
+   *
+   * @param mapping_info_surface dealii::NonMatching::MappingInfo object, which stores the mapping
+   * information of the surface quadrature. The cells are numbered as
+   * <tt>cell_batch * n_lanes + lane</tt> of @p matrix_free.
+   * @param level_set_dof_handler hp-DoFHandler of the discrete level-set field.
+   * @param level_set Discrete level-set vector.
+   * @param matrix_free Matrix-free object, provides the cell numbering.
+   * @param fe_degree Polynomial degree of the level-set field on the intersected cells.
+   */
+  template <int dim, typename number, typename VectorType>
+  void
+  compute_immersed_surface_quadrature_intersected_cells(
+    MappingInfoType<dim, number>                                           &mapping_info_surface,
+    const dealii::DoFHandler<dim>                                          &level_set_dof_handler,
+    const VectorType                                                       &level_set,
     const dealii::MatrixFree<dim, number, dealii::VectorizedArray<number>> &matrix_free,
     const int                                                               fe_degree);
 

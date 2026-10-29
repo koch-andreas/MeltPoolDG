@@ -5,6 +5,7 @@
 #include <meltpooldg/level_set/normal_vector_operation.hpp>
 #include <meltpooldg/level_set/reinitialization_elliptic_operator_CG_newton.hpp>
 #include <meltpooldg/level_set/reinitialization_elliptic_operator_fixed_point.hpp>
+#include <meltpooldg/level_set/reinitialization_elliptic_operator_fixed_point_intersected_cells.hpp>
 #include <meltpooldg/level_set/reinitialization_operation_base.hpp>
 #include <meltpooldg/linear_algebra/fixed_point_solver.hpp>
 #include <meltpooldg/linear_algebra/newton_raphson_solver.hpp>
@@ -19,6 +20,11 @@
  * Adams, T., Giani, S., & Coombs, W. M. (2019). A high-order elliptic PDE based level set
  * reinitialisation method using a discontinuous Galerkin discretisation. Journal of Computational
  * Physics, 379, 373-391.
+ *
+ * If ReinitializationEllipticData::intersected_cells_only is set, the level-set field is only
+ * defined on the cells intersected by the zero level-set iso-surface (hp-DoFHandler with FE_DGQ
+ * on the intersected cells and FE_Nothing elsewhere, see CutUtil::CellCategory) and the problem
+ * is solved with ReinitializationEllipticOperatorFixedPointIntersectedCells.
  */
 
 namespace MeltPoolDG::LevelSet
@@ -165,6 +171,27 @@ namespace MeltPoolDG::LevelSet
     /// Pointer to the elliptic reinitialization operator object
     std::unique_ptr<ReinitializationEllipticOperatorFixedPoint<dim, number>> fixed_point_operator;
     std::unique_ptr<ReinitializationEllipticOperatorNewton<dim, number>>     newton_operator;
+
+    /// Operator for the fixed-point iteration, if the level-set field is only defined on the
+    /// intersected cells
+    std::unique_ptr<ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>>
+      fixed_point_intersected_cells_operator;
+
+    /**
+     * @brief Return the operator of the fixed-point iteration (either on the full domain or on
+     * the intersected cells only).
+     */
+    const OperatorMatrixFree<dim, number> &
+    get_fixed_point_operator() const;
+
+    /**
+     * @brief Return the polynomial degree of the level-set field.
+     *
+     * @note For a level-set field, which is only defined on the intersected cells, the degree of
+     * the element on the intersected cells is returned.
+     */
+    unsigned int
+    get_level_set_degree() const;
 
     /// Preconditioner for the linear solver
     Preconditioner<dim, VectorType, number> preconditioner;

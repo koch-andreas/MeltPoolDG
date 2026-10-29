@@ -4,14 +4,23 @@
 
 #include <deal.II/distributed/grid_refinement.h>
 
+#include <deal.II/fe/fe_dgq.h>
+#include <deal.II/fe/fe_nothing.h>
+#include <deal.II/fe/fe_q.h>
+
 #include <deal.II/grid/tria.h>
 
+#include <deal.II/hp/fe_collection.h>
+
 #include <deal.II/lac/vector.h>
+
+#include <deal.II/non_matching/mesh_classifier.h>
 
 #include <deal.II/numerics/error_estimator.h>
 #include <deal.II/numerics/vector_tools_interpolate.h>
 
 #include "meltpooldg/level_set/reinitialization_data.hpp"
+#include <meltpooldg/cut/util.hpp>
 #include <meltpooldg/level_set/reinitialization_elliptic_operation.hpp>
 #include <meltpooldg/level_set/reinitialization_geometric_operation.hpp>
 #include <meltpooldg/level_set/reinitialization_hyperbolic_CG_operation.hpp>
@@ -145,6 +154,10 @@ namespace MeltPoolDG::LevelSet
   void
   ReinitializationApplication<dim, number>::initialize()
   {
+    AssertThrow(not(param.reinit.elliptic.intersected_cells_only and param.amr.do_amr),
+                ExcMessage("Adaptive mesh refinement is not supported for the elliptic "
+                           "reinitialization on intersected cells only."));
+
     // setup scratch data
     {
       scratch_data =
@@ -314,10 +327,53 @@ namespace MeltPoolDG::LevelSet
 
   template <int dim, typename number>
   void
+  ReinitializationApplication<dim, number>::distribute_dofs_on_intersected_cells()
+  {
+    // Classify the cells with respect to the zero level-set iso-surface of the initial level-set
+    // function. Since the level-set field only lives on the intersected cells, the
+    // classification is computed from the analytical initial condition.
+    // Note: The MeshClassifier keeps a pointer to the element. Thus, it must outlive the
+    // MeshClassifier.
+    const FE_Q<dim>                  fe_classification(std::max(1, param.reinit.fe.degree));
+    NonMatching::MeshClassifier<dim> mesh_classifier(*simulation_case->triangulation,
+                                                     *simulation_case->get_initial_condition(
+                                                       "level_set"),
+                                                     fe_classification);
+    mesh_classifier.reclassify();
+
+    // FE_DGQ on the intersected cells and FE_Nothing on all other cells, following the cell
+    // category numbering of CutUtil::CellCategory
+    hp::FECollection<dim> fe_collection;
+    fe_collection.push_back(FE_Nothing<dim>());                   // liquid
+    fe_collection.push_back(FE_DGQ<dim>(param.reinit.fe.degree)); // intersected
+    fe_collection.push_back(FE_Nothing<dim>());                   // gas
+
+    CutUtil::set_fe_index<dim>(dof_handler, mesh_classifier, false /*set_future*/);
+    dof_handler.distribute_dofs(fe_collection);
+
+    unsigned int n_intersected_cells = 0;
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      if (cell->is_locally_owned() and
+          cell->active_fe_index() == CutUtil::CellCategory::intersected)
+        ++n_intersected_cells;
+
+    std::ostringstream str;
+    str << "Level set defined on "
+        << dealii::Utilities::MPI::sum(n_intersected_cells, dof_handler.get_mpi_communicator())
+        << " of " << simulation_case->triangulation->n_global_active_cells() << " cells ("
+        << dof_handler.n_dofs() << " DoFs)";
+    Journal::print_line(scratch_data->get_pcout(0), str.str(), "reinitialization");
+  }
+
+  template <int dim, typename number>
+  void
   ReinitializationApplication<dim, number>::setup_dof_system()
   {
     // setup DoFHandler
-    FiniteElementUtils::distribute_dofs<dim, 1>(param.reinit.fe, dof_handler);
+    if (param.reinit.elliptic.intersected_cells_only)
+      distribute_dofs_on_intersected_cells();
+    else
+      FiniteElementUtils::distribute_dofs<dim, 1>(param.reinit.fe, dof_handler);
 
     // re-create partitioning
     scratch_data->create_partitioning();

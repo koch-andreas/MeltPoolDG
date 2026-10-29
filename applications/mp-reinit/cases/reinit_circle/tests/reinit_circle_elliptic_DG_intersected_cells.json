@@ -1,0 +1,57 @@
+{
+  "$schema": "../../../parameters.schema.json",
+  "base": {
+    "case name": "reinit_circle",
+    "dimension": 2,
+    "global refinements": 5,
+    "do print parameters": false,
+    "fe": {
+      "degree": 2,
+      "type": "FE_DGQ"
+    },
+    "verbosity level": 1
+  },
+  "case specific": {
+    "center point": "0., 0.",
+    "radius": 0.5,
+    "level set type": "signed_distance",
+    "apply initial jump at interface": false,
+    "distortion factor": 0.8
+  },
+  "output": {
+    "do user defined postprocessing": true,
+    "paraview": {
+      "enable": true
+    }
+  },
+  "reinitialization": {
+    "linear solver": {
+      "solver type": "CG",
+      "preconditioner type": "Diagonal",
+      "max iterations": 1000,
+      "rel tolerance": 1e-08,
+      "abs tolerance": 1e-20,
+      "monitor type": "none",
+      "do matrix free": true
+    },
+    "type": "elliptic",
+    "elliptic": {
+      "intersected cells only": true,
+      "penalty parameter": 10000.0,
+      "nlsolve": {
+        "max nonlinear iterations": 10,
+        "residual tolerance": 1e-05,
+        "residual tolerance alt": 1e-05,
+        "field correction tolerance": 1e-05,
+        "field correction tolerance alt": 1e-05
+      }
+    }
+  },
+  "time stepping": {
+    "start time": 0.0,
+    "time step size": 1.0,
+    "end time": 2.0,
+    "max n steps": 2,
+    "time step size function": "0.0*t"
+  }
+}

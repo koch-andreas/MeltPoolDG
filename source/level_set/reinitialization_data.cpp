@@ -25,6 +25,12 @@ namespace MeltPoolDG::LevelSet
                         "Scaling factor for the interior penalty term in the elliptic "
                         "reinitialization operator.",
                         dealii::Patterns::Double(0., std::numeric_limits<number>::max()));
+      prm.add_parameter("intersected cells only",
+                        intersected_cells_only,
+                        "If true, the level-set field is only defined on the cells intersected by "
+                        "the zero level-set iso-surface (FE_DGQ on intersected cells, FE_Nothing "
+                        "elsewhere) and the elliptic reinitialization is solved on these cells "
+                        "only. Requires FE_DGQ elements and the fixed point solver.");
       nlsolve.add_parameters(prm);
     }
     prm.leave_subsection();
@@ -307,6 +313,22 @@ namespace MeltPoolDG::LevelSet
                                    "either matrix-based or matrix-free."));
     hyperbolic.check_input_parameters(fe, linear_solver, interface_thickness_parameter.type);
     predictor.check_input_parameters();
+
+    if (elliptic.intersected_cells_only)
+      {
+        AssertThrow(modeltype == ModelType::elliptic,
+                    dealii::ExcMessage("The parameter 'intersected cells only' is only supported "
+                                       "for the elliptic reinitialization."));
+        AssertThrow(fe.type == FiniteElementType::FE_DGQ,
+                    dealii::ExcMessage("The elliptic reinitialization on intersected cells only "
+                                       "is implemented for FE_DGQ elements."));
+        AssertThrow(elliptic.nonlinear_solver_type == "fixed point",
+                    dealii::ExcMessage("The elliptic reinitialization on intersected cells only "
+                                       "is implemented for the fixed point solver."));
+        AssertThrow(linear_solver.do_matrix_free,
+                    dealii::ExcMessage("The elliptic reinitialization on intersected cells only "
+                                       "is implemented matrix-free."));
+      }
   }
 
   template struct ReinitializationEllipticData<double>;

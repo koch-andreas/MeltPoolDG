@@ -11,11 +11,13 @@
 #include <deal.II/lac/vector.h>
 
 #include <meltpooldg/level_set/level_set_type.hpp>
+#include <meltpooldg/post_processing/generic_data_out.hpp>
 #include <meltpooldg/utilities/characteristic_functions.hpp>
 
 #include <cmath>
 
 #include "../../reinitialization_case.hpp"
+#include "../../reinitialization_postprocessing.hpp"
 
 namespace MeltPoolDG::Simulation::ReinitCircle
 {
@@ -306,6 +308,38 @@ namespace MeltPoolDG::Simulation::ReinitCircle
         dealii::Patterns::Double(0., std::numeric_limits<number>::max()));
 
       return this->parameters.base.do_print_parameters;
+    }
+
+    /**
+     * @brief Compute the error of the reinitialized level-set field with respect to the exact
+     * signed distance function.
+     *
+     * The relative L2-error of the level-set field and the L2-norm of the eikonal residual
+     * |grad phi| - 1 are evaluated on all cells, where the level-set field is defined, i.e., on
+     * all cells or only on the intersected cells for the elliptic reinitialization on intersected
+     * cells only.
+     *
+     * @note Only for the elliptic reinitialization of a signed distance function.
+     */
+    void
+    do_postprocessing(const GenericDataOut<dim, number> &generic_data_out) const final
+    {
+      if (level_set_type != LevelSet::LevelSetType::signed_distance or
+          this->parameters.reinit.modeltype != LevelSet::ModelType::elliptic)
+        return;
+
+      AssertDimension(center_point.size(), dim);
+      dealii::Point<dim, number> point;
+      for (unsigned int d = 0; d < dim; ++d)
+        point[d] = center_point[d];
+
+      const ExactSolution<dim, number> exact_solution(point,
+                                                      radius,
+                                                      LevelSet::LevelSetType::signed_distance,
+                                                      eps);
+
+      LevelSet::print_signed_distance_errors(
+        generic_data_out, "level_set", exact_solution, this->mpi_communicator, "reinit_circle");
     }
 
   private:

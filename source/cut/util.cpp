@@ -467,6 +467,17 @@ namespace MeltPoolDG::CutUtil
     const unsigned int n_cell_batches =
       matrix_free.n_cell_batches() + matrix_free.n_ghost_cell_batches();
 
+    // If the level-set DoFHandler has hp-capabilities, the level-set field is only defined on
+    // the intersected cells (FE index CellCategory::intersected); all other cells hold
+    // FE_Nothing elements. In this case, the surface quadrature is only computed on the locally
+    // owned intersected cells.
+    if (level_set_dof_handler.has_hp_capabilities())
+      {
+        compute_immersed_surface_quadrature_intersected_cells(
+          mapping_info_surface, level_set_dof_handler, level_set_in, matrix_free, fe_degree);
+        return;
+      }
+
     // The MeshClassifier is only implemented for elements derived from FE_Q_Base.
     const bool use_mesh_classifier =
       dynamic_cast<const dealii::FE_Q_Base<dim> *>(&level_set_dof_handler.get_fe()) != nullptr;
@@ -576,6 +587,68 @@ namespace MeltPoolDG::CutUtil
       level_set.zero_out_ghost_values();
   }
 
+  template <int dim, typename number, typename VectorType>
+  void
+  compute_immersed_surface_quadrature_intersected_cells(
+    MappingInfoType<dim, number>                                           &mapping_info_surface,
+    const dealii::DoFHandler<dim>                                          &level_set_dof_handler,
+    const VectorType                                                       &level_set,
+    const dealii::MatrixFree<dim, number, dealii::VectorizedArray<number>> &matrix_free,
+    const int                                                               fe_degree)
+  {
+    AssertThrow(level_set_dof_handler.has_hp_capabilities() and
+                  level_set_dof_handler.get_fe_collection().size() > CellCategory::intersected,
+                dealii::ExcMessage("The level-set DoFHandler needs hp-capabilities with the FE "
+                                   "index CellCategory::intersected for the intersected cells."));
+
+    dealii::hp::QCollection<1> q_collection(dealii::QGauss<1>(fe_degree + 1));
+
+    const unsigned int n_lanes = dealii::VectorizedArray<number>::size();
+    const unsigned int n_cell_batches =
+      matrix_free.n_cell_batches() + matrix_free.n_ghost_cell_batches();
+
+    const bool update_ghosts = not level_set.has_ghost_elements();
+    if (update_ghosts)
+      level_set.update_ghost_values();
+
+    dealii::NonMatching::DiscreteQuadratureGenerator<dim> quadrature_generator(
+      q_collection, level_set_dof_handler, level_set);
+
+    std::vector<dealii::NonMatching::ImmersedSurfaceQuadrature<dim>> quad_vec_surface;
+    std::vector<typename dealii::DoFHandler<dim>::cell_iterator>     vector_cell_iterators;
+    quad_vec_surface.reserve(n_cell_batches * n_lanes);
+    vector_cell_iterators.reserve(n_cell_batches * n_lanes);
+
+    for (unsigned int cell_batch = 0; cell_batch < n_cell_batches; ++cell_batch)
+      for (unsigned int lane = 0; lane < n_lanes; ++lane)
+        {
+          const bool is_active_lane =
+            lane < matrix_free.n_active_entries_per_cell_batch(cell_batch);
+
+          // Empty lanes of a partially filled cell batch use the cell of the first lane as dummy.
+          const auto cell = matrix_free.get_cell_iterator(cell_batch, is_active_lane ? lane : 0);
+          vector_cell_iterators.push_back(cell);
+
+          // The level-set field is only evaluated on locally owned cells with level-set DoFs, i.e.,
+          // on the intersected cells. Ghost cells are never visited by cell integrals.
+          const auto level_set_cell = cell->as_dof_handler_iterator(level_set_dof_handler);
+          if (not is_active_lane or not cell->is_locally_owned() or
+              level_set_cell->active_fe_index() != CellCategory::intersected)
+            {
+              quad_vec_surface.emplace_back();
+              continue;
+            }
+
+          quadrature_generator.generate(cell);
+          quad_vec_surface.push_back(quadrature_generator.get_surface_quadrature());
+        }
+
+    mapping_info_surface.reinit_surface(vector_cell_iterators, quad_vec_surface);
+
+    if (update_ghosts)
+      level_set.zero_out_ghost_values();
+  }
+
   template void
   compute_intersected_quadrature(
     std::vector<
@@ -633,6 +706,28 @@ namespace MeltPoolDG::CutUtil
     const int);
   template void
   compute_immersed_surface_quadrature(
+    dealii::NonMatching::MappingInfo<3, 3, dealii::VectorizedArray<double>> &,
+    const dealii::DoFHandler<3> &,
+    const dealii::LinearAlgebra::distributed::Vector<double> &,
+    const dealii::MatrixFree<3, double, dealii::VectorizedArray<double>> &,
+    const int);
+
+  template void
+  compute_immersed_surface_quadrature_intersected_cells(
+    dealii::NonMatching::MappingInfo<1, 1, dealii::VectorizedArray<double>> &,
+    const dealii::DoFHandler<1> &,
+    const dealii::LinearAlgebra::distributed::Vector<double> &,
+    const dealii::MatrixFree<1, double, dealii::VectorizedArray<double>> &,
+    const int);
+  template void
+  compute_immersed_surface_quadrature_intersected_cells(
+    dealii::NonMatching::MappingInfo<2, 2, dealii::VectorizedArray<double>> &,
+    const dealii::DoFHandler<2> &,
+    const dealii::LinearAlgebra::distributed::Vector<double> &,
+    const dealii::MatrixFree<2, double, dealii::VectorizedArray<double>> &,
+    const int);
+  template void
+  compute_immersed_surface_quadrature_intersected_cells(
     dealii::NonMatching::MappingInfo<3, 3, dealii::VectorizedArray<double>> &,
     const dealii::DoFHandler<3> &,
     const dealii::LinearAlgebra::distributed::Vector<double> &,
