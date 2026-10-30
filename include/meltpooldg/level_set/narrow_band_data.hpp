@@ -10,6 +10,16 @@
 
 namespace MeltPoolDG::LevelSet
 {
+  BETTER_ENUM(NarrowBandType,
+              char,
+              // band of the cut cells and their face neighbors, whose level set is reconstructed
+              // by the extension from the cut cells in every time step
+              extension,
+              // band of the cut cells and several layers of vertex neighbors, which is advected;
+              // the level set of the layers is only reconstructed by geometric redistancing for
+              // newly added cells and after the reinitialization of the cut cells
+              advected_layers)
+
   BETTER_ENUM(NarrowBandExtensionType,
               char,
               // global face-based ghost-penalty extension (polynomial extrapolation)
@@ -40,18 +50,30 @@ namespace MeltPoolDG::LevelSet
    * @brief Parameters of the narrow-band DG level-set method, where the level-set field is only
    * defined on the cells intersected by the interface (cut cells) and their face neighbors.
    *
-   * One time step consists of
+   * For the band type NarrowBandType::extension, one time step consists of
    * 1. the extension of the level-set field from the cut cells to their face neighbors by a
    *    global face-based ghost-penalty procedure or a closest-point extension,
    * 2. the advection of the extended level-set field on the narrow band with an explicit upwind
    *    DG scheme,
    * 3. the determination of the new cut cells and, if requested, the elliptic reinitialization
    *    on the new cut cells.
+   *
+   * For the band type NarrowBandType::advected_layers, the band consists of the cut cells and
+   * several layers of vertex neighbors, which are advected together with the cut cells. The level
+   * set of the layers is only reconstructed by the geometric redistancing (closest point on the
+   * discrete interface) for newly added cells and after the elliptic reinitialization of the cut
+   * cells.
    */
   template <typename number = double>
   struct NarrowBandData
   {
     NarrowBandData();
+
+    /// Type of the narrow band.
+    NarrowBandType type = NarrowBandType::extension;
+
+    /// Number of layers of vertex neighbors around the cut cells (advected band).
+    unsigned int n_layers = 2;
 
     /// Parameters of the extension from the cut cells to the neighbor cells.
     struct Extension

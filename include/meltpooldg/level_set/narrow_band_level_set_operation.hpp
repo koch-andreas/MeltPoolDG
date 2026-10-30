@@ -56,6 +56,15 @@ namespace MeltPoolDG::LevelSet
    *    NarrowBandGhostPenaltyExtension) or by the closest-point extension (see
    *    NarrowBandClosestPointExtension).
    *
+   * For the advected band (NarrowBandType::advected_layers), the band consists of the cut cells
+   * and NarrowBandData::n_layers layers of vertex neighbors, which are advected together with
+   * the cut cells (step 4 is omitted). Whenever the cut cells change, the band is rebuilt: the
+   * advected level set of the cells of the old band is transferred cell-wise and newly added
+   * cells, which are at least two layers away from the cut cells if the interface moves less than
+   * one cell per time step, are initialized by geometric redistancing (closest point on the
+   * discrete interface, see NarrowBandClosestPointExtension::redistance()). After the elliptic
+   * reinitialization of the cut cells, all cells of the layers are redistanced geometrically.
+   *
    * The velocity extension (S3), the projection to a continuous level set (S6) and the
    * computation of the interface geometry (S7) are not part of this class. The advection
    * velocity is prescribed by a function.
@@ -204,6 +213,20 @@ namespace MeltPoolDG::LevelSet
      */
     void
     extend();
+
+    /**
+     * @brief Return true for the advected band (NarrowBandType::advected_layers).
+     */
+    bool
+    is_advected_band() const;
+
+    /**
+     * @brief Advected band: copy the (reinitialized) level-set field of the cut cells to the band
+     * and redistance all cells of the layers geometrically (see
+     * NarrowBandClosestPointExtension::redistance()).
+     */
+    void
+    redistance_layers();
 
     /**
      * @brief Print the size of the narrow band.

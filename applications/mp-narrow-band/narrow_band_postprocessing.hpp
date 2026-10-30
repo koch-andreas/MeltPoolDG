@@ -29,7 +29,8 @@
 namespace MeltPoolDG::LevelSet
 {
   /**
-   * @brief Print the number of cut cells and neighbor cells of the narrow band.
+   * @brief Print the number of cut cells and of the other cells of the narrow band (neighbor cells
+   * or cells of the layers of the advected band).
    *
    * @param generic_data_out Output data containing the level-set vector of the band.
    * @param vector_name Name of the level-set vector of the band in @p generic_data_out.
@@ -52,7 +53,8 @@ namespace MeltPoolDG::LevelSet
     std::ostringstream str;
     str << "t = " << std::scientific << std::setprecision(4) << generic_data_out.get_time() << ": "
         << NarrowBand::n_cells_with_active_fe_index(dof_handler, NarrowBand::cut) << " cut cells, "
-        << NarrowBand::n_cells_with_active_fe_index(dof_handler, NarrowBand::neighbor)
+        << NarrowBand::n_cells_with_active_fe_index(dof_handler, NarrowBand::neighbor) +
+             NarrowBand::n_cells_with_active_fe_index(dof_handler, NarrowBand::outer)
         << " neighbor cells";
     Journal::print_line(pcout, str.str(), label);
   }

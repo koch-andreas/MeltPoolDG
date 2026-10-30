@@ -35,6 +35,7 @@
 #include <meltpooldg/level_set/reinitialization_data.hpp>
 #include <meltpooldg/level_set/reinitialization_elliptic_operation.hpp>
 
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -935,6 +936,133 @@ namespace MeltPoolDG::LevelSet
 
       return differences;
     }
+
+    /**
+     * Layers of the advected band around the cut cells of the zero level set of
+     * phi(x) = |x - c|^2 - r^2 on [-1,1]^2 with 8 x 8 cells, where the circle is contained in the
+     * cell with the center c. Returns the number of cells with the FE indices cut, neighbor and
+     * outer (summed over all processes).
+     */
+    std::array<unsigned int, 3>
+    count_layered_band_cells(const unsigned int n_layers)
+    {
+      constexpr int          dim       = 2;
+      constexpr unsigned int fe_degree = 2;
+
+      dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
+      dealii::GridGenerator::hyper_cube(triangulation, -1., 1.);
+      triangulation.refine_global(3);
+
+      const dealii::Point<dim>                            center(0.125, 0.125);
+      const dealii::ScalarFunctionFromFunctionObject<dim> level_set_function(
+        [&](const dealii::Point<dim> &p) { return p.distance_square(center) - 0.1 * 0.1; });
+
+      dealii::DoFHandler<dim> dof_handler_full(triangulation);
+      dof_handler_full.distribute_dofs(dealii::FE_DGQ<dim>(fe_degree));
+      VectorType level_set_full(dof_handler_full.locally_owned_dofs(),
+                                dealii::DoFTools::extract_locally_relevant_dofs(dof_handler_full),
+                                MPI_COMM_WORLD);
+      dealii::VectorTools::interpolate(dealii::MappingQ<dim>(1),
+                                       dof_handler_full,
+                                       level_set_function,
+                                       level_set_full);
+      const std::vector<bool> is_cut_cell =
+        NarrowBand::compute_cut_cells(dof_handler_full, level_set_full, fe_degree);
+
+      const auto fe_collection_band = NarrowBand::create_layered_band_fe_collection<dim>(fe_degree);
+      const auto fe_collection_cut  = NarrowBand::create_layered_cut_fe_collection<dim>(fe_degree);
+      dealii::DoFHandler<dim> dof_handler_band(triangulation);
+      dealii::DoFHandler<dim> dof_handler_cut(triangulation);
+
+      NarrowBand::distribute_dofs_layered(is_cut_cell,
+                                          n_layers,
+                                          dof_handler_cut,
+                                          fe_collection_cut,
+                                          dof_handler_band,
+                                          fe_collection_band);
+
+      // the cut DoFHandler only holds DoFs on the cut cells
+      for (const auto &cell : dof_handler_cut.active_cell_iterators())
+        if (cell->is_locally_owned())
+          EXPECT_EQ(cell->get_fe().n_dofs_per_cell() > 0,
+                    cell->active_fe_index() == NarrowBand::ActiveFEIndex::cut);
+
+      return {NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::cut),
+              NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::neighbor),
+              NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::outer)};
+    }
+
+    /**
+     * Geometric redistancing of the layers of the advected band: the signed distance function of
+     * a circle is interpolated on the cut cells, the layers are redistanced. Returns the maximum
+     * nodal error with respect to the signed distance function on the layers.
+     */
+    template <int dim>
+    number
+    compute_redistancing_error_circle(const unsigned int fe_degree,
+                                      const unsigned int n_refinements,
+                                      const unsigned int n_layers)
+    {
+      dealii::Point<dim> center;
+      center[0] = 0.1;
+      center[1] = -0.05;
+      const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, 0.55);
+
+      NarrowBandFixture<dim> fixture(fe_degree, n_refinements, fe_degree, &sphere);
+
+      // layered band from the cut cells of the fixture
+      std::vector<bool> is_cut_cell(fixture.triangulation.n_active_cells(), false);
+      for (const auto &cell : fixture.dof_handler_band.active_cell_iterators())
+        if (cell->is_locally_owned())
+          is_cut_cell[cell->active_cell_index()] =
+            cell->active_fe_index() == NarrowBand::ActiveFEIndex::cut;
+
+      const auto fe_collection_band = NarrowBand::create_layered_band_fe_collection<dim>(fe_degree);
+      const auto fe_collection_cut  = NarrowBand::create_layered_cut_fe_collection<dim>(fe_degree);
+      dealii::DoFHandler<dim> dof_handler_band(fixture.triangulation);
+      dealii::DoFHandler<dim> dof_handler_cut(fixture.triangulation);
+      NarrowBand::distribute_dofs_layered(is_cut_cell,
+                                          n_layers,
+                                          dof_handler_cut,
+                                          fe_collection_cut,
+                                          dof_handler_band,
+                                          fe_collection_band);
+
+      VectorType level_set_band, level_set_exact;
+      fixture.initialize_vector(dof_handler_band, level_set_band);
+      fixture.initialize_vector(dof_handler_band, level_set_exact);
+      dealii::VectorTools::interpolate(fixture.mapping, dof_handler_band, sphere, level_set_exact);
+
+      // signed distance function on the cut cells, zero on the layers
+      std::vector<bool>      is_layer_cell(fixture.triangulation.n_active_cells(), false);
+      dealii::Vector<number> values(fe_collection_band[1].n_dofs_per_cell());
+      for (const auto &cell : dof_handler_band.active_cell_iterators())
+        if (cell->is_locally_owned() and cell->get_fe().n_dofs_per_cell() > 0)
+          {
+            cell->get_dof_values(level_set_exact, values);
+            if (cell->active_fe_index() != NarrowBand::ActiveFEIndex::cut)
+              {
+                values                                   = 0.;
+                is_layer_cell[cell->active_cell_index()] = true;
+              }
+            cell->set_dof_values(values, level_set_band);
+          }
+
+      NarrowBandData<number>                       data;
+      const dealii::ConditionalOStream             pcout(std::cout, false);
+      NarrowBandClosestPointExtension<dim, number> extension(data.extension,
+                                                             fixture.mapping,
+                                                             pcout);
+      const unsigned int                           n_redistanced_cells =
+        extension.redistance(dof_handler_band, level_set_band, is_layer_cell, "layers");
+
+      EXPECT_EQ(n_redistanced_cells,
+                NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::neighbor) +
+                  NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::outer));
+
+      level_set_band -= level_set_exact;
+      return level_set_band.linfty_norm();
+    }
   } // namespace
 
   TEST(NarrowBandLevelSetTest, ExtensionReproducesPolynomials2D)
@@ -1100,5 +1228,25 @@ namespace MeltPoolDG::LevelSet
       EXPECT_LT(difference[lower(4)], tolerance);
       EXPECT_LT(difference[upper(4)], tolerance);
     }
+  }
+
+  TEST(NarrowBandLevelSetTest, LayeredBand2D)
+  {
+    // one cut cell, 8 cells sharing a vertex with it (first layer) and 16 cells in the second
+    // layer (and 24 cells in the third layer)
+    EXPECT_EQ(count_layered_band_cells(2), (std::array<unsigned int, 3>{1, 8, 16}));
+    EXPECT_EQ(count_layered_band_cells(3), (std::array<unsigned int, 3>{1, 8, 40}));
+  }
+
+  TEST(NarrowBandLevelSetTest, RedistancingCircle2D)
+  {
+    // maximum nodal error of the signed distance function on two layers for p = 1, 2, 3 (the
+    // error converges with the order p + 1)
+    const std::vector<double> tolerances = {0.03, 4e-3, 2e-4};
+    for (unsigned int degree = 1; degree <= 3; ++degree)
+      EXPECT_LT(compute_redistancing_error_circle<2>(degree, 4, 2), tolerances[degree - 1]);
+
+    EXPECT_LT(compute_redistancing_error_circle<2>(2, 5, 2), 5e-4);
+    EXPECT_LT(compute_redistancing_error_circle<2>(2, 4, 3), 4e-3);
   }
 } // namespace MeltPoolDG::LevelSet

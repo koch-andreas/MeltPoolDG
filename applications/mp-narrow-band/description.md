@@ -1,4 +1,5 @@
 - narrow-band DG level-set method: level set primarily defined on the cells intersected by the interface
 - extension of the level set to the face neighbors of the cut cells: global face-based ghost-penalty extension or closest-point extension
+- alternatively: advected band of the cut cells and several layers of vertex neighbors with geometric redistancing of the layers
 - explicit upwind DG advection (non-conservative form) on the narrow band with a prescribed velocity
 - elliptic reinitialization on the cut cells (SIPG coupling across all faces between cut cells or only across the faces crossed by the interface)

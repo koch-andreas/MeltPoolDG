@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
+#include <string>
 
 namespace MeltPoolDG::LevelSet
 {
@@ -32,8 +33,12 @@ namespace MeltPoolDG::LevelSet
     , narrow_band_data(narrow_band_data_in)
     , reinit_data(reinit_data_in)
     , fe_degree(fe_degree_in)
-    , fe_collection_band(NarrowBand::create_band_fe_collection<dim>(fe_degree_in))
-    , fe_collection_cut(NarrowBand::create_cut_fe_collection<dim>(fe_degree_in))
+    , fe_collection_band(narrow_band_data_in.type == NarrowBandType::advected_layers ?
+                           NarrowBand::create_layered_band_fe_collection<dim>(fe_degree_in) :
+                           NarrowBand::create_band_fe_collection<dim>(fe_degree_in))
+    , fe_collection_cut(narrow_band_data_in.type == NarrowBandType::advected_layers ?
+                          NarrowBand::create_layered_cut_fe_collection<dim>(fe_degree_in) :
+                          NarrowBand::create_cut_fe_collection<dim>(fe_degree_in))
     , dof_handler_band(triangulation)
     , dof_handler_cut(triangulation)
     , band_dof_idx(
@@ -91,12 +96,20 @@ namespace MeltPoolDG::LevelSet
 
     is_small_cut_cell = is_small_cut_cell_in;
 
-    NarrowBand::distribute_dofs(is_cut_cell,
-                                dof_handler_cut,
-                                fe_collection_cut,
-                                dof_handler_band,
-                                fe_collection_band,
-                                is_small_cut_cell);
+    if (is_advected_band())
+      NarrowBand::distribute_dofs_layered(is_cut_cell,
+                                          narrow_band_data.n_layers,
+                                          dof_handler_cut,
+                                          fe_collection_cut,
+                                          dof_handler_band,
+                                          fe_collection_band);
+    else
+      NarrowBand::distribute_dofs(is_cut_cell,
+                                  dof_handler_cut,
+                                  fe_collection_cut,
+                                  dof_handler_band,
+                                  fe_collection_band,
+                                  is_small_cut_cell);
 
     // DG: no constraints
     constraints_band.clear();
@@ -201,6 +214,24 @@ namespace MeltPoolDG::LevelSet
                                      level_set_function,
                                      level_set);
 
+    if (is_advected_band())
+      {
+        // level-set field on the band
+        dealii::VectorTools::interpolate(scratch_data.get_mapping(),
+                                         dof_handler_band,
+                                         level_set_function,
+                                         level_set_band);
+
+        if (do_reinitialize)
+          {
+            reinitialize();
+            redistance_layers();
+          }
+
+        print_band_statistics();
+        return;
+      }
+
     if (do_reinitialize)
       reinitialize();
 
@@ -262,7 +293,60 @@ namespace MeltPoolDG::LevelSet
 
       level_set.zero_out_ghost_values();
 
-      if (cut_cells_changed)
+      if (is_advected_band())
+        {
+          if (cut_cells_changed)
+            {
+              // Transfer the advected level set of all cells of the band. The cells of the new
+              // band, which do not belong to the old band, are initialized by geometric
+              // redistancing.
+              std::vector<bool> is_band_cell(is_cut_cell.size(), false);
+              for (const auto &cell : dof_handler_band.active_cell_iterators())
+                if (cell->is_locally_owned() and cell->get_fe().n_dofs_per_cell() > 0)
+                  is_band_cell[cell->active_cell_index()] = true;
+
+              const auto band_cell_values =
+                NarrowBand::extract_cell_values(dof_handler_band, level_set_band, is_band_cell);
+
+              setup_dof_system(is_cut_cell);
+
+              VectorType &level_set_band_new = solution_history_band.get_current_solution();
+              NarrowBand::set_cell_values(dof_handler_band, band_cell_values, level_set_band_new);
+
+              std::vector<bool> is_new_cell(is_cut_cell.size(), false);
+              unsigned int      n_new_first_layer_cells = 0;
+              for (const auto &cell : dof_handler_band.active_cell_iterators())
+                if (cell->is_locally_owned() and cell->get_fe().n_dofs_per_cell() > 0 and
+                    band_cell_values[cell->active_cell_index()].size() == 0)
+                  {
+                    is_new_cell[cell->active_cell_index()] = true;
+                    if (cell->active_fe_index() == NarrowBand::ActiveFEIndex::neighbor)
+                      ++n_new_first_layer_cells;
+                  }
+
+              // new cells next to the cut cells indicate that the interface has moved more
+              // than one layer within the time step
+              n_new_first_layer_cells =
+                dealii::Utilities::MPI::sum(n_new_first_layer_cells, scratch_data.get_mpi_comm());
+              if (n_new_first_layer_cells > 0)
+                Journal::print_line(scratch_data.get_pcout(0),
+                                    "Warning: " + std::to_string(n_new_first_layer_cells) +
+                                      " new cells in the first layer of the band.",
+                                    "narrow_band");
+
+              closest_point_extension.redistance(dof_handler_band,
+                                                 level_set_band_new,
+                                                 is_new_cell,
+                                                 "new cells");
+            }
+
+          VectorType &level_set_band_current = solution_history_band.get_current_solution();
+          NarrowBand::copy_cut_cell_values(dof_handler_band,
+                                           level_set_band_current,
+                                           dof_handler_cut,
+                                           level_set);
+        }
+      else if (cut_cells_changed)
         {
           const auto cut_cell_values =
             NarrowBand::extract_cell_values(dof_handler_band, level_set_band, is_cut_cell);
@@ -305,6 +389,16 @@ namespace MeltPoolDG::LevelSet
           }
 
         Journal::print_line(scratch_data.get_pcout(1), str.str(), "narrow_band");
+
+        // advected band: geometric redistancing of the layers after the reinitialization
+        if (do_reinitialize and is_advected_band())
+          redistance_layers();
+      }
+
+    if (is_advected_band())
+      {
+        print_band_statistics();
+        return;
       }
 
     // S2: extension to the neighbor cells
@@ -323,6 +417,36 @@ namespace MeltPoolDG::LevelSet
 
     level_set.zero_out_ghost_values();
     level_set.copy_locally_owned_data_from(reinit_operation->get_level_set());
+  }
+
+  template <int dim, typename number>
+  bool
+  NarrowBandLevelSetOperation<dim, number>::is_advected_band() const
+  {
+    return narrow_band_data.type == NarrowBandType::advected_layers;
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::redistance_layers()
+  {
+    ScopedName                 sc("narrow_band::redistance");
+    dealii::TimerOutput::Scope scope(scratch_data.get_timer(), sc);
+
+    VectorType &level_set_band = solution_history_band.get_current_solution();
+    level_set_band.zero_out_ghost_values();
+
+    // reinitialized level set of the cut cells
+    NarrowBand::copy_cut_cell_values(dof_handler_cut, level_set, dof_handler_band, level_set_band);
+
+    // all cells of the layers
+    std::vector<bool> is_layer_cell(dof_handler_band.get_triangulation().n_active_cells(), false);
+    for (const auto &cell : dof_handler_band.active_cell_iterators())
+      if (cell->is_locally_owned() and (cell->active_fe_index() == NarrowBand::neighbor or
+                                        cell->active_fe_index() == NarrowBand::outer))
+        is_layer_cell[cell->active_cell_index()] = true;
+
+    closest_point_extension.redistance(dof_handler_band, level_set_band, is_layer_cell, "layers");
   }
 
   template <int dim, typename number>
@@ -366,9 +490,15 @@ namespace MeltPoolDG::LevelSet
         str << " (" << n_small_cut_cells << " small)";
       }
 
-    str << ", " << std::setw(6)
-        << NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::neighbor)
-        << " neighbor cells, " << std::setw(8) << dof_handler_band.n_dofs() << " DoFs";
+    if (is_advected_band())
+      str << ", " << std::setw(6)
+          << NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::neighbor) +
+               NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::outer)
+          << " layer cells, " << std::setw(8) << dof_handler_band.n_dofs() << " DoFs";
+    else
+      str << ", " << std::setw(6)
+          << NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::neighbor)
+          << " neighbor cells, " << std::setw(8) << dof_handler_band.n_dofs() << " DoFs";
 
     Journal::print_line(scratch_data.get_pcout(1), str.str(), "narrow_band");
   }

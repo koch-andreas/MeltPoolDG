@@ -2,9 +2,13 @@
 #include <deal.II/base/mpi.h>
 #include <deal.II/base/quadrature_lib.h>
 
+#include <deal.II/distributed/tria_base.h>
+
 #include <deal.II/fe/fe_dgq.h>
 #include <deal.II/fe/fe_nothing.h>
 #include <deal.II/fe/fe_values.h>
+
+#include <deal.II/grid/grid_tools.h>
 
 #include <deal.II/hp/fe_values.h>
 #include <deal.II/hp/mapping_collection.h>
@@ -19,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace MeltPoolDG::LevelSet::NarrowBand
 {
@@ -41,6 +46,30 @@ namespace MeltPoolDG::LevelSet::NarrowBand
     fe_collection.push_back(dealii::FE_Nothing<dim>());      // inactive
     fe_collection.push_back(dealii::FE_DGQ<dim>(fe_degree)); // cut
     fe_collection.push_back(dealii::FE_Nothing<dim>());      // neighbor
+    return fe_collection;
+  }
+
+  template <int dim>
+  dealii::hp::FECollection<dim>
+  create_layered_band_fe_collection(const unsigned int fe_degree)
+  {
+    dealii::hp::FECollection<dim> fe_collection;
+    fe_collection.push_back(dealii::FE_Nothing<dim>());      // inactive
+    fe_collection.push_back(dealii::FE_DGQ<dim>(fe_degree)); // cut
+    fe_collection.push_back(dealii::FE_DGQ<dim>(fe_degree)); // first layer
+    fe_collection.push_back(dealii::FE_DGQ<dim>(fe_degree)); // outer layers
+    return fe_collection;
+  }
+
+  template <int dim>
+  dealii::hp::FECollection<dim>
+  create_layered_cut_fe_collection(const unsigned int fe_degree)
+  {
+    dealii::hp::FECollection<dim> fe_collection;
+    fe_collection.push_back(dealii::FE_Nothing<dim>());      // inactive
+    fe_collection.push_back(dealii::FE_DGQ<dim>(fe_degree)); // cut
+    fe_collection.push_back(dealii::FE_Nothing<dim>());      // first layer
+    fe_collection.push_back(dealii::FE_Nothing<dim>());      // outer layers
     return fe_collection;
   }
 
@@ -208,6 +237,104 @@ namespace MeltPoolDG::LevelSet::NarrowBand
     dof_handler_band.distribute_dofs(fe_collection_band);
   }
 
+  template <int dim>
+  std::vector<unsigned int>
+  compute_layers(const dealii::Triangulation<dim> &triangulation,
+                 const std::vector<bool>          &is_cut_cell,
+                 const unsigned int                n_layers)
+  {
+    AssertDimension(is_cut_cell.size(), triangulation.n_active_cells());
+
+    constexpr unsigned int    invalid = dealii::numbers::invalid_unsigned_int;
+    std::vector<unsigned int> layers(triangulation.n_active_cells(), invalid);
+
+    const bool is_parallel =
+      dynamic_cast<const dealii::parallel::TriangulationBase<dim> *>(&triangulation) != nullptr;
+
+    // communicate the layers of the locally owned cells to the ghost cells
+    const auto exchange = [&]() {
+      if (not is_parallel)
+        return;
+
+      dealii::GridTools::exchange_cell_data_to_ghosts<unsigned int, dealii::Triangulation<dim>>(
+        triangulation,
+        [&](const typename dealii::Triangulation<dim>::active_cell_iterator &cell)
+          -> std::optional<unsigned int> { return layers[cell->active_cell_index()]; },
+        [&](const typename dealii::Triangulation<dim>::active_cell_iterator &cell,
+            const unsigned int &layer) { layers[cell->active_cell_index()] = layer; });
+    };
+
+    // cells sharing a vertex (locally owned and ghost cells)
+    std::vector<std::vector<unsigned int>> vertex_to_cells(triangulation.n_vertices());
+    for (const auto &cell : triangulation.active_cell_iterators())
+      if (not cell->is_artificial())
+        for (const unsigned int v : cell->vertex_indices())
+          vertex_to_cells[cell->vertex_index(v)].push_back(cell->active_cell_index());
+
+    for (const auto &cell : triangulation.active_cell_iterators())
+      if (cell->is_locally_owned() and is_cut_cell[cell->active_cell_index()])
+        layers[cell->active_cell_index()] = 0;
+    exchange();
+
+    for (unsigned int layer = 1; layer <= n_layers; ++layer)
+      {
+        for (const auto &cell : triangulation.active_cell_iterators())
+          {
+            if (not cell->is_locally_owned() or layers[cell->active_cell_index()] != invalid)
+              continue;
+
+            bool is_in_layer = false;
+            for (const unsigned int v : cell->vertex_indices())
+              for (const unsigned int other : vertex_to_cells[cell->vertex_index(v)])
+                if (layers[other] == layer - 1)
+                  is_in_layer = true;
+
+            if (is_in_layer)
+              layers[cell->active_cell_index()] = layer;
+          }
+        exchange();
+      }
+
+    return layers;
+  }
+
+  template <int dim>
+  std::vector<unsigned int>
+  distribute_dofs_layered(const std::vector<bool>             &is_cut_cell,
+                          const unsigned int                   n_layers,
+                          dealii::DoFHandler<dim>             &dof_handler_cut,
+                          const dealii::hp::FECollection<dim> &fe_collection_cut,
+                          dealii::DoFHandler<dim>             &dof_handler_band,
+                          const dealii::hp::FECollection<dim> &fe_collection_band)
+  {
+    AssertThrow(n_layers >= 2,
+                dealii::ExcMessage("The advected band requires at least two layers."));
+    AssertThrow(fe_collection_cut.size() == 4 and fe_collection_band.size() == 4,
+                dealii::ExcMessage("The advected band requires the layered FE collections."));
+    AssertThrow(not dof_handler_cut.get_triangulation().has_hanging_nodes(),
+                dealii::ExcMessage("The narrow-band level set does not support hanging nodes."));
+
+    const std::vector<unsigned int> layers =
+      compute_layers(dof_handler_cut.get_triangulation(), is_cut_cell, n_layers);
+
+    for (auto *dof_handler : {&dof_handler_cut, &dof_handler_band})
+      for (const auto &cell : dof_handler->active_cell_iterators())
+        if (cell->is_locally_owned())
+          {
+            const unsigned int layer = layers[cell->active_cell_index()];
+            cell->set_active_fe_index(layer == dealii::numbers::invalid_unsigned_int ?
+                                        ActiveFEIndex::inactive :
+                                      layer == 0 ? ActiveFEIndex::cut :
+                                      layer == 1 ? ActiveFEIndex::neighbor :
+                                                   ActiveFEIndex::outer);
+          }
+
+    dof_handler_cut.distribute_dofs(fe_collection_cut);
+    dof_handler_band.distribute_dofs(fe_collection_band);
+
+    return layers;
+  }
+
   template <int dim, typename number>
   std::vector<dealii::Vector<number>>
   extract_cell_values(const dealii::DoFHandler<dim>                            &dof_handler,
@@ -279,6 +406,32 @@ namespace MeltPoolDG::LevelSet::NarrowBand
   }
 
   template <int dim, typename number>
+  void
+  copy_common_cell_values(const dealii::DoFHandler<dim>                            &dof_handler_src,
+                          const dealii::LinearAlgebra::distributed::Vector<number> &src,
+                          const dealii::DoFHandler<dim>                            &dof_handler_dst,
+                          dealii::LinearAlgebra::distributed::Vector<number>       &dst)
+  {
+    dealii::Vector<number> values;
+
+    for (const auto &cell : dof_handler_src.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+          continue;
+
+        const auto cell_dst = cell->as_dof_handler_iterator(dof_handler_dst);
+        if (cell_dst->get_fe().n_dofs_per_cell() == 0)
+          continue;
+
+        AssertDimension(cell->get_fe().n_dofs_per_cell(), cell_dst->get_fe().n_dofs_per_cell());
+
+        values.reinit(cell->get_fe().n_dofs_per_cell());
+        cell->get_dof_values(src, values);
+        cell_dst->set_dof_values(values, dst);
+      }
+  }
+
+  template <int dim, typename number>
   number
   compute_eikonal_error(const dealii::Mapping<dim>                               &mapping,
                         const dealii::DoFHandler<dim>                            &dof_handler,
@@ -305,7 +458,8 @@ namespace MeltPoolDG::LevelSet::NarrowBand
     number error = 0., volume = 0.;
     for (const auto &cell : dof_handler.active_cell_iterators())
       {
-        if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+        if (not cell->is_locally_owned() or cell->active_fe_index() != ActiveFEIndex::cut or
+            cell->get_fe().n_dofs_per_cell() == 0)
           continue;
 
         hp_fe_values.reinit(cell);
@@ -436,11 +590,30 @@ namespace MeltPoolDG::LevelSet::NarrowBand
 #define MPDG_INSTANTIATE_NARROW_BAND_UTILITIES(dim)                                                        \
   template dealii::hp::FECollection<dim> create_band_fe_collection<dim>(const unsigned int);               \
   template dealii::hp::FECollection<dim> create_cut_fe_collection<dim>(const unsigned int);                \
-  template std::vector<bool>             compute_cut_cells<dim, double>(                                   \
-    const dealii::DoFHandler<dim> &,                                                           \
-    const dealii::LinearAlgebra::distributed::Vector<double> &,                                \
-    const unsigned int,                                                                        \
-    std::vector<double> *);                                                                    \
+  template dealii::hp::FECollection<dim> create_layered_band_fe_collection<dim>(                           \
+    const unsigned int);                                                                                   \
+  template dealii::hp::FECollection<dim> create_layered_cut_fe_collection<dim>(                            \
+    const unsigned int);                                                                                   \
+  template std::vector<unsigned int> compute_layers<dim>(const dealii::Triangulation<dim> &,               \
+                                                         const std::vector<bool> &,                        \
+                                                         const unsigned int);                              \
+  template std::vector<unsigned int> distribute_dofs_layered<dim>(                                         \
+    const std::vector<bool> &,                                                                             \
+    const unsigned int,                                                                                    \
+    dealii::DoFHandler<dim> &,                                                                             \
+    const dealii::hp::FECollection<dim> &,                                                                 \
+    dealii::DoFHandler<dim> &,                                                                             \
+    const dealii::hp::FECollection<dim> &);                                                                \
+  template void copy_common_cell_values<dim, double>(                                                      \
+    const dealii::DoFHandler<dim> &,                                                                       \
+    const dealii::LinearAlgebra::distributed::Vector<double> &,                                            \
+    const dealii::DoFHandler<dim> &,                                                                       \
+    dealii::LinearAlgebra::distributed::Vector<double> &);                                                 \
+  template std::vector<bool> compute_cut_cells<dim, double>(                                               \
+    const dealii::DoFHandler<dim> &,                                                                       \
+    const dealii::LinearAlgebra::distributed::Vector<double> &,                                            \
+    const unsigned int,                                                                                    \
+    std::vector<double> *);                                                                                \
   template std::vector<double> compute_cut_cell_volume_fractions<dim, double>(                             \
     const dealii::DoFHandler<dim> &,                                                                       \
     const dealii::LinearAlgebra::distributed::Vector<double> &,                                            \

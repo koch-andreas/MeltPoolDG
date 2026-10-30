@@ -10,6 +10,9 @@
 
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 
+#include <string>
+#include <vector>
+
 namespace MeltPoolDG::LevelSet
 {
   /**
@@ -84,6 +87,30 @@ namespace MeltPoolDG::LevelSet
      */
     unsigned int
     extend(const dealii::DoFHandler<dim> &dof_handler, VectorType &level_set) const;
+
+    /**
+     * @brief Geometric redistancing of the flagged cells of the band: the level set at the nodes
+     * of each flagged locally owned cell, which is not cut, is set to the first-order Taylor
+     * expansion from the closest point on the discrete interface of all cut cells.
+     *
+     * In contrast to extend(), the closest point is searched globally: the cut cells of all
+     * processes are gathered and the candidates of the search are the cut cells of the nearest
+     * quadrature points of the interface. This allows to redistance cells, which are several
+     * cells away from the interface (e.g., the outer layers of the advected band).
+     *
+     * @param dof_handler Band DoFHandler.
+     * @param level_set Level-set vector of the band DoFHandler. The DoFs of the cut cells hold the
+     * given values.
+     * @param cell_flags Flags indexed by the active cell index of the cells to be redistanced.
+     * @param label Label of the printed statistics.
+     *
+     * @return Number of redistanced cells (summed over all processes).
+     */
+    unsigned int
+    redistance(const dealii::DoFHandler<dim> &dof_handler,
+               VectorType                    &level_set,
+               const std::vector<bool>       &cell_flags,
+               const std::string             &label) const;
 
   private:
     /// Parameters of the extension.

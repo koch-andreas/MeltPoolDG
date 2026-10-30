@@ -36,7 +36,8 @@ namespace MeltPoolDG::LevelSet
   NarrowBandAdvectionDGOperator<dim, number>::is_band_fe_index(const unsigned int active_fe_index)
   {
     return active_fe_index == NarrowBand::ActiveFEIndex::cut or
-           active_fe_index == NarrowBand::ActiveFEIndex::neighbor;
+           active_fe_index == NarrowBand::ActiveFEIndex::neighbor or
+           active_fe_index == NarrowBand::ActiveFEIndex::outer;
   }
 
   template <int dim, typename number>

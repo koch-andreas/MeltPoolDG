@@ -32,6 +32,22 @@ namespace MeltPoolDG::LevelSet
   {
     prm.enter_subsection("narrow band");
     {
+      prm.add_parameter(
+        "type",
+        type,
+        "Type of the narrow band. extension: the band consists of the cut cells and their face "
+        "neighbors; the level set of the neighbor cells is reconstructed by the extension from "
+        "the cut cells in every time step. advected_layers: the band consists of the cut cells "
+        "and several layers of vertex neighbors, which are advected together with the cut cells; "
+        "the level set of the layers is only reconstructed by geometric redistancing (closest "
+        "point on the discrete interface of the cut cells) for newly added cells and after the "
+        "elliptic reinitialization of the cut cells.");
+      prm.add_parameter("number of layers",
+                        n_layers,
+                        "Number of layers of vertex neighbors around the cut cells "
+                        "(advected_layers).",
+                        dealii::Patterns::Integer(2));
+
       prm.enter_subsection("extension");
       {
         prm.add_parameter(
@@ -124,7 +140,17 @@ namespace MeltPoolDG::LevelSet
   {
     AssertThrow(fe_degree >= 1, dealii::ExcMessage("The narrow-band level set requires p >= 1."));
 
-    if (extension.type == NarrowBandExtensionType::ghost_penalty)
+    if (type == NarrowBandType::advected_layers)
+      {
+        AssertThrow(n_layers >= 2,
+                    dealii::ExcMessage("The advected band requires at least two layers."));
+        AssertThrow(neighbor_activation_volume_fraction == 0.,
+                    dealii::ExcMessage("The neighbor activation volume fraction is not "
+                                       "supported by the advected band."));
+      }
+
+    if (type == NarrowBandType::extension and
+        extension.type == NarrowBandExtensionType::ghost_penalty)
       {
         AssertThrow(fe_degree <= 3,
                     dealii::ExcMessage(

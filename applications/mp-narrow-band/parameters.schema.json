@@ -99,6 +99,22 @@
     "narrow band": {
       "type": "object",
       "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "extension",
+            "advected_layers"
+          ],
+          "description": "Type of the narrow band. extension: the band consists of the cut cells and their face neighbors; the level set of the neighbor cells is reconstructed by the extension from the cut cells in every time step. advected_layers: the band consists of the cut cells and several layers of vertex neighbors, which are advected together with the cut cells; the level set of the layers is only reconstructed by geometric redistancing (closest point on the discrete interface of the cut cells) for newly added cells and after the elliptic reinitialization of the cut cells.",
+          "default": "extension"
+        },
+        "number of layers": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 2147483647,
+          "description": "Number of layers of vertex neighbors around the cut cells (advected_layers).",
+          "default": 2
+        },
         "extension": {
           "type": "object",
           "properties": {

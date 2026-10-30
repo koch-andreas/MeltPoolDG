@@ -110,103 +110,119 @@
         }
     },
     "narrow band": {
+        "type": {
+            "value": "extension",
+            "default_value": "extension",
+            "documentation": "Type of the narrow band. extension: the band consists of the cut cells and their face neighbors; the level set of the neighbor cells is reconstructed by the extension from the cut cells in every time step. advected_layers: the band consists of the cut cells and several layers of vertex neighbors, which are advected together with the cut cells; the level set of the layers is only reconstructed by geometric redistancing (closest point on the discrete interface of the cut cells) for newly added cells and after the elliptic reinitialization of the cut cells.",
+            "pattern": "13",
+            "pattern_description": "[Selection extension|advected_layers ]",
+            "actions": "13"
+        },
+        "number of layers": {
+            "value": "2",
+            "default_value": "2",
+            "documentation": "Number of layers of vertex neighbors around the cut cells (advected_layers).",
+            "pattern": "14",
+            "pattern_description": "[Integer range 2...2147483647 (inclusive)]",
+            "actions": "14"
+        },
         "extension": {
             "type": {
                 "value": "ghost_penalty",
                 "default_value": "ghost_penalty",
                 "documentation": "Type of the extension of the level-set field from the cut cells to the neighbor cells: global face-based ghost-penalty extension (ghost_penalty) or closest-point extension (closest_point), where the level set at the nodes of the neighbor cells is given by the first-order Taylor expansion phi(y) + grad phi(y) . (x - y) from the closest point y on the discrete interface of the cut cells.",
-                "pattern": "13",
+                "pattern": "15",
                 "pattern_description": "[Selection ghost_penalty|closest_point ]",
-                "actions": "13"
+                "actions": "15"
             },
             "ghost penalty parameters": {
                 "value": "100, 1",
                 "default_value": "100, 1",
                 "documentation": "Dimensionless ghost-penalty parameters gamma_k > 0 for the jumps of the k-th normal derivative (k = 0, ..., p) on the ghost-penalty faces, which are scaled by h^(2k+1). Specify comma-separated values starting with k = 0. If less than p+1 values are given, the last value is used for all remaining k.",
-                "pattern": "14",
+                "pattern": "16",
                 "pattern_description": "[List of <[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]> of length 0...4294967295 (inclusive)]",
-                "actions": "14"
+                "actions": "16"
             },
             "ghost penalty faces": {
                 "value": "all_band_faces",
                 "default_value": "all_band_faces",
                 "documentation": "Set of faces on which the ghost-penalty terms of the extension are evaluated (ghost-penalty extension).",
-                "pattern": "15",
+                "pattern": "17",
                 "pattern_description": "[Selection all_band_faces|cut_cell_faces ]",
-                "actions": "15"
+                "actions": "17"
             },
             "sign limiter tolerance": {
                 "value": "0.05",
                 "default_value": "0.05",
                 "documentation": "Tolerance of the sign limiter for the extended level-set field on the neighbor cells, relative to the cell size h. If the extended level set attains values of the opposite sign of its cell mean with a magnitude larger than tolerance * h in a neighbor cell, its deviation from the cell mean is scaled such that it does not change its sign. Neighbor cells do not contain the interface by definition; spurious zero crossings, e.g., due to the polynomial extrapolation near under-resolved interface tips, would otherwise create spurious cut cells. Set to a negative value to disable the limiter.",
-                "pattern": "16",
+                "pattern": "18",
                 "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                "actions": "16"
+                "actions": "18"
             },
             "minimum source volume fraction": {
                 "value": "0",
                 "default_value": "0",
                 "documentation": "Minimum volume fraction |K cap {phi > 0}| \/ |K| of the positive phase of a cut cell K, for which K serves as source of the extension. Ghost-penalty extension: the ghost-penalty faces between cut cells with a smaller volume fraction and neighbor cells are not evaluated, i.e., the neighbor cells are extended from the other cut cells via the faces to these cut cells and to other neighbor cells (if the ghost-penalty faces include all band faces). If a neighbor cell is not connected to a cut cell with a sufficient volume fraction, its faces to the small cut cells are kept. Closest-point extension: small cut cells are only considered in the closest-point search, if no other cut cells share a vertex with the neighbor cell. In contrast to 'neighbor activation volume fraction', all neighbor cells remain active. Set to 0 to use all cut cells as sources.",
-                "pattern": "17",
+                "pattern": "19",
                 "pattern_description": "[Double 0...1 (inclusive)]",
-                "actions": "17"
+                "actions": "19"
             },
             "linear solver": {
                 "solver type": {
                     "value": "CG",
                     "default_value": "CG",
                     "documentation": "Set this parameter for choosing an iterative linear solver type.",
-                    "pattern": "18",
+                    "pattern": "20",
                     "pattern_description": "[Selection CG|GMRES ]",
-                    "actions": "18"
+                    "actions": "20"
                 },
                 "preconditioner type": {
                     "value": "ILU",
                     "default_value": "ILU",
                     "documentation": "Set this parameter for choosing a preconditioner type.",
-                    "pattern": "19",
+                    "pattern": "21",
                     "pattern_description": "[Selection Identity|AMG|ILU|Diagonal ]",
-                    "actions": "19"
+                    "actions": "21"
                 },
                 "max iterations": {
                     "value": "1000",
                     "default_value": "1000",
                     "documentation": "Set the maximum number of iterations for solving the linear system of equations.",
-                    "pattern": "20",
+                    "pattern": "22",
                     "pattern_description": "[Integer]",
-                    "actions": "20"
+                    "actions": "22"
                 },
                 "rel tolerance": {
                     "value": "1e-12",
                     "default_value": "1e-12",
                     "documentation": "Set the relative tolerance for a successful solution of the linear system of equations.",
-                    "pattern": "21",
+                    "pattern": "23",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "21"
+                    "actions": "23"
                 },
                 "abs tolerance": {
                     "value": "1e-20",
                     "default_value": "1e-20",
                     "documentation": "Set the absolute tolerance for a successful solution of the linear system of equations.",
-                    "pattern": "22",
+                    "pattern": "24",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "22"
+                    "actions": "24"
                 },
                 "do matrix free": {
                     "value": "false",
                     "default_value": "false",
                     "documentation": "Set this parameter if a matrix free solution procedure should be performed.",
-                    "pattern": "23",
+                    "pattern": "25",
                     "pattern_description": "[Bool]",
-                    "actions": "23"
+                    "actions": "25"
                 },
                 "monitor type": {
                     "value": "none",
                     "default_value": "none",
                     "documentation": "Set the monitor type of the linear solver.",
-                    "pattern": "24",
+                    "pattern": "26",
                     "pattern_description": "[Selection none|reduced|all ]",
-                    "actions": "24"
+                    "actions": "26"
                 }
             }
         },
@@ -216,98 +232,98 @@
                     "value": "SSP_RK_stage_3_order_3",
                     "default_value": "SSP_RK_stage_3_order_3",
                     "documentation": "Name of the time integration scheme.",
-                    "pattern": "25",
+                    "pattern": "27",
                     "pattern_description": "[Selection not_initialized|LSRK_stage_1_order_1|LSRK_stage_3_order_3|LSRK_stage_5_order_4|LSRK_stage_7_order_4|LSRK_stage_9_order_5|RKC_n_stages|SSP_RK_stage_1_order_1|SSP_RK_stage_2_order_2|SSP_RK_stage_3_order_3|implicit_euler|explicit_euler|crank_nicolson|bdf_1|bdf_2|bdf_3|bdf_4|bdf_5|bdf_6|imex ]",
-                    "actions": "25"
+                    "actions": "27"
                 },
                 "preconditioner update frequency": {
                     "value": "100",
                     "default_value": "100",
                     "documentation": "Frequency at which the preconditioner gets updated.",
-                    "pattern": "26",
+                    "pattern": "28",
                     "pattern_description": "[Integer]",
-                    "actions": "26"
+                    "actions": "28"
                 },
                 "RKC n stages": {
                     "value": "5",
                     "default_value": "5",
                     "documentation": "Number of stages for the RKC scheme.",
-                    "pattern": "27",
+                    "pattern": "29",
                     "pattern_description": "[Integer]",
-                    "actions": "27"
+                    "actions": "29"
                 },
                 "epsilon": {
                     "value": "0.153846",
                     "default_value": "0.153846",
                     "documentation": "Damping parameter for the RKC scheme.",
-                    "pattern": "28",
+                    "pattern": "30",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "28"
+                    "actions": "30"
                 },
                 "nlsolve": {
                     "max nonlinear iterations": {
                         "value": "10",
                         "default_value": "10",
                         "documentation": "Set the number of maximum nonlinear iterations with standard tolerances.",
-                        "pattern": "29",
+                        "pattern": "31",
                         "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                        "actions": "29"
+                        "actions": "31"
                     },
                     "field correction tolerance": {
                         "value": "1e-10",
                         "default_value": "1e-10",
                         "documentation": "Set the tolerance for the maximum allowed correction of the unknown field.",
-                        "pattern": "30",
+                        "pattern": "32",
                         "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                        "actions": "30"
+                        "actions": "32"
                     },
                     "residual tolerance": {
                         "value": "1e-09",
                         "default_value": "1e-09",
                         "documentation": "Set the tolerance for the maximum allowed residual of the nonlinear system.",
-                        "pattern": "31",
+                        "pattern": "33",
                         "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                        "actions": "31"
+                        "actions": "33"
                     },
                     "max nonlinear iterations alt": {
                         "value": "0",
                         "default_value": "0",
                         "documentation": "Set the number of maximum nonlinear iterations with alternative tolerances.",
-                        "pattern": "32",
+                        "pattern": "34",
                         "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                        "actions": "32"
+                        "actions": "34"
                     },
                     "field correction tolerance alt": {
                         "value": "1e-09",
                         "default_value": "1e-09",
                         "documentation": "Set the alternative tolerance for the maximum allowed correction of the unknown field.",
-                        "pattern": "33",
+                        "pattern": "35",
                         "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                        "actions": "33"
+                        "actions": "35"
                     },
                     "residual tolerance alt": {
                         "value": "1e-08",
                         "default_value": "1e-08",
                         "documentation": "Set the alternative tolerance for the maximum allowed residual of the nonlinear system.",
-                        "pattern": "34",
+                        "pattern": "36",
                         "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                        "actions": "34"
+                        "actions": "36"
                     },
                     "use relative tolerances": {
                         "value": "false",
                         "default_value": "false",
                         "documentation": "Set to true to interpret the residual tolerances relative to the norm of the initial residual and the field correction tolerances relative to the norm of the current solution. If the respective reference norm is zero, the tolerance is applied as an absolute value.",
-                        "pattern": "35",
+                        "pattern": "37",
                         "pattern_description": "[Bool]",
-                        "actions": "35"
+                        "actions": "37"
                     },
                     "verbosity level": {
                         "value": "-1",
                         "default_value": "-1",
                         "documentation": "Set to one for detailed solver output.",
-                        "pattern": "36",
+                        "pattern": "38",
                         "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                        "actions": "36"
+                        "actions": "38"
                     }
                 },
                 "linear solver": {
@@ -315,57 +331,57 @@
                         "value": "GMRES",
                         "default_value": "GMRES",
                         "documentation": "Set this parameter for choosing an iterative linear solver type.",
-                        "pattern": "37",
+                        "pattern": "39",
                         "pattern_description": "[Selection CG|GMRES ]",
-                        "actions": "37"
+                        "actions": "39"
                     },
                     "preconditioner type": {
                         "value": "Identity",
                         "default_value": "Identity",
                         "documentation": "Set this parameter for choosing a preconditioner type.",
-                        "pattern": "38",
+                        "pattern": "40",
                         "pattern_description": "[Selection Identity|AMG|ILU|Diagonal ]",
-                        "actions": "38"
+                        "actions": "40"
                     },
                     "max iterations": {
                         "value": "10000",
                         "default_value": "10000",
                         "documentation": "Set the maximum number of iterations for solving the linear system of equations.",
-                        "pattern": "39",
+                        "pattern": "41",
                         "pattern_description": "[Integer]",
-                        "actions": "39"
+                        "actions": "41"
                     },
                     "rel tolerance": {
                         "value": "1e-12",
                         "default_value": "1e-12",
                         "documentation": "Set the relative tolerance for a successful solution of the linear system of equations.",
-                        "pattern": "40",
+                        "pattern": "42",
                         "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                        "actions": "40"
+                        "actions": "42"
                     },
                     "abs tolerance": {
                         "value": "1e-20",
                         "default_value": "1e-20",
                         "documentation": "Set the absolute tolerance for a successful solution of the linear system of equations.",
-                        "pattern": "41",
+                        "pattern": "43",
                         "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                        "actions": "41"
+                        "actions": "43"
                     },
                     "do matrix free": {
                         "value": "true",
                         "default_value": "true",
                         "documentation": "Set this parameter if a matrix free solution procedure should be performed.",
-                        "pattern": "42",
+                        "pattern": "44",
                         "pattern_description": "[Bool]",
-                        "actions": "42"
+                        "actions": "44"
                     },
                     "monitor type": {
                         "value": "none",
                         "default_value": "none",
                         "documentation": "Set the monitor type of the linear solver.",
-                        "pattern": "43",
+                        "pattern": "45",
                         "pattern_description": "[Selection none|reduced|all ]",
-                        "actions": "43"
+                        "actions": "45"
                     }
                 }
             }
@@ -374,33 +390,33 @@
             "value": "0",
             "default_value": "0",
             "documentation": "Minimum volume fraction |K cap {phi > 0}| \/ |K| of the positive phase of a cut cell K, for which its face neighbors are activated as neighbor cells of the narrow band (and filled by the extension). Face neighbors of cut cells with a smaller volume fraction remain inactive (FE_Nothing), unless they are face neighbors of another cut cell with a sufficient volume fraction. Set to 0 to activate all face neighbors of the cut cells.",
-            "pattern": "44",
+            "pattern": "46",
             "pattern_description": "[Double 0...1 (inclusive)]",
-            "actions": "44"
+            "actions": "46"
         },
         "reinitialization faces": {
             "value": "cut_cell_faces",
             "default_value": "cut_cell_faces",
             "documentation": "Set of faces on which the SIPG terms of the elliptic reinitialization on the cut cells are evaluated: all faces between two cut cells (cut_cell_faces) or only the faces between two cut cells, which are crossed by the interface (interface_faces). In the latter case, the cut cells are only coupled across the faces crossed by the interface.",
-            "pattern": "45",
+            "pattern": "47",
             "pattern_description": "[Selection cut_cell_faces|interface_faces ]",
-            "actions": "45"
+            "actions": "47"
         },
         "reinitialization frequency": {
             "value": "1",
             "default_value": "1",
             "documentation": "Reinitialize the level-set field on the cut cells every n-th time step. Set to 0 to disable the frequency-based reinitialization.",
-            "pattern": "46",
+            "pattern": "48",
             "pattern_description": "[Integer]",
-            "actions": "46"
+            "actions": "48"
         },
         "reinitialization eikonal threshold": {
             "value": "0",
             "default_value": "0",
             "documentation": "Reinitialize the level-set field on the cut cells, if the eikonal error sqrt(int (|grad phi| - 1)^2 dx \/ V) on the cut cells exceeds this value. Set to 0 to disable the error-based reinitialization.",
-            "pattern": "47",
+            "pattern": "49",
             "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
-            "actions": "47"
+            "actions": "49"
         }
     },
     "reinitialization": {
@@ -409,17 +425,17 @@
                 "value": "not_initialized",
                 "default_value": "not_initialized",
                 "documentation": "Finite Element.FE_Q: hexahedral continuous finite element with polynomial degree p; FE_SimplexP: tetrahedral continuous finite element with polynomial degree p; FE_Q_iso_Q1: hexahedral continuous finite element with p subdivisions containing linear elements; FE_DGQ: hexahedral discontinuous finite element with polynomial degree p",
-                "pattern": "48",
+                "pattern": "50",
                 "pattern_description": "[Selection not_initialized|FE_Q|FE_SimplexP|FE_Q_iso_Q1|FE_DGQ ]",
-                "actions": "48"
+                "actions": "50"
             },
             "degree": {
                 "value": "-1",
                 "default_value": "-1",
                 "documentation": "Defines the degree p of the finite element type. If \"type\" is \"FE_Q_iso_Q1\" this parameter defines the number of subdivisions.",
-                "pattern": "49",
+                "pattern": "51",
                 "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                "actions": "49"
+                "actions": "51"
             }
         },
         "predictor": {
@@ -427,17 +443,17 @@
                 "value": "none",
                 "default_value": "none",
                 "documentation": "Choose a predictor type: none: use old value as initial guess; zero: se zeros as initial guess; linear_extrapolation: calculate the predictor by a linear combination from the two old solution vectors; least_squares_projection: least squares projection (WIP)",
-                "pattern": "50",
+                "pattern": "52",
                 "pattern_description": "[Selection none|zero|linear_extrapolation|least_squares_projection ]",
-                "actions": "50"
+                "actions": "52"
             },
             "n old solutions": {
                 "value": "2",
                 "default_value": "2",
                 "documentation": "Choose the number of old solution vectors considered.This parameter is only relevant for least squares projection.For all other predictors, this parameter will be set appropriately.",
-                "pattern": "51",
+                "pattern": "53",
                 "pattern_description": "[Integer]",
-                "actions": "51"
+                "actions": "53"
             }
         },
         "linear solver": {
@@ -445,91 +461,91 @@
                 "value": "CG",
                 "default_value": "CG",
                 "documentation": "Set this parameter for choosing an iterative linear solver type.",
-                "pattern": "52",
+                "pattern": "54",
                 "pattern_description": "[Selection CG|GMRES ]",
-                "actions": "52"
+                "actions": "54"
             },
             "preconditioner type": {
                 "value": "Diagonal",
                 "default_value": "Diagonal",
                 "documentation": "Set this parameter for choosing a preconditioner type.",
-                "pattern": "53",
+                "pattern": "55",
                 "pattern_description": "[Selection Identity|AMG|ILU|Diagonal ]",
-                "actions": "53"
+                "actions": "55"
             },
             "max iterations": {
                 "value": "10000",
                 "default_value": "10000",
                 "documentation": "Set the maximum number of iterations for solving the linear system of equations.",
-                "pattern": "54",
+                "pattern": "56",
                 "pattern_description": "[Integer]",
-                "actions": "54"
+                "actions": "56"
             },
             "rel tolerance": {
                 "value": "1e-12",
                 "default_value": "1e-12",
                 "documentation": "Set the relative tolerance for a successful solution of the linear system of equations.",
-                "pattern": "55",
+                "pattern": "57",
                 "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                "actions": "55"
+                "actions": "57"
             },
             "abs tolerance": {
                 "value": "1e-20",
                 "default_value": "1e-20",
                 "documentation": "Set the absolute tolerance for a successful solution of the linear system of equations.",
-                "pattern": "56",
+                "pattern": "58",
                 "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                "actions": "56"
+                "actions": "58"
             },
             "do matrix free": {
                 "value": "true",
                 "default_value": "true",
                 "documentation": "Set this parameter if a matrix free solution procedure should be performed.",
-                "pattern": "57",
+                "pattern": "59",
                 "pattern_description": "[Bool]",
-                "actions": "57"
+                "actions": "59"
             },
             "monitor type": {
                 "value": "none",
                 "default_value": "none",
                 "documentation": "Set the monitor type of the linear solver.",
-                "pattern": "58",
+                "pattern": "60",
                 "pattern_description": "[Selection none|reduced|all ]",
-                "actions": "58"
+                "actions": "60"
             }
         },
         "enable": {
             "value": "true",
             "default_value": "true",
             "documentation": "Set to true to activate reinitialization.",
-            "pattern": "59",
+            "pattern": "61",
             "pattern_description": "[Bool]",
-            "actions": "59"
+            "actions": "61"
         },
         "type": {
             "value": "olsson2007",
             "default_value": "olsson2007",
             "documentation": "Sets the type of reinitialization model that should be used.",
-            "pattern": "60",
+            "pattern": "62",
             "pattern_description": "[Selection olsson2007|elliptic|geometric ]",
-            "actions": "60"
+            "actions": "62"
         },
         "interface thickness parameter": {
             "type": {
                 "value": "proportional_to_cell_size",
                 "default_value": "proportional_to_cell_size",
                 "documentation": "Choose the value type of the interface thickness parameter.",
-                "pattern": "61",
+                "pattern": "63",
                 "pattern_description": "[Selection proportional_to_cell_size|absolute_value|number_of_cells_across_interface ]",
-                "actions": "61"
+                "actions": "63"
             },
             "val": {
                 "value": "0.5",
                 "default_value": "0.5",
                 "documentation": "Defines the value of the chosen interface thickness parameter type.",
-                "pattern": "62",
+                "pattern": "64",
                 "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                "actions": "62"
+                "actions": "64"
             }
         },
         "elliptic": {
@@ -537,98 +553,98 @@
                 "value": "0",
                 "default_value": "0",
                 "documentation": "Penalty parameter for the enforcement of the initial position of the zero level-set iso-surface during the elliptic reinitialization.",
-                "pattern": "63",
+                "pattern": "65",
                 "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
-                "actions": "63"
+                "actions": "65"
             },
             "nonlinear solver type": {
                 "value": "fixed point",
                 "default_value": "fixed point",
                 "documentation": "Sets the nonlinear solver used for elliptic reinitialization.",
-                "pattern": "64",
+                "pattern": "66",
                 "pattern_description": "[Selection newton|fixed point ]",
-                "actions": "64"
+                "actions": "66"
             },
             "interior penalty scaling factor": {
                 "value": "10",
                 "default_value": "10",
                 "documentation": "Scaling factor for the interior penalty term in the elliptic reinitialization operator.",
-                "pattern": "65",
+                "pattern": "67",
                 "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
-                "actions": "65"
+                "actions": "67"
             },
             "intersected cells only": {
                 "value": "false",
                 "default_value": "false",
                 "documentation": "If true, the level-set field is only defined on the cells intersected by the zero level-set iso-surface (FE_DGQ on intersected cells, FE_Nothing elsewhere) and the elliptic reinitialization is solved on these cells only. Requires FE_DGQ elements and the fixed point solver.",
-                "pattern": "66",
+                "pattern": "68",
                 "pattern_description": "[Bool]",
-                "actions": "66"
+                "actions": "68"
             },
             "nlsolve": {
                 "max nonlinear iterations": {
                     "value": "5",
                     "default_value": "5",
                     "documentation": "Set the number of maximum nonlinear iterations with standard tolerances.",
-                    "pattern": "67",
+                    "pattern": "69",
                     "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                    "actions": "67"
+                    "actions": "69"
                 },
                 "field correction tolerance": {
                     "value": "2.22507e-308",
                     "default_value": "2.22507e-308",
                     "documentation": "Set the tolerance for the maximum allowed correction of the unknown field.",
-                    "pattern": "68",
+                    "pattern": "70",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "68"
+                    "actions": "70"
                 },
                 "residual tolerance": {
                     "value": "2.22507e-308",
                     "default_value": "2.22507e-308",
                     "documentation": "Set the tolerance for the maximum allowed residual of the nonlinear system.",
-                    "pattern": "69",
+                    "pattern": "71",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "69"
+                    "actions": "71"
                 },
                 "max nonlinear iterations alt": {
                     "value": "0",
                     "default_value": "0",
                     "documentation": "Set the number of maximum nonlinear iterations with alternative tolerances.",
-                    "pattern": "70",
+                    "pattern": "72",
                     "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                    "actions": "70"
+                    "actions": "72"
                 },
                 "field correction tolerance alt": {
                     "value": "2.22507e-308",
                     "default_value": "2.22507e-308",
                     "documentation": "Set the alternative tolerance for the maximum allowed correction of the unknown field.",
-                    "pattern": "71",
+                    "pattern": "73",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "71"
+                    "actions": "73"
                 },
                 "residual tolerance alt": {
                     "value": "2.22507e-308",
                     "default_value": "2.22507e-308",
                     "documentation": "Set the alternative tolerance for the maximum allowed residual of the nonlinear system.",
-                    "pattern": "72",
+                    "pattern": "74",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "72"
+                    "actions": "74"
                 },
                 "use relative tolerances": {
                     "value": "false",
                     "default_value": "false",
                     "documentation": "Set to true to interpret the residual tolerances relative to the norm of the initial residual and the field correction tolerances relative to the norm of the current solution. If the respective reference norm is zero, the tolerance is applied as an absolute value.",
-                    "pattern": "73",
+                    "pattern": "75",
                     "pattern_description": "[Bool]",
-                    "actions": "73"
+                    "actions": "75"
                 },
                 "verbosity level": {
                     "value": "1",
                     "default_value": "1",
                     "documentation": "Set to one for detailed solver output.",
-                    "pattern": "74",
+                    "pattern": "76",
                     "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                    "actions": "74"
+                    "actions": "76"
                 }
             }
         },
@@ -637,17 +653,17 @@
                 "value": "0",
                 "default_value": "0",
                 "documentation": "Choose the verbosity level. 0 means silent, 1 means verbose.",
-                "pattern": "75",
+                "pattern": "77",
                 "pattern_description": "[Integer]",
-                "actions": "75"
+                "actions": "77"
             },
             "max distance": {
                 "value": "1.61792e+308",
                 "default_value": "1.61792e+308",
                 "documentation": "Maximum distance from the zero-level-set where the signeddistance function is reconstructed.",
-                "pattern": "76",
+                "pattern": "78",
                 "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
-                "actions": "76"
+                "actions": "78"
             }
         },
         "hyperbolic": {
@@ -656,41 +672,41 @@
                     "value": "-1",
                     "default_value": "-1",
                     "documentation": "Defines the number of initial reinitialization steps of the level set function. In the default case, the number is set equal to the number of max n steps.",
-                    "pattern": "77",
+                    "pattern": "79",
                     "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                    "actions": "77"
+                    "actions": "79"
                 },
                 "pseudo time step size": {
                     "value": "-1",
                     "default_value": "-1",
                     "documentation": "Sets the reinitialization time step size. By default, it is computed from the cell size.",
-                    "pattern": "78",
+                    "pattern": "80",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "78"
+                    "actions": "80"
                 },
                 "pseudo time step factor": {
                     "value": "1",
                     "default_value": "1",
                     "documentation": "Factor on the reinitialization time step size that is computed from the cell size.",
-                    "pattern": "79",
+                    "pattern": "81",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "79"
+                    "actions": "81"
                 },
                 "max n steps": {
                     "value": "5",
                     "default_value": "5",
                     "documentation": "Sets the maximum number of reinitialization steps.",
-                    "pattern": "80",
+                    "pattern": "82",
                     "pattern_description": "[Integer]",
-                    "actions": "80"
+                    "actions": "82"
                 },
                 "tolerance": {
                     "value": "2.22507e-308",
                     "default_value": "2.22507e-308",
                     "documentation": "Set the tolerance for reinitialization. If the maximum change of the level set field exceeds the tolerance, reinitialization steps will be performed.",
-                    "pattern": "81",
+                    "pattern": "83",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "81"
+                    "actions": "83"
                 }
             },
             "Continuous Galerkin": {
@@ -698,33 +714,33 @@
                     "value": "meltpooldg",
                     "default_value": "meltpooldg",
                     "documentation": "Choose the corresponding implementation of the reinitialization operation.",
-                    "pattern": "82",
+                    "pattern": "84",
                     "pattern_description": "[Selection meltpooldg|adaflo ]",
-                    "actions": "82"
+                    "actions": "84"
                 },
                 "tangential diffusion factor": {
                     "value": "0",
                     "default_value": "0",
                     "documentation": "Factor that multiplies the normal diffusion factor, i.e., the diffusion length, to obtain the diffusion factor in the tangential direction.",
-                    "pattern": "83",
+                    "pattern": "85",
                     "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
-                    "actions": "83"
+                    "actions": "85"
                 },
                 "interface constraint type": {
                     "value": "none",
                     "default_value": "none",
                     "documentation": "Technique to enforce the initial position of the zero level-set iso-surface during the reinitialization. none: no enforcement. surface_penalty: penalty term integrated over the interface, scaled by the interface penalty parameter. dirichlet: the DoFs of all cells intersected by the interface are fixed by Dirichlet constraints.",
-                    "pattern": "84",
+                    "pattern": "86",
                     "pattern_description": "[Selection none|surface_penalty|dirichlet ]",
-                    "actions": "84"
+                    "actions": "86"
                 },
                 "interface penalty parameter": {
                     "value": "0",
                     "default_value": "0",
                     "documentation": "Dimensionless penalty factor for the weak enforcement of the initial position of the zero level-set iso-surface during the reinitialization. It is scaled by h\/dtau, with the cell size h and the pseudo-time step dtau, to obtain the penalty coefficient. Only used for the interface constraint type surface_penalty.",
-                    "pattern": "85",
+                    "pattern": "87",
                     "pattern_description": "[Double 0...MAX_DOUBLE (inclusive)]",
-                    "actions": "85"
+                    "actions": "87"
                 }
             },
             "Discontinuous Galerkin": {
@@ -732,113 +748,113 @@
                     "value": "0.25",
                     "default_value": "0.25",
                     "documentation": "Set the factor for diffusivity.",
-                    "pattern": "86",
+                    "pattern": "88",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "86"
+                    "actions": "88"
                 },
                 "IP diffusion": {
                     "value": "100",
                     "default_value": "100",
                     "documentation": "Set the internal penalty for diffusivity.",
-                    "pattern": "87",
+                    "pattern": "89",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "87"
+                    "actions": "89"
                 },
                 "use const gradient in RI": {
                     "value": "false",
                     "default_value": "false",
                     "documentation": "Set if the Godunov gradient should be updated every reinitialization step.",
-                    "pattern": "88",
+                    "pattern": "90",
                     "pattern_description": "[Bool]",
-                    "actions": "88"
+                    "actions": "90"
                 },
                 "do CFL based time stepping": {
                     "value": "false",
                     "default_value": "false",
                     "documentation": "Sets a flag if the time stepping should be based on the CFL condition.",
-                    "pattern": "89",
+                    "pattern": "91",
                     "pattern_description": "[Bool]",
-                    "actions": "89"
+                    "actions": "91"
                 },
                 "time integration scheme": {
                     "value": "LSRK_stage_5_order_4",
                     "default_value": "LSRK_stage_5_order_4",
                     "documentation": "Determines the general time integration scheme for the pseudo-time integration of the reinitialization equation.",
-                    "pattern": "90",
+                    "pattern": "92",
                     "pattern_description": "[Selection not_initialized|LSRK_stage_1_order_1|LSRK_stage_3_order_3|LSRK_stage_5_order_4|LSRK_stage_7_order_4|LSRK_stage_9_order_5|RKC_n_stages|SSP_RK_stage_1_order_1|SSP_RK_stage_2_order_2|SSP_RK_stage_3_order_3|implicit_euler|explicit_euler|crank_nicolson|bdf_1|bdf_2|bdf_3|bdf_4|bdf_5|bdf_6|imex ]",
-                    "actions": "90"
+                    "actions": "92"
                 },
                 "IMEX integration scheme": {
                     "value": "not_initialized",
                     "default_value": "not_initialized",
                     "documentation": "If an IMEX integration scheme is specified, the integration in pseudo time of the reinitialization is done with an implicit-explicit scheme. This means that the diffusion part is treated with the IMEX integration scheme and the Hamiltonian is treated with the general time integration scheme. When choosing an implicit scheme with A-stability, larger time steps can be chosen, only limited by the stability of the Hamiltonian part. This is done since the diffusion part is the most restrictive part for explicit time integration schemes. If a scheme is set, the time step calculation based on a CFL number assumes an A-stable scheme and only calculates the time step based on the Hamiltonian.",
-                    "pattern": "91",
+                    "pattern": "93",
                     "pattern_description": "[Selection not_initialized|LSRK_stage_1_order_1|LSRK_stage_3_order_3|LSRK_stage_5_order_4|LSRK_stage_7_order_4|LSRK_stage_9_order_5|RKC_n_stages|SSP_RK_stage_1_order_1|SSP_RK_stage_2_order_2|SSP_RK_stage_3_order_3|implicit_euler|explicit_euler|crank_nicolson|bdf_1|bdf_2|bdf_3|bdf_4|bdf_5|bdf_6|imex ]",
-                    "actions": "91"
+                    "actions": "93"
                 },
                 "CFL": {
                     "value": "1",
                     "default_value": "1",
                     "documentation": "Set a CFL number for the pseudo-time stepping in reinitialization.",
-                    "pattern": "92",
+                    "pattern": "94",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "92"
+                    "actions": "94"
                 },
                 "avoid zero division smoothed signum": {
                     "value": "1e-16",
                     "default_value": "1e-16",
                     "documentation": "Sets a constant to avoid zero division in the computation of the smoothed signum.",
-                    "pattern": "93",
+                    "pattern": "95",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "93"
+                    "actions": "95"
                 },
                 "signum smoothness paramater": {
                     "value": "2",
                     "default_value": "2",
                     "documentation": "Sets the smoothness parameter for the smoothed signum.",
-                    "pattern": "94",
+                    "pattern": "96",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "94"
+                    "actions": "96"
                 },
                 "use directed diffusion stabilization": {
                     "value": "false",
                     "default_value": "false",
                     "documentation": "Sets a flag if directed diffusion stabilization should be used for reinitialization.",
-                    "pattern": "95",
+                    "pattern": "97",
                     "pattern_description": "[Bool]",
-                    "actions": "95"
+                    "actions": "97"
                 },
                 "hyperbolic weighting function_type": {
                     "value": "smoothed_signum",
                     "default_value": "smoothed_signum",
                     "documentation": "Sets the type of weighting function for the hyperbolic part of the reinitialization equation.",
-                    "pattern": "96",
+                    "pattern": "98",
                     "pattern_description": "[Selection smoothed_signum|initial_levelset ]",
-                    "actions": "96"
+                    "actions": "98"
                 },
                 "use spatially constant diffusion": {
                     "value": "true",
                     "default_value": "true",
                     "documentation": "Sets a flag if a spatially constant diffusion should be used for reinitialization.",
-                    "pattern": "97",
+                    "pattern": "99",
                     "pattern_description": "[Bool]",
-                    "actions": "97"
+                    "actions": "99"
                 },
                 "use interface movement penalization": {
                     "value": "false",
                     "default_value": "false",
                     "documentation": "Sets a flag if a penalization of the interface movement should be used.",
-                    "pattern": "98",
+                    "pattern": "100",
                     "pattern_description": "[Bool]",
-                    "actions": "98"
+                    "actions": "100"
                 },
                 "gradient error time derivative threshold": {
                     "value": "1e-16",
                     "default_value": "1e-16",
                     "documentation": "Sets the threshold in the time derivative when a reinitialization procedure reaches a stationary point.",
-                    "pattern": "99",
+                    "pattern": "101",
                     "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-                    "actions": "99"
+                    "actions": "101"
                 }
             }
         }
@@ -848,114 +864,114 @@
             "value": ".\/",
             "default_value": ".\/",
             "documentation": "Sets the base directory for all output.",
-            "pattern": "100",
+            "pattern": "102",
             "pattern_description": "[Anything]",
-            "actions": "100"
+            "actions": "102"
         },
         "write frequency": {
             "value": "1",
             "default_value": "1",
             "documentation": "Every n timestep that should be written",
-            "pattern": "101",
+            "pattern": "103",
             "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-            "actions": "101"
+            "actions": "103"
         },
         "write time step size": {
             "value": "1.79769e+308",
             "default_value": "1.79769e+308",
             "documentation": "Write output output every given time step. If this parameter is set, the output write frequency is deactivated.",
-            "pattern": "102",
+            "pattern": "104",
             "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-            "actions": "102"
+            "actions": "104"
         },
         "output variables": {
             "value": "all",
             "default_value": "all",
             "documentation": "Specify variables that you request to output.",
-            "pattern": "103",
+            "pattern": "105",
             "pattern_description": "[List of <[Anything]> of length 0...4294967295 (inclusive)]",
-            "actions": "103"
+            "actions": "105"
         },
         "do user defined postprocessing": {
             "value": "false",
             "default_value": "false",
             "documentation": "Set this parameter to true to enable user defined postprocessing.",
-            "pattern": "104",
+            "pattern": "106",
             "pattern_description": "[Bool]",
-            "actions": "104"
+            "actions": "106"
         },
         "paraview": {
             "enable": {
                 "value": "false",
                 "default_value": "false",
                 "documentation": "Set this parameter to true to activate paraview output.",
-                "pattern": "105",
+                "pattern": "107",
                 "pattern_description": "[Bool]",
-                "actions": "105"
+                "actions": "107"
             },
             "filename": {
                 "value": "solution",
                 "default_value": "solution",
                 "documentation": "Sets the base name for paraview output files.",
-                "pattern": "106",
+                "pattern": "108",
                 "pattern_description": "[Anything]",
-                "actions": "106"
+                "actions": "108"
             },
             "n digits timestep": {
                 "value": "4",
                 "default_value": "4",
                 "documentation": "Number of digits for the frame number of the vtu-file.",
-                "pattern": "107",
+                "pattern": "109",
                 "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                "actions": "107"
+                "actions": "109"
             },
             "print boundary id": {
                 "value": "false",
                 "default_value": "false",
                 "documentation": "Set this parameter to true to output a vtu-file with the boundary id.",
-                "pattern": "108",
+                "pattern": "110",
                 "pattern_description": "[Bool]",
-                "actions": "108"
+                "actions": "110"
             },
             "output subdomains": {
                 "value": "false",
                 "default_value": "false",
                 "documentation": "Set this parameter to true to output the subdomain ranks.",
-                "pattern": "109",
+                "pattern": "111",
                 "pattern_description": "[Bool]",
-                "actions": "109"
+                "actions": "111"
             },
             "output material id": {
                 "value": "false",
                 "default_value": "false",
                 "documentation": "Set to true to output the material id.",
-                "pattern": "110",
+                "pattern": "112",
                 "pattern_description": "[Bool]",
-                "actions": "110"
+                "actions": "112"
             },
             "write higher order cells": {
                 "value": "true",
                 "default_value": "true",
                 "documentation": "Set this parameter to false to write bi- or trilinear data only. Set this parameter to true to write higher order cell data. Note: higher order cell data can only be written for hexahedron meshes and 2 or 3 dimensions.",
-                "pattern": "111",
+                "pattern": "113",
                 "pattern_description": "[Bool]",
-                "actions": "111"
+                "actions": "113"
             },
             "n groups": {
                 "value": "1",
                 "default_value": "1",
                 "documentation": "Number of parallel written vtu-files.",
-                "pattern": "112",
+                "pattern": "114",
                 "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                "actions": "112"
+                "actions": "114"
             },
             "n patches": {
                 "value": "0",
                 "default_value": "0",
                 "documentation": "Control number of patches to enable high-order.",
-                "pattern": "113",
+                "pattern": "115",
                 "pattern_description": "[Integer range -2147483648...2147483647 (inclusive)]",
-                "actions": "113"
+                "actions": "115"
             }
         },
         "particles": {
@@ -963,17 +979,17 @@
                 "value": "false",
                 "default_value": "false",
                 "documentation": "Set this parameter to true to activate particle paraview output.",
-                "pattern": "114",
+                "pattern": "116",
                 "pattern_description": "[Bool]",
-                "actions": "114"
+                "actions": "116"
             },
             "filename": {
                 "value": "particle",
                 "default_value": "particle",
                 "documentation": "Sets the base name for particle output files.",
-                "pattern": "115",
+                "pattern": "117",
                 "pattern_description": "[Anything]",
-                "actions": "115"
+                "actions": "117"
             }
         }
     },
@@ -982,25 +998,25 @@
             "value": "none",
             "default_value": "none",
             "documentation": "Sets the verbosity of the profiling information to be collected. If set to 'none', no profiling information is collected. If set to 'basic', only data which is cheap to collect is recorded. If set to 'detailed', also data which is expensive to collect is recorded. It is recommended to enable detailed profiling only when necessary for in-depth analysis or debugging purposes.",
-            "pattern": "116",
+            "pattern": "118",
             "pattern_description": "[Selection none|basic|detailed ]",
-            "actions": "116"
+            "actions": "118"
         },
         "write time step size": {
             "value": "10",
             "default_value": "10",
             "documentation": "Write profiling output every given time step size. If this parameter is set, the specified parameter for write frequency is overwritten.",
-            "pattern": "117",
+            "pattern": "119",
             "pattern_description": "[Double -MAX_DOUBLE...MAX_DOUBLE (inclusive)]",
-            "actions": "117"
+            "actions": "119"
         },
         "time type": {
             "value": "real",
             "default_value": "real",
             "documentation": "Choose the type of time measure to write profiling information.",
-            "pattern": "118",
+            "pattern": "120",
             "pattern_description": "[Selection real|simulation ]",
-            "actions": "118"
+            "actions": "120"
         }
     }
 }

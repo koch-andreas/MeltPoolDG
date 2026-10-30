@@ -28,6 +28,11 @@
  * Both DoFHandlers use the same active FE indices (see NarrowBand::ActiveFEIndex), as required by
  * MatrixFree for several hp-DoFHandlers. The FE collection of the cut DoFHandler holds FE_Nothing
  * elements for the FE index of the neighbor cells.
+ *
+ * For the advected band (NarrowBandType::advected_layers), the band consists of the cut cells and
+ * several layers of vertex neighbors: the first layer has the FE index NarrowBand::neighbor, all
+ * further layers the FE index NarrowBand::outer. The cut DoFHandler holds FE_DGQ elements only on
+ * the cut cells (see create_layered_cut_fe_collection()).
  */
 namespace MeltPoolDG::LevelSet::NarrowBand
 {
@@ -44,12 +49,16 @@ namespace MeltPoolDG::LevelSet::NarrowBand
     inactive = 0,
     /// cells intersected by the zero level-set iso-surface
     cut = CutUtil::CellCategory::intersected,
-    /// face neighbors of the cut cells, which are not cut themselves
-    neighbor = 2
+    /// face neighbors of the cut cells, which are not cut themselves (or the first layer of
+    /// vertex neighbors of the cut cells for the advected band)
+    neighbor = 2,
+    /// cells of the second and further layers of the advected band
+    outer = 3
   };
 
   static_assert(ActiveFEIndex::cut == 1 and ActiveFEIndex::inactive != ActiveFEIndex::cut and
-                  ActiveFEIndex::neighbor != ActiveFEIndex::cut,
+                  ActiveFEIndex::neighbor != ActiveFEIndex::cut and
+                  ActiveFEIndex::outer != ActiveFEIndex::neighbor,
                 "Inconsistent FE indices of the narrow band.");
 
   /**
@@ -71,6 +80,26 @@ namespace MeltPoolDG::LevelSet::NarrowBand
   template <int dim>
   dealii::hp::FECollection<dim>
   create_cut_fe_collection(const unsigned int fe_degree);
+
+  /**
+   * @brief Create the FE collection of the band DoFHandler of the advected band: FE_Nothing
+   * (inactive), FE_DGQ (cut), FE_DGQ (first layer) and FE_DGQ (outer layers).
+   *
+   * @param fe_degree Polynomial degree of the level-set field.
+   */
+  template <int dim>
+  dealii::hp::FECollection<dim>
+  create_layered_band_fe_collection(const unsigned int fe_degree);
+
+  /**
+   * @brief Create the FE collection of the cut DoFHandler of the advected band: FE_Nothing
+   * (inactive), FE_DGQ (cut), FE_Nothing (first layer) and FE_Nothing (outer layers).
+   *
+   * @param fe_degree Polynomial degree of the level-set field.
+   */
+  template <int dim>
+  dealii::hp::FECollection<dim>
+  create_layered_cut_fe_collection(const unsigned int fe_degree);
 
   /**
    * @brief Determine the locally owned cells, which are intersected by the zero level-set
@@ -157,6 +186,57 @@ namespace MeltPoolDG::LevelSet::NarrowBand
                   const std::vector<bool>             &is_small_cut_cell = {});
 
   /**
+   * @brief Compute the layers of vertex neighbors around the cut cells.
+   *
+   * The cut cells form the layer 0. A cell, which is not cut, belongs to the layer $k$, if it
+   * shares a vertex with a cell of the layer $k-1$ and with no cell of a lower layer, i.e., $k$ is
+   * the distance to the cut cells in the graph of cells connected via vertices. The layers are
+   * determined for the locally owned cells and communicated to the ghost cells.
+   *
+   * @param triangulation Triangulation.
+   * @param is_cut_cell Flags indexed by the active cell index, which are true for the locally
+   * owned cut cells.
+   * @param n_layers Number of layers.
+   *
+   * @return Layer indexed by the active cell index for the locally owned and ghost cells
+   * (dealii::numbers::invalid_unsigned_int for cells outside of the layers and artificial cells).
+   */
+  template <int dim>
+  std::vector<unsigned int>
+  compute_layers(const dealii::Triangulation<dim> &triangulation,
+                 const std::vector<bool>          &is_cut_cell,
+                 const unsigned int                n_layers);
+
+  /**
+   * @brief Set the active FE indices of the cut and the band DoFHandler of the advected band
+   * (cut cells and @p n_layers layers of vertex neighbors, see compute_layers()) and distribute
+   * the DoFs.
+   *
+   * The cut cells get the FE index NarrowBand::cut, the cells of the first layer the FE index
+   * NarrowBand::neighbor and the cells of all further layers the FE index NarrowBand::outer.
+   *
+   * @param is_cut_cell Flags indexed by the active cell index, which are true for the locally
+   * owned cut cells.
+   * @param n_layers Number of layers (at least 2).
+   * @param dof_handler_cut Cut DoFHandler.
+   * @param fe_collection_cut FE collection of the cut DoFHandler (see
+   * create_layered_cut_fe_collection()).
+   * @param dof_handler_band Band DoFHandler.
+   * @param fe_collection_band FE collection of the band DoFHandler (see
+   * create_layered_band_fe_collection()).
+   *
+   * @return Layers indexed by the active cell index (see compute_layers()).
+   */
+  template <int dim>
+  std::vector<unsigned int>
+  distribute_dofs_layered(const std::vector<bool>             &is_cut_cell,
+                          const unsigned int                   n_layers,
+                          dealii::DoFHandler<dim>             &dof_handler_cut,
+                          const dealii::hp::FECollection<dim> &fe_collection_cut,
+                          dealii::DoFHandler<dim>             &dof_handler_band,
+                          const dealii::hp::FECollection<dim> &fe_collection_band);
+
+  /**
    * @brief Extract the local DoF values of the flagged locally owned cells.
    *
    * @param dof_handler (hp-)DoFHandler of @p vector.
@@ -203,8 +283,24 @@ namespace MeltPoolDG::LevelSet::NarrowBand
                        dealii::LinearAlgebra::distributed::Vector<number>       &dst);
 
   /**
+   * @brief Copy the DoF values of all locally owned cells, which have DoFs in both DoFHandlers of
+   * the narrow band.
+   *
+   * @param dof_handler_src DoFHandler of @p src.
+   * @param src Source vector.
+   * @param dof_handler_dst DoFHandler of @p dst.
+   * @param dst Destination vector. Only the DoFs of the common cells are modified.
+   */
+  template <int dim, typename number>
+  void
+  copy_common_cell_values(const dealii::DoFHandler<dim>                            &dof_handler_src,
+                          const dealii::LinearAlgebra::distributed::Vector<number> &src,
+                          const dealii::DoFHandler<dim>                            &dof_handler_dst,
+                          dealii::LinearAlgebra::distributed::Vector<number>       &dst);
+
+  /**
    * @brief Compute the eikonal error sqrt(int (|grad phi| - 1)^2 dx / V) of a level-set field
-   * over all cells with level-set DoFs (volume V).
+   * over all cut cells (cells with the FE index NarrowBand::cut, volume V).
    *
    * @param mapping Mapping.
    * @param dof_handler (hp-)DoFHandler of the level-set field.
