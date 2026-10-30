@@ -130,6 +130,28 @@ namespace MeltPoolDG::LevelSet
     void
     attach_output_vectors(GenericDataOut<dim, number> &data_out) const override;
 
+    /**
+     * @brief Evaluate the SIPG face terms of the elliptic reinitialization on intersected cells
+     * only on the faces crossed by the zero level-set iso-surface of the initial level-set field
+     * (see ReinitializationEllipticOperatorFixedPointIntersectedCells::update_face_mask()).
+     *
+     * @param flag If true, the face terms are restricted to the faces crossed by the interface.
+     * If false (default), the face terms are evaluated on all faces between two intersected
+     * cells.
+     *
+     * @note Requires the elliptic reinitialization on intersected cells only.
+     */
+    void
+    set_face_terms_on_interface_faces_only(const bool flag);
+
+    /**
+     * @brief Return the number of faces crossed by the interface and the number of faces between
+     * two intersected cells of the last reinitialization, if the face terms are restricted to the
+     * faces crossed by the interface (otherwise zero).
+     */
+    std::pair<unsigned int, unsigned int>
+    get_n_interface_faces() const;
+
   private:
     /**
      * @brief Compute the quadrature rules for the immersed phase boundaries.
@@ -139,6 +161,13 @@ namespace MeltPoolDG::LevelSet
 
     /// Mapping information for integration over immersed boundaries
     MappingInfoType mapping_info_surface;
+
+    /// Evaluate the SIPG face terms only on the faces crossed by the interface (intersected cells
+    /// only).
+    bool face_terms_on_interface_faces_only = false;
+
+    /// Number of faces crossed by the interface and number of faces between two intersected cells.
+    std::pair<unsigned int, unsigned int> n_interface_faces = {0, 0};
 
     /**
      * @brief Create the elliptic reinitialization operator.

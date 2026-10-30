@@ -59,6 +59,12 @@ namespace MeltPoolDG::LevelSet
    * treated as part of the boundary of $\Omega_\Gamma$, where the natural boundary condition of
    * the minimization problem applies. Thus, no face integrals are evaluated on these faces.
    *
+   * Optionally, the face integrals are restricted to the subset $\mathcal{F}^\Gamma \subseteq
+   * \mathcal{F}_\Gamma$ of faces, which are crossed by the zero level-set iso-surface, see
+   * set_face_terms_on_interface_faces_only() and update_face_mask(). All other faces between two
+   * intersected cells are then treated like the boundary of $\Omega_\Gamma$, i.e., the
+   * intersected cells are only coupled across the faces crossed by the interface.
+   *
    * @note Only the cells and faces of $\Omega_\Gamma$ are visited during the operator
    * evaluation. Since the vectors of the hp-DoFHandler only contain the DoFs of the intersected
    * cells, the cost of the reinitialization scales with the size of the interface.
@@ -149,6 +155,35 @@ namespace MeltPoolDG::LevelSet
      */
     unsigned int
     get_fe_degree() const;
+
+    /**
+     * @brief Select the faces on which the SIPG face terms are evaluated.
+     *
+     * @param flag If false (default), the face terms are evaluated on all faces between two
+     * intersected cells. If true, they are only evaluated on the faces $\mathcal{F}^\Gamma$
+     * crossed by the zero level-set iso-surface, which are determined by update_face_mask().
+     */
+    void
+    set_face_terms_on_interface_faces_only(const bool flag);
+
+    /**
+     * @brief Determine the faces $\mathcal{F}^\Gamma$ between two intersected cells, which are
+     * crossed by the zero level-set iso-surface of @p level_set.
+     *
+     * A face is considered as crossed by the interface, if the trace of the level-set field of one
+     * of the two adjacent cells attains values of both signs (including zero) at the Gauss-Lobatto
+     * points with $p+2$ points per direction. In addition, all faces of intersected cells, in
+     * which the level-set field does not change its sign (at the Gauss-Lobatto points), are kept,
+     * such that the problem remains well-posed on these cells (no interface penalty term).
+     *
+     * @param level_set Level-set field defining the interface, typically the initial condition of
+     * the reinitialization.
+     *
+     * @return Number of faces crossed by the interface and number of faces between two
+     * intersected cells (summed over all processes).
+     */
+    std::pair<unsigned int, unsigned int>
+    update_face_mask(const VectorType &level_set);
 
   private:
     /**
@@ -242,5 +277,18 @@ namespace MeltPoolDG::LevelSet
 
     /// Interior penalty parameter of the SIPG discretization.
     number interior_penalty = 0.0;
+
+    /// Evaluate the SIPG face terms only on the faces crossed by the interface.
+    bool face_terms_on_interface_faces_only = false;
+
+    /// Mask of the inner face batches: 1 for faces crossed by the interface, 0 otherwise.
+    dealii::AlignedVector<VectorizedArrayType> face_mask;
+
+    /**
+     * @brief Return the face mask of a face batch (1 for all lanes, if the face terms are
+     * evaluated on all faces between two intersected cells).
+     */
+    VectorizedArrayType
+    get_face_mask(const unsigned int face_batch) const;
   };
 } // namespace MeltPoolDG::LevelSet

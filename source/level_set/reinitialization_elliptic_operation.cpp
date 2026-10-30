@@ -345,17 +345,51 @@ namespace MeltPoolDG::LevelSet
 
   template <int dim, typename number>
   void
+  ReinitializationEllipticOperation<dim, number>::set_face_terms_on_interface_faces_only(
+    const bool flag)
+  {
+    AssertThrow(not flag or reinit_data.elliptic.intersected_cells_only,
+                ExcMessage("The restriction of the face terms to the faces crossed by the "
+                           "interface requires the elliptic reinitialization on intersected "
+                           "cells only."));
+
+    face_terms_on_interface_faces_only = flag;
+    if (not flag)
+      n_interface_faces = {0, 0};
+  }
+
+  template <int dim, typename number>
+  std::pair<unsigned int, unsigned int>
+  ReinitializationEllipticOperation<dim, number>::get_n_interface_faces() const
+  {
+    return n_interface_faces;
+  }
+
+  template <int dim, typename number>
+  void
   ReinitializationEllipticOperation<dim, number>::compute_intersected_quadrature()
   {
     level_set_old.update_ghost_values();
 
     if (reinit_data.elliptic.intersected_cells_only)
-      CutUtil::compute_immersed_surface_quadrature_intersected_cells(mapping_info_surface,
-                                                                     scratch_data.get_dof_handler(
-                                                                       ls_dof_idx),
-                                                                     level_set_old,
-                                                                     scratch_data.get_matrix_free(),
-                                                                     get_level_set_degree());
+      {
+        CutUtil::compute_immersed_surface_quadrature_intersected_cells(
+          mapping_info_surface,
+          scratch_data.get_dof_handler(ls_dof_idx),
+          level_set_old,
+          scratch_data.get_matrix_free(),
+          get_level_set_degree());
+
+        // faces crossed by the interface
+        if (fixed_point_intersected_cells_operator)
+          {
+            fixed_point_intersected_cells_operator->set_face_terms_on_interface_faces_only(
+              face_terms_on_interface_faces_only);
+            if (face_terms_on_interface_faces_only)
+              n_interface_faces =
+                fixed_point_intersected_cells_operator->update_face_mask(level_set_old);
+          }
+      }
     else
       CutUtil::compute_immersed_surface_quadrature(mapping_info_surface,
                                                    scratch_data.get_dof_handler(ls_dof_idx),

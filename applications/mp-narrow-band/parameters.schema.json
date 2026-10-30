@@ -1,0 +1,979 @@
+{
+  "type": "object",
+  "properties": {
+    "base": {
+      "type": "object",
+      "properties": {
+        "case name": {
+          "type": "string",
+          "description": "Sets the base name for the application that will be fed to the problem type.",
+          "default": "not_initialized"
+        },
+        "dimension": {
+          "type": "integer",
+          "description": "Defines the dimension of the problem",
+          "default": 2
+        },
+        "number": {
+          "type": "string",
+          "enum": [
+            "double"
+          ],
+          "description": "Floating point number format. Currently, only 'double' is explicitely instantiated.",
+          "default": "double"
+        },
+        "global refinements": {
+          "type": "integer",
+          "description": "Defines the number of initial global refinements",
+          "default": 1
+        },
+        "do print parameters": {
+          "type": "boolean",
+          "description": "Set this parameter to true to list parameters in output",
+          "default": true
+        },
+        "verbosity level": {
+          "type": "integer",
+          "description": "Sets the verbosity level of the console output: 0: silent: for non-robust tests and benchmark runs; 1: minimal: for robust tests; 2: detailed; 3: full",
+          "default": 1
+        },
+        "fe": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "not_initialized",
+                "FE_Q",
+                "FE_SimplexP",
+                "FE_Q_iso_Q1",
+                "FE_DGQ"
+              ],
+              "description": "Finite Element.FE_Q: hexahedral continuous finite element with polynomial degree p; FE_SimplexP: tetrahedral continuous finite element with polynomial degree p; FE_Q_iso_Q1: hexahedral continuous finite element with p subdivisions containing linear elements; FE_DGQ: hexahedral discontinuous finite element with polynomial degree p",
+              "default": "FE_Q"
+            },
+            "degree": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647,
+              "description": "Defines the degree p of the finite element type. If \"type\" is \"FE_Q_iso_Q1\" this parameter defines the number of subdivisions.",
+              "default": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "time stepping": {
+      "type": "object",
+      "properties": {
+        "start time": {
+          "type": "number",
+          "description": "Defines the start time for the solution of the levelset problem",
+          "default": 0.0
+        },
+        "end time": {
+          "type": "number",
+          "description": "Sets the end time for the solution of the levelset problem",
+          "default": 1.0
+        },
+        "time step size": {
+          "type": "number",
+          "description": "Sets the step size for time stepping. For non-uniform time stepping, this parameter determines the size of the first time step.",
+          "default": 0.01
+        },
+        "max n steps": {
+          "type": "integer",
+          "description": "Sets the maximum number of melt_pool steps",
+          "default": 10000000
+        },
+        "time step size function": {
+          "type": "string",
+          "description": "Set an analytical function to determine the time step size. For the prediction of the new time increment, the old time is used.",
+          "default": "0.0*t"
+        }
+      },
+      "additionalProperties": false
+    },
+    "narrow band": {
+      "type": "object",
+      "properties": {
+        "extension": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "ghost_penalty",
+                "closest_point"
+              ],
+              "description": "Type of the extension of the level-set field from the cut cells to the neighbor cells: global face-based ghost-penalty extension (ghost_penalty) or closest-point extension (closest_point), where the level set at the nodes of the neighbor cells is given by the first-order Taylor expansion phi(y) + grad phi(y) . (x - y) from the closest point y on the discrete interface of the cut cells.",
+              "default": "ghost_penalty"
+            },
+            "ghost penalty parameters": {
+              "type": "string",
+              "pattern": "^\\s*[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?(?:\\s*,\\s*[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?)*\\s*$",
+              "description": "Dimensionless ghost-penalty parameters gamma_k > 0 for the jumps of the k-th normal derivative (k = 0, ..., p) on the ghost-penalty faces, which are scaled by h^(2k+1). Specify comma-separated values starting with k = 0. If less than p+1 values are given, the last value is used for all remaining k.",
+              "default": "100, 1"
+            },
+            "ghost penalty faces": {
+              "type": "string",
+              "enum": [
+                "all_band_faces",
+                "cut_cell_faces"
+              ],
+              "description": "Set of faces on which the ghost-penalty terms of the extension are evaluated (ghost-penalty extension).",
+              "default": "all_band_faces"
+            },
+            "sign limiter tolerance": {
+              "type": "number",
+              "description": "Tolerance of the sign limiter for the extended level-set field on the neighbor cells, relative to the cell size h. If the extended level set attains values of the opposite sign of its cell mean with a magnitude larger than tolerance * h in a neighbor cell, its deviation from the cell mean is scaled such that it does not change its sign. Neighbor cells do not contain the interface by definition; spurious zero crossings, e.g., due to the polynomial extrapolation near under-resolved interface tips, would otherwise create spurious cut cells. Set to a negative value to disable the limiter.",
+              "default": 0.05
+            },
+            "minimum source volume fraction": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0,
+              "description": "Minimum volume fraction |K cap {phi > 0}| / |K| of the positive phase of a cut cell K, for which K serves as source of the extension. Ghost-penalty extension: the ghost-penalty faces between cut cells with a smaller volume fraction and neighbor cells are not evaluated, i.e., the neighbor cells are extended from the other cut cells via the faces to these cut cells and to other neighbor cells (if the ghost-penalty faces include all band faces). If a neighbor cell is not connected to a cut cell with a sufficient volume fraction, its faces to the small cut cells are kept. Closest-point extension: small cut cells are only considered in the closest-point search, if no other cut cells share a vertex with the neighbor cell. In contrast to 'neighbor activation volume fraction', all neighbor cells remain active. Set to 0 to use all cut cells as sources.",
+              "default": 0.0
+            },
+            "linear solver": {
+              "type": "object",
+              "properties": {
+                "solver type": {
+                  "type": "string",
+                  "enum": [
+                    "CG",
+                    "GMRES"
+                  ],
+                  "description": "Set this parameter for choosing an iterative linear solver type.",
+                  "default": "CG"
+                },
+                "preconditioner type": {
+                  "type": "string",
+                  "enum": [
+                    "Identity",
+                    "AMG",
+                    "ILU",
+                    "Diagonal"
+                  ],
+                  "description": "Set this parameter for choosing a preconditioner type.",
+                  "default": "ILU"
+                },
+                "max iterations": {
+                  "type": "integer",
+                  "description": "Set the maximum number of iterations for solving the linear system of equations.",
+                  "default": 1000
+                },
+                "rel tolerance": {
+                  "type": "number",
+                  "description": "Set the relative tolerance for a successful solution of the linear system of equations.",
+                  "default": 1e-12
+                },
+                "abs tolerance": {
+                  "type": "number",
+                  "description": "Set the absolute tolerance for a successful solution of the linear system of equations.",
+                  "default": 1e-20
+                },
+                "do matrix free": {
+                  "type": "boolean",
+                  "description": "Set this parameter if a matrix free solution procedure should be performed.",
+                  "default": false
+                },
+                "monitor type": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "reduced",
+                    "all"
+                  ],
+                  "description": "Set the monitor type of the linear solver.",
+                  "default": "none"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "advection": {
+          "type": "object",
+          "properties": {
+            "time integration": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "not_initialized",
+                    "LSRK_stage_1_order_1",
+                    "LSRK_stage_3_order_3",
+                    "LSRK_stage_5_order_4",
+                    "LSRK_stage_7_order_4",
+                    "LSRK_stage_9_order_5",
+                    "RKC_n_stages",
+                    "SSP_RK_stage_1_order_1",
+                    "SSP_RK_stage_2_order_2",
+                    "SSP_RK_stage_3_order_3",
+                    "implicit_euler",
+                    "explicit_euler",
+                    "crank_nicolson",
+                    "bdf_1",
+                    "bdf_2",
+                    "bdf_3",
+                    "bdf_4",
+                    "bdf_5",
+                    "bdf_6",
+                    "imex"
+                  ],
+                  "description": "Name of the time integration scheme.",
+                  "default": "SSP_RK_stage_3_order_3"
+                },
+                "preconditioner update frequency": {
+                  "type": "integer",
+                  "description": "Frequency at which the preconditioner gets updated.",
+                  "default": 100
+                },
+                "RKC n stages": {
+                  "type": "integer",
+                  "description": "Number of stages for the RKC scheme.",
+                  "default": 5
+                },
+                "epsilon": {
+                  "type": "number",
+                  "description": "Damping parameter for the RKC scheme.",
+                  "default": 0.153846
+                },
+                "nlsolve": {
+                  "type": "object",
+                  "properties": {
+                    "max nonlinear iterations": {
+                      "type": "integer",
+                      "minimum": -2147483648,
+                      "maximum": 2147483647,
+                      "description": "Set the number of maximum nonlinear iterations with standard tolerances.",
+                      "default": 10
+                    },
+                    "field correction tolerance": {
+                      "type": "number",
+                      "description": "Set the tolerance for the maximum allowed correction of the unknown field.",
+                      "default": 1e-10
+                    },
+                    "residual tolerance": {
+                      "type": "number",
+                      "description": "Set the tolerance for the maximum allowed residual of the nonlinear system.",
+                      "default": 1e-09
+                    },
+                    "max nonlinear iterations alt": {
+                      "type": "integer",
+                      "minimum": -2147483648,
+                      "maximum": 2147483647,
+                      "description": "Set the number of maximum nonlinear iterations with alternative tolerances.",
+                      "default": 0
+                    },
+                    "field correction tolerance alt": {
+                      "type": "number",
+                      "description": "Set the alternative tolerance for the maximum allowed correction of the unknown field.",
+                      "default": 1e-09
+                    },
+                    "residual tolerance alt": {
+                      "type": "number",
+                      "description": "Set the alternative tolerance for the maximum allowed residual of the nonlinear system.",
+                      "default": 1e-08
+                    },
+                    "use relative tolerances": {
+                      "type": "boolean",
+                      "description": "Set to true to interpret the residual tolerances relative to the norm of the initial residual and the field correction tolerances relative to the norm of the current solution. If the respective reference norm is zero, the tolerance is applied as an absolute value.",
+                      "default": false
+                    },
+                    "verbosity level": {
+                      "type": "integer",
+                      "minimum": -2147483648,
+                      "maximum": 2147483647,
+                      "description": "Set to one for detailed solver output.",
+                      "default": -1
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "linear solver": {
+                  "type": "object",
+                  "properties": {
+                    "solver type": {
+                      "type": "string",
+                      "enum": [
+                        "CG",
+                        "GMRES"
+                      ],
+                      "description": "Set this parameter for choosing an iterative linear solver type.",
+                      "default": "GMRES"
+                    },
+                    "preconditioner type": {
+                      "type": "string",
+                      "enum": [
+                        "Identity",
+                        "AMG",
+                        "ILU",
+                        "Diagonal"
+                      ],
+                      "description": "Set this parameter for choosing a preconditioner type.",
+                      "default": "Identity"
+                    },
+                    "max iterations": {
+                      "type": "integer",
+                      "description": "Set the maximum number of iterations for solving the linear system of equations.",
+                      "default": 10000
+                    },
+                    "rel tolerance": {
+                      "type": "number",
+                      "description": "Set the relative tolerance for a successful solution of the linear system of equations.",
+                      "default": 1e-12
+                    },
+                    "abs tolerance": {
+                      "type": "number",
+                      "description": "Set the absolute tolerance for a successful solution of the linear system of equations.",
+                      "default": 1e-20
+                    },
+                    "do matrix free": {
+                      "type": "boolean",
+                      "description": "Set this parameter if a matrix free solution procedure should be performed.",
+                      "default": true
+                    },
+                    "monitor type": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "reduced",
+                        "all"
+                      ],
+                      "description": "Set the monitor type of the linear solver.",
+                      "default": "none"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "neighbor activation volume fraction": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Minimum volume fraction |K cap {phi > 0}| / |K| of the positive phase of a cut cell K, for which its face neighbors are activated as neighbor cells of the narrow band (and filled by the extension). Face neighbors of cut cells with a smaller volume fraction remain inactive (FE_Nothing), unless they are face neighbors of another cut cell with a sufficient volume fraction. Set to 0 to activate all face neighbors of the cut cells.",
+          "default": 0.0
+        },
+        "reinitialization faces": {
+          "type": "string",
+          "enum": [
+            "cut_cell_faces",
+            "interface_faces"
+          ],
+          "description": "Set of faces on which the SIPG terms of the elliptic reinitialization on the cut cells are evaluated: all faces between two cut cells (cut_cell_faces) or only the faces between two cut cells, which are crossed by the interface (interface_faces). In the latter case, the cut cells are only coupled across the faces crossed by the interface.",
+          "default": "cut_cell_faces"
+        },
+        "reinitialization frequency": {
+          "type": "integer",
+          "description": "Reinitialize the level-set field on the cut cells every n-th time step. Set to 0 to disable the frequency-based reinitialization.",
+          "default": 1
+        },
+        "reinitialization eikonal threshold": {
+          "type": "number",
+          "minimum": 0.0,
+          "description": "Reinitialize the level-set field on the cut cells, if the eikonal error sqrt(int (|grad phi| - 1)^2 dx / V) on the cut cells exceeds this value. Set to 0 to disable the error-based reinitialization.",
+          "default": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "reinitialization": {
+      "type": "object",
+      "properties": {
+        "fe": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "not_initialized",
+                "FE_Q",
+                "FE_SimplexP",
+                "FE_Q_iso_Q1",
+                "FE_DGQ"
+              ],
+              "description": "Finite Element.FE_Q: hexahedral continuous finite element with polynomial degree p; FE_SimplexP: tetrahedral continuous finite element with polynomial degree p; FE_Q_iso_Q1: hexahedral continuous finite element with p subdivisions containing linear elements; FE_DGQ: hexahedral discontinuous finite element with polynomial degree p",
+              "default": "not_initialized"
+            },
+            "degree": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647,
+              "description": "Defines the degree p of the finite element type. If \"type\" is \"FE_Q_iso_Q1\" this parameter defines the number of subdivisions.",
+              "default": -1
+            }
+          },
+          "additionalProperties": false
+        },
+        "predictor": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "none",
+                "zero",
+                "linear_extrapolation",
+                "least_squares_projection"
+              ],
+              "description": "Choose a predictor type: none: use old value as initial guess; zero: se zeros as initial guess; linear_extrapolation: calculate the predictor by a linear combination from the two old solution vectors; least_squares_projection: least squares projection (WIP)",
+              "default": "none"
+            },
+            "n old solutions": {
+              "type": "integer",
+              "description": "Choose the number of old solution vectors considered.This parameter is only relevant for least squares projection.For all other predictors, this parameter will be set appropriately.",
+              "default": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        "linear solver": {
+          "type": "object",
+          "properties": {
+            "solver type": {
+              "type": "string",
+              "enum": [
+                "CG",
+                "GMRES"
+              ],
+              "description": "Set this parameter for choosing an iterative linear solver type.",
+              "default": "CG"
+            },
+            "preconditioner type": {
+              "type": "string",
+              "enum": [
+                "Identity",
+                "AMG",
+                "ILU",
+                "Diagonal"
+              ],
+              "description": "Set this parameter for choosing a preconditioner type.",
+              "default": "Diagonal"
+            },
+            "max iterations": {
+              "type": "integer",
+              "description": "Set the maximum number of iterations for solving the linear system of equations.",
+              "default": 10000
+            },
+            "rel tolerance": {
+              "type": "number",
+              "description": "Set the relative tolerance for a successful solution of the linear system of equations.",
+              "default": 1e-12
+            },
+            "abs tolerance": {
+              "type": "number",
+              "description": "Set the absolute tolerance for a successful solution of the linear system of equations.",
+              "default": 1e-20
+            },
+            "do matrix free": {
+              "type": "boolean",
+              "description": "Set this parameter if a matrix free solution procedure should be performed.",
+              "default": true
+            },
+            "monitor type": {
+              "type": "string",
+              "enum": [
+                "none",
+                "reduced",
+                "all"
+              ],
+              "description": "Set the monitor type of the linear solver.",
+              "default": "none"
+            }
+          },
+          "additionalProperties": false
+        },
+        "enable": {
+          "type": "boolean",
+          "description": "Set to true to activate reinitialization.",
+          "default": true
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "olsson2007",
+            "elliptic",
+            "geometric"
+          ],
+          "description": "Sets the type of reinitialization model that should be used.",
+          "default": "olsson2007"
+        },
+        "interface thickness parameter": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "proportional_to_cell_size",
+                "absolute_value",
+                "number_of_cells_across_interface"
+              ],
+              "description": "Choose the value type of the interface thickness parameter.",
+              "default": "proportional_to_cell_size"
+            },
+            "val": {
+              "type": "number",
+              "description": "Defines the value of the chosen interface thickness parameter type.",
+              "default": 0.5
+            }
+          },
+          "additionalProperties": false
+        },
+        "elliptic": {
+          "type": "object",
+          "properties": {
+            "penalty parameter": {
+              "type": "number",
+              "minimum": 0.0,
+              "description": "Penalty parameter for the enforcement of the initial position of the zero level-set iso-surface during the elliptic reinitialization.",
+              "default": 0.0
+            },
+            "nonlinear solver type": {
+              "type": "string",
+              "enum": [
+                "newton",
+                "fixed point"
+              ],
+              "description": "Sets the nonlinear solver used for elliptic reinitialization.",
+              "default": "fixed point"
+            },
+            "interior penalty scaling factor": {
+              "type": "number",
+              "minimum": 0.0,
+              "description": "Scaling factor for the interior penalty term in the elliptic reinitialization operator.",
+              "default": 10.0
+            },
+            "intersected cells only": {
+              "type": "boolean",
+              "description": "If true, the level-set field is only defined on the cells intersected by the zero level-set iso-surface (FE_DGQ on intersected cells, FE_Nothing elsewhere) and the elliptic reinitialization is solved on these cells only. Requires FE_DGQ elements and the fixed point solver.",
+              "default": false
+            },
+            "nlsolve": {
+              "type": "object",
+              "properties": {
+                "max nonlinear iterations": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647,
+                  "description": "Set the number of maximum nonlinear iterations with standard tolerances.",
+                  "default": 5
+                },
+                "field correction tolerance": {
+                  "type": "number",
+                  "description": "Set the tolerance for the maximum allowed correction of the unknown field.",
+                  "default": 2.22507e-308
+                },
+                "residual tolerance": {
+                  "type": "number",
+                  "description": "Set the tolerance for the maximum allowed residual of the nonlinear system.",
+                  "default": 2.22507e-308
+                },
+                "max nonlinear iterations alt": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647,
+                  "description": "Set the number of maximum nonlinear iterations with alternative tolerances.",
+                  "default": 0
+                },
+                "field correction tolerance alt": {
+                  "type": "number",
+                  "description": "Set the alternative tolerance for the maximum allowed correction of the unknown field.",
+                  "default": 2.22507e-308
+                },
+                "residual tolerance alt": {
+                  "type": "number",
+                  "description": "Set the alternative tolerance for the maximum allowed residual of the nonlinear system.",
+                  "default": 2.22507e-308
+                },
+                "use relative tolerances": {
+                  "type": "boolean",
+                  "description": "Set to true to interpret the residual tolerances relative to the norm of the initial residual and the field correction tolerances relative to the norm of the current solution. If the respective reference norm is zero, the tolerance is applied as an absolute value.",
+                  "default": false
+                },
+                "verbosity level": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647,
+                  "description": "Set to one for detailed solver output.",
+                  "default": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "geometric": {
+          "type": "object",
+          "properties": {
+            "verbosity": {
+              "type": "integer",
+              "description": "Choose the verbosity level. 0 means silent, 1 means verbose.",
+              "default": 0
+            },
+            "max distance": {
+              "type": "number",
+              "minimum": 0.0,
+              "description": "Maximum distance from the zero-level-set where the signeddistance function is reconstructed.",
+              "default": 1.61792e+308
+            }
+          },
+          "additionalProperties": false
+        },
+        "hyperbolic": {
+          "type": "object",
+          "properties": {
+            "pseudo time stepping": {
+              "type": "object",
+              "properties": {
+                "n initial steps": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647,
+                  "description": "Defines the number of initial reinitialization steps of the level set function. In the default case, the number is set equal to the number of max n steps.",
+                  "default": -1
+                },
+                "pseudo time step size": {
+                  "type": "number",
+                  "description": "Sets the reinitialization time step size. By default, it is computed from the cell size.",
+                  "default": -1.0
+                },
+                "pseudo time step factor": {
+                  "type": "number",
+                  "description": "Factor on the reinitialization time step size that is computed from the cell size.",
+                  "default": 1.0
+                },
+                "max n steps": {
+                  "type": "integer",
+                  "description": "Sets the maximum number of reinitialization steps.",
+                  "default": 5
+                },
+                "tolerance": {
+                  "type": "number",
+                  "description": "Set the tolerance for reinitialization. If the maximum change of the level set field exceeds the tolerance, reinitialization steps will be performed.",
+                  "default": 2.22507e-308
+                }
+              },
+              "additionalProperties": false
+            },
+            "Continuous Galerkin": {
+              "type": "object",
+              "properties": {
+                "implementation": {
+                  "type": "string",
+                  "enum": [
+                    "meltpooldg",
+                    "adaflo"
+                  ],
+                  "description": "Choose the corresponding implementation of the reinitialization operation.",
+                  "default": "meltpooldg"
+                },
+                "tangential diffusion factor": {
+                  "type": "number",
+                  "minimum": 0.0,
+                  "description": "Factor that multiplies the normal diffusion factor, i.e., the diffusion length, to obtain the diffusion factor in the tangential direction.",
+                  "default": 0.0
+                },
+                "interface constraint type": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "surface_penalty",
+                    "dirichlet"
+                  ],
+                  "description": "Technique to enforce the initial position of the zero level-set iso-surface during the reinitialization. none: no enforcement. surface_penalty: penalty term integrated over the interface, scaled by the interface penalty parameter. dirichlet: the DoFs of all cells intersected by the interface are fixed by Dirichlet constraints.",
+                  "default": "none"
+                },
+                "interface penalty parameter": {
+                  "type": "number",
+                  "minimum": 0.0,
+                  "description": "Dimensionless penalty factor for the weak enforcement of the initial position of the zero level-set iso-surface during the reinitialization. It is scaled by h/dtau, with the cell size h and the pseudo-time step dtau, to obtain the penalty coefficient. Only used for the interface constraint type surface_penalty.",
+                  "default": 0.0
+                }
+              },
+              "additionalProperties": false
+            },
+            "Discontinuous Galerkin": {
+              "type": "object",
+              "properties": {
+                "factor diffusivity": {
+                  "type": "number",
+                  "description": "Set the factor for diffusivity.",
+                  "default": 0.25
+                },
+                "IP diffusion": {
+                  "type": "number",
+                  "description": "Set the internal penalty for diffusivity.",
+                  "default": 100.0
+                },
+                "use const gradient in RI": {
+                  "type": "boolean",
+                  "description": "Set if the Godunov gradient should be updated every reinitialization step.",
+                  "default": false
+                },
+                "do CFL based time stepping": {
+                  "type": "boolean",
+                  "description": "Sets a flag if the time stepping should be based on the CFL condition.",
+                  "default": false
+                },
+                "time integration scheme": {
+                  "type": "string",
+                  "enum": [
+                    "not_initialized",
+                    "LSRK_stage_1_order_1",
+                    "LSRK_stage_3_order_3",
+                    "LSRK_stage_5_order_4",
+                    "LSRK_stage_7_order_4",
+                    "LSRK_stage_9_order_5",
+                    "RKC_n_stages",
+                    "SSP_RK_stage_1_order_1",
+                    "SSP_RK_stage_2_order_2",
+                    "SSP_RK_stage_3_order_3",
+                    "implicit_euler",
+                    "explicit_euler",
+                    "crank_nicolson",
+                    "bdf_1",
+                    "bdf_2",
+                    "bdf_3",
+                    "bdf_4",
+                    "bdf_5",
+                    "bdf_6",
+                    "imex"
+                  ],
+                  "description": "Determines the general time integration scheme for the pseudo-time integration of the reinitialization equation.",
+                  "default": "LSRK_stage_5_order_4"
+                },
+                "IMEX integration scheme": {
+                  "type": "string",
+                  "enum": [
+                    "not_initialized",
+                    "LSRK_stage_1_order_1",
+                    "LSRK_stage_3_order_3",
+                    "LSRK_stage_5_order_4",
+                    "LSRK_stage_7_order_4",
+                    "LSRK_stage_9_order_5",
+                    "RKC_n_stages",
+                    "SSP_RK_stage_1_order_1",
+                    "SSP_RK_stage_2_order_2",
+                    "SSP_RK_stage_3_order_3",
+                    "implicit_euler",
+                    "explicit_euler",
+                    "crank_nicolson",
+                    "bdf_1",
+                    "bdf_2",
+                    "bdf_3",
+                    "bdf_4",
+                    "bdf_5",
+                    "bdf_6",
+                    "imex"
+                  ],
+                  "description": "If an IMEX integration scheme is specified, the integration in pseudo time of the reinitialization is done with an implicit-explicit scheme. This means that the diffusion part is treated with the IMEX integration scheme and the Hamiltonian is treated with the general time integration scheme. When choosing an implicit scheme with A-stability, larger time steps can be chosen, only limited by the stability of the Hamiltonian part. This is done since the diffusion part is the most restrictive part for explicit time integration schemes. If a scheme is set, the time step calculation based on a CFL number assumes an A-stable scheme and only calculates the time step based on the Hamiltonian.",
+                  "default": "not_initialized"
+                },
+                "CFL": {
+                  "type": "number",
+                  "description": "Set a CFL number for the pseudo-time stepping in reinitialization.",
+                  "default": 1.0
+                },
+                "avoid zero division smoothed signum": {
+                  "type": "number",
+                  "description": "Sets a constant to avoid zero division in the computation of the smoothed signum.",
+                  "default": 1e-16
+                },
+                "signum smoothness paramater": {
+                  "type": "number",
+                  "description": "Sets the smoothness parameter for the smoothed signum.",
+                  "default": 2.0
+                },
+                "use directed diffusion stabilization": {
+                  "type": "boolean",
+                  "description": "Sets a flag if directed diffusion stabilization should be used for reinitialization.",
+                  "default": false
+                },
+                "hyperbolic weighting function_type": {
+                  "type": "string",
+                  "enum": [
+                    "smoothed_signum",
+                    "initial_levelset"
+                  ],
+                  "description": "Sets the type of weighting function for the hyperbolic part of the reinitialization equation.",
+                  "default": "smoothed_signum"
+                },
+                "use spatially constant diffusion": {
+                  "type": "boolean",
+                  "description": "Sets a flag if a spatially constant diffusion should be used for reinitialization.",
+                  "default": true
+                },
+                "use interface movement penalization": {
+                  "type": "boolean",
+                  "description": "Sets a flag if a penalization of the interface movement should be used.",
+                  "default": false
+                },
+                "gradient error time derivative threshold": {
+                  "type": "number",
+                  "description": "Sets the threshold in the time derivative when a reinitialization procedure reaches a stationary point.",
+                  "default": 1e-16
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string",
+          "description": "Sets the base directory for all output.",
+          "default": "./"
+        },
+        "write frequency": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647,
+          "description": "Every n timestep that should be written",
+          "default": 1
+        },
+        "write time step size": {
+          "type": "number",
+          "description": "Write output output every given time step. If this parameter is set, the output write frequency is deactivated.",
+          "default": 1.79769e+308
+        },
+        "output variables": {
+          "type": "string",
+          "pattern": "^\\s*[^,\\s]+(?:\\s*,\\s*[^,\\s]+)*\\s*$",
+          "description": "Specify variables that you request to output.",
+          "default": "all"
+        },
+        "do user defined postprocessing": {
+          "type": "boolean",
+          "description": "Set this parameter to true to enable user defined postprocessing.",
+          "default": false
+        },
+        "paraview": {
+          "type": "object",
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "description": "Set this parameter to true to activate paraview output.",
+              "default": false
+            },
+            "filename": {
+              "type": "string",
+              "description": "Sets the base name for paraview output files.",
+              "default": "solution"
+            },
+            "n digits timestep": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647,
+              "description": "Number of digits for the frame number of the vtu-file.",
+              "default": 4
+            },
+            "print boundary id": {
+              "type": "boolean",
+              "description": "Set this parameter to true to output a vtu-file with the boundary id.",
+              "default": false
+            },
+            "output subdomains": {
+              "type": "boolean",
+              "description": "Set this parameter to true to output the subdomain ranks.",
+              "default": false
+            },
+            "output material id": {
+              "type": "boolean",
+              "description": "Set to true to output the material id.",
+              "default": false
+            },
+            "write higher order cells": {
+              "type": "boolean",
+              "description": "Set this parameter to false to write bi- or trilinear data only. Set this parameter to true to write higher order cell data. Note: higher order cell data can only be written for hexahedron meshes and 2 or 3 dimensions.",
+              "default": true
+            },
+            "n groups": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647,
+              "description": "Number of parallel written vtu-files.",
+              "default": 1
+            },
+            "n patches": {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647,
+              "description": "Control number of patches to enable high-order.",
+              "default": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "particles": {
+          "type": "object",
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "description": "Set this parameter to true to activate particle paraview output.",
+              "default": false
+            },
+            "filename": {
+              "type": "string",
+              "description": "Sets the base name for particle output files.",
+              "default": "particle"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "profiling": {
+      "type": "object",
+      "properties": {
+        "verbosity": {
+          "type": "string",
+          "enum": [
+            "none",
+            "basic",
+            "detailed"
+          ],
+          "description": "Sets the verbosity of the profiling information to be collected. If set to 'none', no profiling information is collected. If set to 'basic', only data which is cheap to collect is recorded. If set to 'detailed', also data which is expensive to collect is recorded. It is recommended to enable detailed profiling only when necessary for in-depth analysis or debugging purposes.",
+          "default": "none"
+        },
+        "write time step size": {
+          "type": "number",
+          "description": "Write profiling output every given time step size. If this parameter is set, the specified parameter for write frequency is overwritten.",
+          "default": 10.0
+        },
+        "time type": {
+          "type": "string",
+          "enum": [
+            "real",
+            "simulation"
+          ],
+          "description": "Choose the type of time measure to write profiling information.",
+          "default": "real"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "detailed_parameters"
+}

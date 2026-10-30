@@ -1,7 +1,10 @@
 #include <deal.II/base/exceptions.h>
+#include <deal.II/base/mpi.h>
+#include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/vectorization.h>
 
 #include <deal.II/fe/fe_nothing.h>
+#include <deal.II/fe/fe_values.h>
 
 #include <deal.II/lac/affine_constraints.h>
 
@@ -9,6 +12,8 @@
 #include <deal.II/matrix_free/tools.h>
 
 #include <meltpooldg/level_set/reinitialization_elliptic_operator_fixed_point_intersected_cells.hpp>
+
+#include <algorithm>
 
 namespace MeltPoolDG::LevelSet
 {
@@ -77,6 +82,118 @@ namespace MeltPoolDG::LevelSet
   ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>::get_fe_degree() const
   {
     return fe_degree;
+  }
+
+  template <int dim, typename number>
+  void
+  ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>::
+    set_face_terms_on_interface_faces_only(const bool flag)
+  {
+    face_terms_on_interface_faces_only = flag;
+  }
+
+  template <int dim, typename number>
+  std::pair<unsigned int, unsigned int>
+  ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>::update_face_mask(
+    const VectorType &level_set)
+  {
+    Assert(fe_point != nullptr, ExcMessage("Call reinit() before using the operator."));
+
+    const auto &matrix_free = scratch_data.get_matrix_free();
+    const auto &fe          = scratch_data.get_dof_handler(this->dof_idx)
+                       .get_fe_collection()[CutUtil::CellCategory::intersected];
+
+    const bool update_ghosts = not level_set.has_ghost_elements();
+    if (update_ghosts)
+      level_set.update_ghost_values();
+
+    // sample points on the faces and cells: Gauss-Lobatto points including the vertices
+    const Quadrature<dim - 1> face_quadrature = [&]() -> Quadrature<dim - 1> {
+      if constexpr (dim == 1)
+        return QGauss<0>(1);
+      else
+        return QGaussLobatto<dim - 1>(fe.degree + 2);
+    }();
+    const QGaussLobatto<dim> cell_quadrature(fe.degree + 2);
+
+    FEFaceValues<dim> fe_face_values(scratch_data.get_mapping(),
+                                     fe,
+                                     face_quadrature,
+                                     update_values);
+    FEValues<dim>     fe_values(scratch_data.get_mapping(), fe, cell_quadrature, update_values);
+
+    std::vector<number> face_values(face_quadrature.size());
+    std::vector<number> cell_values(cell_quadrature.size());
+
+    // the level set attains values of both signs (including zero)
+    const auto has_sign_change = [](const std::vector<number> &values) {
+      const auto [min, max] = std::minmax_element(values.begin(), values.end());
+      return *min <= 0.0 and *max >= 0.0;
+    };
+
+    unsigned int n_faces           = 0;
+    unsigned int n_interface_faces = 0;
+
+    face_mask.resize_fast(matrix_free.n_inner_face_batches());
+    for (unsigned int face = 0; face < matrix_free.n_inner_face_batches(); ++face)
+      {
+        face_mask[face] = VectorizedArrayType(0.0);
+
+        if (not is_intersected_face_range(std::make_pair(face, face + 1)))
+          continue;
+
+        for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_face_batch(face);
+             ++lane)
+          {
+            bool is_interface_face          = false;
+            bool has_cell_without_interface = false;
+
+            for (const bool is_interior : {true, false})
+              {
+                const auto [cell, face_no] =
+                  matrix_free.get_face_iterator(face, lane, is_interior, this->dof_idx);
+
+                fe_face_values.reinit(cell, face_no);
+                fe_face_values.get_function_values(level_set, face_values);
+                if (has_sign_change(face_values))
+                  is_interface_face = true;
+
+                fe_values.reinit(cell);
+                fe_values.get_function_values(level_set, cell_values);
+                if (not has_sign_change(cell_values))
+                  has_cell_without_interface = true;
+              }
+
+            // keep the faces of intersected cells, which are not cut by the interface
+            if (has_cell_without_interface)
+              is_interface_face = true;
+
+            face_mask[face][lane] = is_interface_face ? 1.0 : 0.0;
+
+            ++n_faces;
+            if (is_interface_face)
+              ++n_interface_faces;
+          }
+      }
+
+    if (update_ghosts)
+      level_set.zero_out_ghost_values();
+
+    const auto comm = level_set.get_mpi_communicator();
+    return {Utilities::MPI::sum(n_interface_faces, comm), Utilities::MPI::sum(n_faces, comm)};
+  }
+
+  template <int dim, typename number>
+  typename ReinitializationEllipticOperatorFixedPointIntersectedCells<dim,
+                                                                      number>::VectorizedArrayType
+  ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>::get_face_mask(
+    const unsigned int face_batch) const
+  {
+    if (not face_terms_on_interface_faces_only)
+      return VectorizedArrayType(1.0);
+
+    AssertIndexRange(face_batch, face_mask.size());
+    return face_mask[face_batch];
   }
 
   template <int dim, typename number>
@@ -218,6 +335,10 @@ namespace MeltPoolDG::LevelSet
     FEFaceIntegrator<dim, 1, number> &phi_m,
     FEFaceIntegrator<dim, 1, number> &phi_p) const
   {
+    // faces between two intersected cells, which are not crossed by the interface, do not
+    // contribute (if the face terms are restricted to the faces crossed by the interface)
+    const VectorizedArrayType mask = get_face_mask(phi_m.get_current_cell_index());
+
     for (const unsigned int q : phi_m.quadrature_point_indices())
       {
         // normal vector pointing from the interior (minus) to the exterior (plus) cell
@@ -229,12 +350,12 @@ namespace MeltPoolDG::LevelSet
           0.5 * (phi_m.get_normal_derivative(q) + phi_p.get_normal_derivative(q));
 
         //   - ({grad phi}.n, [v]) + sigma ([phi], [v])
-        const auto value_flux = interior_penalty * jump - average_normal_der;
+        const auto value_flux = mask * (interior_penalty * jump - average_normal_der);
         phi_m.submit_value(value_flux, q);
         phi_p.submit_value(-value_flux, q);
 
         //   - ([phi], {grad v}.n)
-        const auto gradient_flux = (-0.5) * jump * normal;
+        const auto gradient_flux = (-0.5 * mask * jump) * normal;
         phi_m.submit_gradient(gradient_flux, q);
         phi_p.submit_gradient(gradient_flux, q);
       }
@@ -276,6 +397,9 @@ namespace MeltPoolDG::LevelSet
 
         for (unsigned int face = face_range.first; face < face_range.second; ++face)
           {
+            if (get_face_mask(face).sum() == 0.0)
+              continue;
+
             phi_m.reinit(face);
             phi_p.reinit(face);
 
@@ -333,6 +457,10 @@ namespace MeltPoolDG::LevelSet
 
         for (unsigned int face = face_range.first; face < face_range.second; ++face)
           {
+            const VectorizedArrayType mask = get_face_mask(face);
+            if (mask.sum() == 0.0)
+              continue;
+
             phi_m.reinit(face);
             phi_p.reinit(face);
 
@@ -346,8 +474,9 @@ namespace MeltPoolDG::LevelSet
                 const auto gradient_p = phi_p.get_gradient(q);
 
                 const auto average_normal_flux =
-                  0.5 * (rhs_coefficient(gradient_m.norm()) * phi_m.get_normal_derivative(q) +
-                         rhs_coefficient(gradient_p.norm()) * phi_p.get_normal_derivative(q));
+                  (0.5 * mask) *
+                  (rhs_coefficient(gradient_m.norm()) * phi_m.get_normal_derivative(q) +
+                   rhs_coefficient(gradient_p.norm()) * phi_p.get_normal_derivative(q));
 
                 phi_m.submit_value(-average_normal_flux, q);
                 phi_p.submit_value(average_normal_flux, q);
