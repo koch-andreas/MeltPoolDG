@@ -13,9 +13,11 @@
 
 #include <meltpooldg/core/scratch_data.hpp>
 #include <meltpooldg/level_set/narrow_band_advection_DG_operator.hpp>
+#include <meltpooldg/level_set/narrow_band_bound_preserving_limiter.hpp>
 #include <meltpooldg/level_set/narrow_band_closest_point_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
+#include <meltpooldg/level_set/narrow_band_semi_lagrangian_advection.hpp>
 #include <meltpooldg/level_set/reinitialization_data.hpp>
 #include <meltpooldg/level_set/reinitialization_elliptic_operation.hpp>
 #include <meltpooldg/post_processing/generic_data_out.hpp>
@@ -46,7 +48,9 @@ namespace MeltPoolDG::LevelSet
    *    cell-wise (the DoFHandlers and the matrix-free data structures are only rebuilt if the
    *    cut cells have changed). Optionally, only the face neighbors of cut cells with a
    *    sufficient volume fraction of the positive phase are activated (see
-   *    NarrowBandData::neighbor_activation_volume_fraction),
+   *    NarrowBandData::neighbor_activation_volume_fraction) and/or only the face neighbors, into
+   *    which the velocity points from the cut cells (see NarrowBandData::neighbor_activation; the
+   *    DoFHandlers are then rebuilt in every time step),
    * 3. S5: the elliptic reinitialization on the new cut cells (only SIPG coupling between cut
    *    cells, optionally only across the faces crossed by the interface, see
    *    ReinitializationEllipticOperatorFixedPointIntersectedCells), if the reinitialization
@@ -56,6 +60,12 @@ namespace MeltPoolDG::LevelSet
    *    NarrowBandGhostPenaltyExtension) or by the closest-point extension (see
    *    NarrowBandClosestPointExtension).
    *
+   * For the semi-Lagrangian band (NarrowBandType::semi_lagrangian), the level set is only stored
+   * on the cut cells. In each time step, it is evaluated on the cut cells and their vertex
+   * neighbors (candidate cells) by the semi-Lagrangian advection (see
+   * NarrowBandSemiLagrangianAdvection), which replaces steps 1 and 4; the new cut cells are
+   * determined from the candidate cells (step 2) and reinitialized (step 3).
+   *
    * For the advected band (NarrowBandType::advected_layers), the band consists of the cut cells
    * and NarrowBandData::n_layers layers of vertex neighbors, which are advected together with
    * the cut cells (step 4 is omitted). Whenever the cut cells change, the band is rebuilt: the
@@ -64,6 +74,14 @@ namespace MeltPoolDG::LevelSet
    * one cell per time step, are initialized by geometric redistancing (closest point on the
    * discrete interface, see NarrowBandClosestPointExtension::redistance()). After the elliptic
    * reinitialization of the cut cells, all cells of the layers are redistanced geometrically.
+   *
+   * Optionally, an artificial viscosity is added to the advection in the cells flagged by a modal
+   * smoothness indicator (see NarrowBandData::ArtificialViscosity and
+   * NarrowBandAdvectionDGOperator::compute_artificial_viscosity()).
+   *
+   * Optionally, the advection is limited after each stage of the SSP Runge-Kutta scheme by a
+   * bound-preserving limiter (local maximum principle or sign preservation, see
+   * NarrowBandBoundPreservingLimiter).
    *
    * The velocity extension (S3), the projection to a continuous level set (S6) and the
    * computation of the interface geometry (S7) are not part of this class. The advection
@@ -181,6 +199,10 @@ namespace MeltPoolDG::LevelSet
      * @param is_small_cut_cell_in Flags indexed by the active cell index, which are true for the
      * locally owned cut cells, whose face neighbors are not activated (see
      * NarrowBand::distribute_dofs()). If empty, all face neighbors of the cut cells are activated.
+     *
+     * For the downstream neighbor activation (NarrowBandData::neighbor_activation), the face
+     * neighbors are only activated across the faces, across which the velocity points into the
+     * neighbor at the times neighbor_activation_times.
      */
     void
     setup_dof_system(const std::vector<bool> &is_cut_cell,
@@ -219,6 +241,32 @@ namespace MeltPoolDG::LevelSet
      */
     bool
     is_advected_band() const;
+
+    /**
+     * @brief Semi-Lagrangian band: update the signs of the locally owned candidate cells, which are
+     * not cut, from the cell means of the level set on the band, and communicate the signs to the
+     * ghost cells. If @p function is given, the signs of all locally owned cells are initialized
+     * from its values at the cell centers.
+     *
+     * @param is_cut_cell Flags of the locally owned cut cells.
+     * @param function Level-set function for the initialization (optional).
+     */
+    void
+    update_cell_signs(const std::vector<bool> &is_cut_cell, const dealii::Function<dim> *function);
+
+    /**
+     * @brief Return true for the semi-Lagrangian band (NarrowBandType::semi_lagrangian).
+     */
+    bool
+    is_semi_lagrangian() const;
+
+    /**
+     * @brief Return true for the bands of the cut cells and layers of vertex neighbors (advected
+     * band with NarrowBandData::n_layers layers, semi-Lagrangian band with one layer of candidate
+     * cells).
+     */
+    bool
+    is_layered_band() const;
 
     /**
      * @brief Advected band: copy the (reinitialized) level-set field of the cut cells to the band
@@ -268,6 +316,10 @@ namespace MeltPoolDG::LevelSet
     /// the active cell index; empty if all face neighbors of the cut cells are activated).
     std::vector<bool> is_small_cut_cell;
 
+    /// Times at which the velocity is evaluated for the downstream neighbor activation (beginning
+    /// and end of the next time step).
+    std::vector<double> neighbor_activation_times;
+
     /// Level-set field on the band; the current solution of the solution history.
     TimeIntegration::SolutionHistory<VectorType> solution_history_band;
 
@@ -280,8 +332,26 @@ namespace MeltPoolDG::LevelSet
     /// Closest-point extension.
     const NarrowBandClosestPointExtension<dim, number> closest_point_extension;
 
+    /// Semi-Lagrangian advection (NarrowBandType::semi_lagrangian).
+    const NarrowBandSemiLagrangianAdvection<dim, number> semi_lagrangian_advection;
+
+    /// Semi-Lagrangian band: signs (+1, -1) of the level set on the locally owned and ghost cells,
+    /// which are not cut, indexed by the active cell index (0: unknown). The sign of a cell only
+    /// changes if the interface passes through it, i.e., the signs are updated on the candidate
+    /// cells in each time step.
+    std::vector<int> cell_signs;
+
     /// Advection operator on the band.
     NarrowBandAdvectionDGOperator<dim, number> advection_operator;
+
+    /// Advection velocity.
+    std::shared_ptr<dealii::Function<dim>> velocity_function;
+
+    /// Bound-preserving limiter of the advection.
+    NarrowBandBoundPreservingLimiter<dim, number> advection_limiter;
+
+    /// Artificial viscosity of the advection (constant per cell, on the band DoFHandler).
+    VectorType artificial_viscosity;
 
     /// Explicit time integrator of the advection.
     std::unique_ptr<TimeIntegration::TimeIntegratorBase<number>> time_integrator;

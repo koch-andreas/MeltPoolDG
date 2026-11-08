@@ -28,15 +28,18 @@
 
 #include <meltpooldg/core/scratch_data.hpp>
 #include <meltpooldg/level_set/narrow_band_advection_DG_operator.hpp>
+#include <meltpooldg/level_set/narrow_band_bound_preserving_limiter.hpp>
 #include <meltpooldg/level_set/narrow_band_closest_point_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
+#include <meltpooldg/level_set/narrow_band_semi_lagrangian_advection.hpp>
 #include <meltpooldg/level_set/narrow_band_utilities.hpp>
 #include <meltpooldg/level_set/reinitialization_data.hpp>
 #include <meltpooldg/level_set/reinitialization_elliptic_operation.hpp>
 
 #include <array>
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -409,6 +412,126 @@ namespace MeltPoolDG::LevelSet
     }
 
     /**
+     * Artificial viscosity of the DG advection operator: (a) the modal smoothness indicator flags
+     * the cells with a kink of the level set and no cells of a linear level set; (b) with a
+     * constant viscosity epsilon, the operator evaluates -u.grad(phi) + epsilon laplace(phi)
+     * exactly for a quadratic level set on the cells, whose faces are all shared with other band
+     * cells (SIPG consistency; natural boundary condition at the outer boundary of the band).
+     */
+    template <int dim>
+    void
+    test_advection_operator_artificial_viscosity(const unsigned int fe_degree)
+    {
+      NarrowBandFixture<dim> fixture(fe_degree, 3);
+      MatrixFreeFixture<dim> matrix_free_fixture(fixture);
+      const auto            &scratch_data = matrix_free_fixture.scratch_data;
+      const auto            &dof_handler  = fixture.dof_handler_band;
+      const unsigned int     band_dof_idx = matrix_free_fixture.band_dof_idx;
+
+      NarrowBandAdvectionDGOperator<dim, number> advection_operator(scratch_data,
+                                                                    band_dof_idx,
+                                                                    matrix_free_fixture.quad_idx);
+      advection_operator.set_velocity_function(std::make_shared<Rotation<dim>>());
+
+      VectorType level_set, viscosity, result, result_exact;
+      scratch_data.initialize_dof_vector(level_set, band_dof_idx);
+      scratch_data.initialize_dof_vector(viscosity, band_dof_idx);
+      scratch_data.initialize_dof_vector(result, band_dof_idx);
+      scratch_data.initialize_dof_vector(result_exact, band_dof_idx);
+
+      const number threshold         = -4. * std::log10(static_cast<number>(fe_degree));
+      const auto   compute_viscosity = [&](const dealii::Function<dim> &function) {
+        dealii::VectorTools::interpolate(scratch_data.get_mapping(),
+                                         dof_handler,
+                                         function,
+                                         level_set);
+        return advection_operator.compute_artificial_viscosity(
+          level_set, viscosity, 0., 1e-3, 0.5, threshold, 0.5, false);
+      };
+
+      // (a1) linear level set: no viscosity
+      {
+        const dealii::ScalarFunctionFromFunctionObject<dim> linear(
+          [](const dealii::Point<dim> &p) { return 0.2 + p[0] - 0.5 * p[1]; });
+        EXPECT_EQ(compute_viscosity(linear).n_cells, 0U);
+      }
+
+      // (a2) kink at x_0 = 0.1, i.e., within the cells with 0 < x_0 < 0.25
+      {
+        const dealii::ScalarFunctionFromFunctionObject<dim> kink(
+          [](const dealii::Point<dim> &p) { return std::abs(p[0] - 0.1); });
+        const auto statistics = compute_viscosity(kink);
+
+        unsigned int           n_kink_cells = 0;
+        dealii::Vector<number> values(fixture.fe_collection_band[1].n_dofs_per_cell());
+        for (const auto &cell : dof_handler.active_cell_iterators())
+          if (cell->is_locally_owned() and cell->get_fe().n_dofs_per_cell() > 0)
+            {
+              const bool is_kink_cell = cell->center()[0] > 0. and cell->center()[0] < 0.25;
+              cell->get_dof_values(viscosity, values);
+              EXPECT_EQ(values[0] > 0., is_kink_cell);
+              n_kink_cells += is_kink_cell;
+            }
+
+        EXPECT_GT(statistics.n_cells, 0U);
+        EXPECT_EQ(statistics.n_cells, dealii::Utilities::MPI::sum(n_kink_cells, MPI_COMM_WORLD));
+      }
+
+      // (b) constant viscosity and quadratic level set phi = x_0^2: -u.grad(phi) = 2 x_0 x_1 for
+      // the rotation u = (-x_1, x_0, 0) and laplace(phi) = 2
+      const number epsilon = 0.1;
+      viscosity            = epsilon;
+      viscosity.update_ghost_values();
+      advection_operator.set_artificial_viscosity(&viscosity);
+
+      const dealii::ScalarFunctionFromFunctionObject<dim> quadratic(
+        [](const dealii::Point<dim> &p) { return p[0] * p[0]; });
+      const dealii::ScalarFunctionFromFunctionObject<dim> exact_result(
+        [&](const dealii::Point<dim> &p) { return 2. * p[0] * p[1] + 2. * epsilon; });
+
+      dealii::VectorTools::interpolate(scratch_data.get_mapping(),
+                                       dof_handler,
+                                       quadratic,
+                                       level_set);
+      dealii::VectorTools::interpolate(scratch_data.get_mapping(),
+                                       dof_handler,
+                                       exact_result,
+                                       result_exact);
+
+      advection_operator.apply_operator(0.0, result, level_set);
+      result.update_ghost_values();
+      result_exact.update_ghost_values();
+
+      unsigned int           n_interior_cells = 0;
+      number                 max_error        = 0.;
+      dealii::Vector<number> values(fixture.fe_collection_band[1].n_dofs_per_cell());
+      dealii::Vector<number> values_exact(values.size());
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+            continue;
+
+          bool is_interior = true;
+          for (const unsigned int f : cell->face_indices())
+            if (cell->at_boundary(f) or cell->neighbor(f)->get_fe().n_dofs_per_cell() == 0)
+              is_interior = false;
+          if (not is_interior)
+            continue;
+
+          ++n_interior_cells;
+          cell->get_dof_values(result, values);
+          cell->get_dof_values(result_exact, values_exact);
+          values -= values_exact;
+          max_error = std::max(max_error, values.linfty_norm());
+        }
+
+      EXPECT_GT(dealii::Utilities::MPI::sum(n_interior_cells, MPI_COMM_WORLD), 0U);
+      EXPECT_LT(dealii::Utilities::MPI::max(max_error, MPI_COMM_WORLD), 1e-10);
+
+      advection_operator.set_artificial_viscosity(nullptr);
+    }
+
+    /**
      * Test the upwind flux of the DG advection operator for a piecewise constant level-set field
      * and the constant velocity u = e_x: within each cell, the mean value of the result is
      * -(phi_K - phi_left) / h, where phi_left is the value of the left neighbor (inflow face),
@@ -712,7 +835,10 @@ namespace MeltPoolDG::LevelSet
      */
     template <int dim>
     std::vector<unsigned int>
-    compute_neighbor_columns(const double theta_0, const double theta_1, const double threshold)
+    compute_neighbor_columns(const double               theta_0,
+                             const double               theta_1,
+                             const double               threshold,
+                             const std::vector<double> &velocity = {})
     {
       constexpr unsigned int fe_degree     = 2;
       constexpr unsigned int n_refinements = 3;
@@ -772,12 +898,27 @@ namespace MeltPoolDG::LevelSet
       dealii::DoFHandler<dim> dof_handler_band(triangulation);
       dealii::DoFHandler<dim> dof_handler_cut(triangulation);
 
-      NarrowBand::distribute_dofs(is_cut_cell,
-                                  dof_handler_cut,
-                                  fe_collection_cut,
-                                  dof_handler_band,
-                                  fe_collection_band,
-                                  is_small_cut_cell);
+      // optionally, only the face neighbors downstream of the cut cells are activated
+      dealii::Functions::ConstantFunction<dim> velocity_function(
+        velocity.empty() ? std::vector<double>(dim, 0.) : velocity);
+      std::function<bool(const typename dealii::Triangulation<dim>::active_cell_iterator &,
+                         const unsigned int)>
+        is_activating_face;
+      if (not velocity.empty())
+        is_activating_face =
+          [&](const typename dealii::Triangulation<dim>::active_cell_iterator &cell,
+              const unsigned int                                               face_no) {
+            return NarrowBand::is_downstream_face<dim>(
+              mapping, velocity_function, {0.}, cell, face_no, fe_degree + 2);
+          };
+
+      NarrowBand::distribute_dofs<dim>(is_cut_cell,
+                                       dof_handler_cut,
+                                       fe_collection_cut,
+                                       dof_handler_band,
+                                       fe_collection_band,
+                                       is_small_cut_cell,
+                                       is_activating_face);
 
       std::vector<unsigned int> n_neighbor_cells_per_column(8, 0);
       for (const auto &cell : dof_handler_band.active_cell_iterators())
@@ -1001,7 +1142,8 @@ namespace MeltPoolDG::LevelSet
     number
     compute_redistancing_error_circle(const unsigned int fe_degree,
                                       const unsigned int n_refinements,
-                                      const unsigned int n_layers)
+                                      const unsigned int n_layers,
+                                      const double       sign_clamp_epsilon = 0.)
     {
       dealii::Point<dim> center;
       center[0] = 0.1;
@@ -1048,7 +1190,8 @@ namespace MeltPoolDG::LevelSet
             cell->set_dof_values(values, level_set_band);
           }
 
-      NarrowBandData<number>                       data;
+      NarrowBandData<number> data;
+      data.extension.sign_clamp_epsilon = sign_clamp_epsilon;
       const dealii::ConditionalOStream             pcout(std::cout, false);
       NarrowBandClosestPointExtension<dim, number> extension(data.extension,
                                                              fixture.mapping,
@@ -1062,6 +1205,405 @@ namespace MeltPoolDG::LevelSet
 
       level_set_band -= level_set_exact;
       return level_set_band.linfty_norm();
+    }
+
+    /**
+     * Semi-Lagrangian advection of a planar signed distance function phi = n.x - c (|n| = 1) with
+     * a constant velocity u: the back-traced level set phi(x - u dt) is reproduced exactly on all
+     * candidate cells (cut cells and their vertex neighbors), since the polynomials of the cut
+     * cells are exact and the distance to the planar interface with the sign of the cell is exact
+     * for the foot points outside of the cut cells. If the signs of all cells are flipped, the
+     * values with foot points outside of the cut cells change their sign, while the values with
+     * foot points in the cut cells remain unchanged. The values are checked on the candidate cells
+     * in the interior of the domain (the closest points of the nodes near the domain boundary may
+     * be located outside of the cut cells). Returns the numbers of nodes with unchanged and with
+     * flipped values for the flipped signs (summed over all processes).
+     */
+    template <int dim>
+    std::pair<unsigned int, unsigned int>
+    test_semi_lagrangian_planar(const unsigned int fe_degree)
+    {
+      dealii::Tensor<1, dim> normal;
+      normal[0] = 0.8;
+      normal[1] = 0.6;
+      const dealii::ScalarFunctionFromFunctionObject<dim> planar(
+        [&](const dealii::Point<dim> &p) { return normal * p - 0.1037; });
+
+      NarrowBandFixture<dim> fixture(fe_degree, 3, 1, &planar);
+
+      std::vector<bool> is_cut_cell(fixture.triangulation.n_active_cells(), false);
+      for (const auto &cell : fixture.dof_handler_band.active_cell_iterators())
+        if (cell->is_locally_owned())
+          is_cut_cell[cell->active_cell_index()] =
+            cell->active_fe_index() == NarrowBand::ActiveFEIndex::cut;
+
+      // band of the candidate cells: cut cells and one layer of vertex neighbors
+      const auto fe_collection_band = NarrowBand::create_layered_band_fe_collection<dim>(fe_degree);
+      const auto fe_collection_cut  = NarrowBand::create_layered_cut_fe_collection<dim>(fe_degree);
+      dealii::DoFHandler<dim> dof_handler_band(fixture.triangulation);
+      dealii::DoFHandler<dim> dof_handler_cut(fixture.triangulation);
+      NarrowBand::distribute_dofs_layered(
+        is_cut_cell, 1, dof_handler_cut, fe_collection_cut, dof_handler_band, fe_collection_band);
+
+      VectorType level_set_cut, level_set_band, level_set_exact;
+      fixture.initialize_vector(dof_handler_cut, level_set_cut);
+      fixture.initialize_vector(dof_handler_band, level_set_band);
+      fixture.initialize_vector(dof_handler_band, level_set_exact);
+      dealii::VectorTools::interpolate(fixture.mapping, dof_handler_cut, planar, level_set_cut);
+
+      // constant velocity (displacement of 0.4 h within the time step)
+      std::vector<double> velocity(dim, 0.);
+      velocity[0] = 0.5;
+      velocity[1] = -0.3;
+      dealii::Functions::ConstantFunction<dim> velocity_function(velocity);
+      const double                             time_step =
+        0.1 / std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1]);
+
+      dealii::Tensor<1, dim> displacement;
+      for (unsigned int d = 0; d < dim; ++d)
+        displacement[d] = time_step * velocity[d];
+      const dealii::ScalarFunctionFromFunctionObject<dim> exact(
+        [&](const dealii::Point<dim> &p) { return planar.value(p - displacement); });
+      dealii::VectorTools::interpolate(fixture.mapping, dof_handler_band, exact, level_set_exact);
+
+      // signs of the locally owned and ghost cells
+      std::vector<int> cell_signs(fixture.triangulation.n_active_cells(), 0);
+      for (const auto &cell : fixture.triangulation.active_cell_iterators())
+        if (not cell->is_artificial())
+          cell_signs[cell->active_cell_index()] = planar.value(cell->center()) > 0. ? 1 : -1;
+
+      const dealii::ConditionalOStream               pcout(std::cout, false);
+      NarrowBandSemiLagrangianAdvection<dim, number> advection(pcout);
+
+      // (a) exact reproduction
+      const auto statistics = advection.advect(dof_handler_cut,
+                                               level_set_cut,
+                                               dof_handler_band,
+                                               level_set_band,
+                                               cell_signs,
+                                               velocity_function,
+                                               0.,
+                                               time_step);
+      EXPECT_GT(statistics.n_nodes_outside, 0U);
+      EXPECT_LT(statistics.n_nodes_outside, statistics.n_nodes);
+      EXPECT_NEAR(statistics.max_displacement, 0.4, 1e-10);
+
+      // nodal values of the locally owned candidate cells in the interior of the domain
+      const auto for_each_interior_value = [&](const auto &function) {
+        dealii::Vector<number> values(fe_collection_band[1].n_dofs_per_cell());
+        dealii::Vector<number> values_exact(values.size());
+        for (const auto &cell : dof_handler_band.active_cell_iterators())
+          {
+            if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+              continue;
+
+            bool is_interior = true;
+            for (unsigned int d = 0; d < dim; ++d)
+              is_interior = is_interior and std::abs(cell->center()[d]) < 0.5;
+            if (not is_interior)
+              continue;
+
+            cell->get_dof_values(level_set_band, values);
+            cell->get_dof_values(level_set_exact, values_exact);
+            for (unsigned int i = 0; i < values.size(); ++i)
+              function(values[i], values_exact[i]);
+          }
+      };
+
+      unsigned int n_interior_values = 0;
+      for_each_interior_value([&](const double value, const double value_exact) {
+        EXPECT_NEAR(value, value_exact, 1e-10);
+        ++n_interior_values;
+      });
+      EXPECT_GT(dealii::Utilities::MPI::sum(n_interior_values, MPI_COMM_WORLD), 0U);
+
+      // (b) flipped signs of all cells
+      for (auto &sign : cell_signs)
+        sign = -sign;
+      advection.advect(dof_handler_cut,
+                       level_set_cut,
+                       dof_handler_band,
+                       level_set_band,
+                       cell_signs,
+                       velocity_function,
+                       0.,
+                       time_step);
+
+      unsigned int n_unchanged = 0, n_flipped = 0;
+      for_each_interior_value([&](const double value, const double value_exact) {
+        if (std::abs(value - value_exact) < 1e-10)
+          ++n_unchanged;
+        else if (std::abs(value + value_exact) < 1e-10)
+          ++n_flipped;
+        else
+          ADD_FAILURE() << "unexpected value " << value << " (exact " << value_exact << ")";
+      });
+
+      return {dealii::Utilities::MPI::sum(n_unchanged, MPI_COMM_WORLD),
+              dealii::Utilities::MPI::sum(n_flipped, MPI_COMM_WORLD)};
+    }
+
+    /**
+     * Sign clamp of the extended level set: as in test_sign_limiter(), the curved level set
+     * phi = l + c l^2 is prescribed on the cut cells of the zero iso-surface of a linear function.
+     * The extension (without sign limiter) is computed with and without sign clamp. With the sign
+     * clamp, the nodal values of each neighbor cell have one sign; all modified values equal
+     * +-epsilon h, and only nodal values of the opposite sign of the cell side are modified.
+     * Returns the number of nodal sign changes without sign clamp (summed over all processes).
+     */
+    template <int dim>
+    unsigned int
+    test_sign_clamp(const NarrowBandExtensionType type)
+    {
+      constexpr unsigned int fe_degree     = 2;
+      constexpr unsigned int n_refinements = 3;
+      constexpr double       epsilon       = 0.01;
+      NarrowBandFixture<dim> fixture(fe_degree, n_refinements, 1 /*linear level set*/);
+
+      const double h = 2. / dealii::Utilities::pow(2, n_refinements);
+      const double c = 3. / h;
+
+      const dealii::ScalarFunctionFromFunctionObject<dim> curved_level_set(
+        [&](const dealii::Point<dim> &p) {
+          const double l = fixture.level_set_function.value(p, 0);
+          return l + c * l * l;
+        });
+
+      const dealii::ConditionalOStream pcout(std::cout, false);
+
+      const auto extend = [&](const double sign_clamp_epsilon) {
+        VectorType level_set_band = create_band_vector_from_cut_cells(fixture, curved_level_set);
+
+        NarrowBandData<number> data;
+        data.extension.type                         = type;
+        data.extension.sign_limiter_tolerance       = -1.;
+        data.extension.sign_clamp_epsilon           = sign_clamp_epsilon;
+        data.extension.linear_solver.rel_tolerance  = 1e-14;
+        data.extension.linear_solver.abs_tolerance  = 1e-16;
+        data.extension.linear_solver.max_iterations = 10000;
+
+        if (type == NarrowBandExtensionType::ghost_penalty)
+          NarrowBandGhostPenaltyExtension<dim, number>(data.extension, fixture.mapping, pcout)
+            .extend(fixture.dof_handler_band, level_set_band);
+        else
+          NarrowBandClosestPointExtension<dim, number>(data.extension, fixture.mapping, pcout)
+            .extend(fixture.dof_handler_band, level_set_band);
+        return level_set_band;
+      };
+
+      const VectorType level_set_unclamped = extend(0.);
+      const VectorType level_set_clamped   = extend(epsilon);
+
+      const auto            &fe = fixture.fe_collection_band[NarrowBand::ActiveFEIndex::neighbor];
+      dealii::Vector<number> values_unclamped(fe.n_dofs_per_cell());
+      dealii::Vector<number> values_clamped(fe.n_dofs_per_cell());
+
+      const auto has_sign_change = [](const dealii::Vector<number> &values) {
+        return *std::min_element(values.begin(), values.end()) <= 0. and
+               *std::max_element(values.begin(), values.end()) >= 0.;
+      };
+
+      unsigned int n_sign_changes_unclamped = 0, n_modified_cells = 0;
+      for (const auto &cell : fixture.dof_handler_band.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or
+              cell->active_fe_index() != NarrowBand::ActiveFEIndex::neighbor)
+            continue;
+
+          cell->get_dof_values(level_set_unclamped, values_unclamped);
+          cell->get_dof_values(level_set_clamped, values_clamped);
+
+          n_sign_changes_unclamped += has_sign_change(values_unclamped);
+          EXPECT_FALSE(has_sign_change(values_clamped));
+
+          // side of the cell: sign of the clamped values
+          const double side          = values_clamped[0] > 0. ? 1. : -1.;
+          const double clamped_value = side * epsilon * cell->minimum_vertex_distance();
+
+          bool is_modified = false;
+          for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
+            if (values_clamped[i] != values_unclamped[i])
+              {
+                EXPECT_LE(side * values_unclamped[i], 0.);
+                EXPECT_NEAR(values_clamped[i], clamped_value, 1e-14);
+                is_modified = true;
+              }
+          n_modified_cells += is_modified;
+        }
+
+      n_sign_changes_unclamped =
+        dealii::Utilities::MPI::sum(n_sign_changes_unclamped, MPI_COMM_WORLD);
+      n_modified_cells = dealii::Utilities::MPI::sum(n_modified_cells, MPI_COMM_WORLD);
+
+      // cells with sign changes are modified
+      EXPECT_GE(n_modified_cells, n_sign_changes_unclamped);
+
+      return n_sign_changes_unclamped;
+    }
+
+    /**
+     * Bound-preserving limiter: the linear level set phi^n = x_0 on the band defines the bounds.
+     * On each band cell, whose left and right neighbors belong to the band, the nodal value at the
+     * lower right vertex is increased by h/2 (overshoot). With the bounds from all face neighbors,
+     * the overshoot is within the range of the right neighbor, i.e., no cell is limited. With the
+     * upwind bounds for the velocity e_x, the bounds of a cell are given by the cell and its left
+     * neighbor, i.e., all perturbed cells are limited: afterwards, their values at the sample
+     * points satisfy the bounds and the cell means are preserved. Returns the number of limited
+     * cells and the number of perturbed cells (summed over all processes).
+     */
+    template <int dim>
+    std::pair<unsigned int, unsigned int>
+    test_bound_preserving_limiter(
+      const NarrowBandLimiterBounds bounds_type,
+      const NarrowBandLimiterType   limiter_type = NarrowBandLimiterType::maximum_principle)
+    {
+      constexpr unsigned int fe_degree = 2;
+      NarrowBandFixture<dim> fixture(fe_degree, 3);
+
+      const auto &dof_handler = fixture.dof_handler_band;
+      const auto &fe          = fixture.fe_collection_band[NarrowBand::ActiveFEIndex::cut];
+
+      const bool   is_sign_limiter = limiter_type == NarrowBandLimiterType::sign;
+      const number offset          = is_sign_limiter ? 3. : 0.;
+
+      // linear level set, which is positive on the whole domain for the sign limiter
+      const dealii::ScalarFunctionFromFunctionObject<dim> linear_function(
+        [&](const dealii::Point<dim> &p) { return p[0] + offset; });
+
+      VectorType level_set;
+      fixture.initialize_vector(dof_handler, level_set);
+      dealii::VectorTools::interpolate(fixture.mapping, dof_handler, linear_function, level_set);
+
+      typename NarrowBandData<number>::AdvectionLimiter data;
+      data.cells  = NarrowBandLimiterCells::all_band_cells;
+      data.type   = limiter_type;
+      data.bounds = bounds_type;
+
+      std::vector<double> velocity(dim, 0.);
+      velocity[0] = 1.;
+      dealii::Functions::ConstantFunction<dim> velocity_function(velocity);
+
+      // time step: strips of a quarter of the cell size
+      const number h         = 2. / dealii::Utilities::pow(2, 3);
+      const number time_step = 0.25 * h;
+
+      NarrowBandBoundPreservingLimiter<dim, number> limiter(data, fixture.mapping);
+      limiter.compute_bounds(dof_handler, level_set, velocity_function, 0., time_step);
+
+      // nodal index of the lower right vertex (lexicographic numbering)
+      const unsigned int lower_right_node = fe_degree;
+
+      const auto is_band_cell = [](const auto &cell) {
+        return cell->get_fe().n_dofs_per_cell() > 0;
+      };
+
+      // perturbation of the cells with an upwind neighbor in the band (face 0: -x, face 1: +x):
+      // overshoot for the maximum principle, negative value for the sign limiter
+      std::vector<bool>      is_perturbed(fixture.triangulation.n_active_cells(), false);
+      dealii::Vector<number> values(fe.n_dofs_per_cell());
+      unsigned int           n_perturbed_cells = 0;
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        if (cell->is_locally_owned() and is_band_cell(cell) and not cell->at_boundary(0) and
+            not cell->at_boundary(1) and is_band_cell(cell->neighbor(0)) and
+            is_band_cell(cell->neighbor(1)))
+          {
+            cell->get_dof_values(level_set, values);
+            if (is_sign_limiter)
+              values[lower_right_node] = -0.5 * h;
+            else
+              values[lower_right_node] += 0.5 * h;
+            cell->set_dof_values(values, level_set);
+            is_perturbed[cell->active_cell_index()] = true;
+            ++n_perturbed_cells;
+          }
+
+      // cell means before the limiter
+      dealii::FEValues<dim> fe_values(fixture.mapping,
+                                      fe,
+                                      dealii::QGauss<dim>(fe_degree + 1),
+                                      dealii::update_values | dealii::update_JxW_values |
+                                        dealii::update_quadrature_points);
+      const auto            cell_mean = [&](const auto &cell, const VectorType &vector) {
+        fe_values.reinit(cell);
+        std::vector<number> quadrature_values(fe_values.n_quadrature_points);
+        fe_values.get_function_values(vector, quadrature_values);
+        number mean = 0., volume = 0.;
+        for (const unsigned int q : fe_values.quadrature_point_indices())
+          {
+            mean += quadrature_values[q] * fe_values.JxW(q);
+            volume += fe_values.JxW(q);
+          }
+        return mean / volume;
+      };
+
+      VectorType level_set_unlimited = level_set;
+      level_set_unlimited.update_ghost_values();
+
+      const auto statistics = limiter.limit(dof_handler, level_set);
+      EXPECT_EQ(statistics.n_mean_violations, 0U);
+      level_set.update_ghost_values();
+
+      // values at the sample points after the limiter
+      const dealii::QGaussLobatto<dim> sample_points(fe_degree + 2);
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or not is_perturbed[cell->active_cell_index()])
+            continue;
+
+          EXPECT_NEAR(cell_mean(cell, level_set), cell_mean(cell, level_set_unlimited), 1e-12);
+
+          // bounds: range of the cell and its left neighbor (or the strip of the left neighbor)
+          const number x_left  = cell->center()[0] - 0.5 * h;
+          const number x_right = cell->center()[0] + 0.5 * h;
+
+          number lower_bound = -std::numeric_limits<number>::max();
+          number upper_bound = std::numeric_limits<number>::max();
+          if (is_sign_limiter)
+            lower_bound = data.sign_epsilon * h;
+          else if (bounds_type == NarrowBandLimiterBounds::upwind_face_neighbors)
+            {
+              lower_bound = x_left - h;
+              upper_bound = x_right;
+            }
+          else if (bounds_type == NarrowBandLimiterBounds::upwind_strips)
+            {
+              lower_bound = x_left - time_step;
+              upper_bound = x_right;
+            }
+
+          cell->get_dof_values(level_set, values);
+          for (const auto &point : sample_points.get_points())
+            {
+              number value = 0.;
+              for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
+                value += values[i] * fe.shape_value(i, point);
+              EXPECT_LE(value, upper_bound + 1e-12);
+              EXPECT_GE(value, lower_bound - 1e-12);
+            }
+
+          // the limited bound is attained
+          if (statistics.n_limited_cells > 0 and
+              bounds_type != NarrowBandLimiterBounds::face_neighbors)
+            {
+              number min_value = std::numeric_limits<number>::max();
+              number max_value = -std::numeric_limits<number>::max();
+              for (const auto &point : sample_points.get_points())
+                {
+                  number value = 0.;
+                  for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
+                    value += values[i] * fe.shape_value(i, point);
+                  min_value = std::min(min_value, value);
+                  max_value = std::max(max_value, value);
+                }
+              if (is_sign_limiter)
+                EXPECT_NEAR(min_value, lower_bound, 1e-12);
+              else
+                EXPECT_NEAR(max_value, upper_bound, 1e-12);
+            }
+        }
+
+      return {statistics.n_limited_cells,
+              dealii::Utilities::MPI::sum(n_perturbed_cells, MPI_COMM_WORLD)};
     }
   } // namespace
 
@@ -1106,6 +1648,45 @@ namespace MeltPoolDG::LevelSet
   TEST(NarrowBandLevelSetTest, AdvectionOperatorLinearField3D)
   {
     test_advection_operator_linear_field<3>(2);
+  }
+
+  TEST(NarrowBandLevelSetTest, ModalSmoothnessIndicator2D)
+  {
+    constexpr unsigned int                        fe_degree = 2;
+    const dealii::FE_DGQ<2>                       fe(fe_degree);
+    const auto                                   &points = fe.get_unit_support_points();
+    std::vector<number>                           values(fe.n_dofs_per_cell());
+    const NarrowBand::ModalSmoothnessIndicator<2> indicator(fe);
+
+    // Legendre polynomials of degree 1 and 2 on the unit interval with the squared norms 1/3 and
+    // 1/5
+    const auto legendre_1 = [](const double x) { return 2. * x - 1.; };
+    const auto legendre_2 = [](const double x) { return 6. * x * x - 6. * x + 1.; };
+
+    const auto ratio = [&](const auto &function) {
+      for (unsigned int i = 0; i < points.size(); ++i)
+        values[i] = function(points[i]);
+      return indicator.compute_energy_ratio(values.data());
+    };
+
+    // constant and bilinear polynomials: no highest modes
+    EXPECT_LT(ratio([](const auto &) { return 0.3; }), 1e-6);
+    EXPECT_LT(ratio([](const auto &x) { return 0.2 + x[0] - 0.5 * x[1] + x[0] * x[1]; }), 1e-24);
+
+    // highest mode only
+    EXPECT_NEAR(ratio([&](const auto &x) { return 0.7 + legendre_2(x[1]); }), 1., 1e-12);
+
+    // a P_1(x_0) + b P_2(x_0): ratio b^2/5 / (a^2/3 + b^2/5)
+    const double a = 0.4, b = 0.1;
+    EXPECT_NEAR(ratio([&](const auto &x) { return a * legendre_1(x[0]) + b * legendre_2(x[0]); }),
+                (b * b / 5.) / (a * a / 3. + b * b / 5.),
+                1e-12);
+  }
+
+  TEST(NarrowBandLevelSetTest, AdvectionOperatorArtificialViscosity2D)
+  {
+    for (unsigned int degree = 2; degree <= 3; ++degree)
+      test_advection_operator_artificial_viscosity<2>(degree);
   }
 
   TEST(NarrowBandLevelSetTest, AdvectionOperatorUpwindFlux2D)
@@ -1175,6 +1756,24 @@ namespace MeltPoolDG::LevelSet
     EXPECT_EQ(compute_neighbor_columns<2>(0.3, 0.08, 0.1), (Columns{2, 4}));
   }
 
+  TEST(NarrowBandLevelSetTest, DownstreamNeighborActivation2D)
+  {
+    using Columns = std::vector<unsigned int>;
+
+    // interfaces in the columns 3 and 5: only the face neighbors, into which the velocity points
+    // from the cut cells, are activated
+    EXPECT_EQ(compute_neighbor_columns<2>(0.3, 0.5, 0.0, {1., 0.}), (Columns{4, 6}));
+    EXPECT_EQ(compute_neighbor_columns<2>(0.3, 0.5, 0.0, {-1., 0.}), (Columns{2, 4}));
+    EXPECT_EQ(compute_neighbor_columns<2>(0.3, 0.5, 0.0, {1., 1.}), (Columns{4, 6}));
+
+    // velocity tangential to the interfaces: no neighbor cells
+    EXPECT_EQ(compute_neighbor_columns<2>(0.3, 0.5, 0.0, {0., 1.}), (Columns{}));
+
+    // combination with the neighbor activation volume fraction: the cut cells of column 5 do not
+    // activate their face neighbors
+    EXPECT_EQ(compute_neighbor_columns<2>(0.3, 0.08, 0.1, {1., 0.}), (Columns{4}));
+  }
+
   TEST(NarrowBandLevelSetTest, ExtensionWithoutSmallCutCells2D)
   {
     constexpr double tolerance = 1e-10;
@@ -1230,6 +1829,16 @@ namespace MeltPoolDG::LevelSet
     }
   }
 
+  TEST(NarrowBandLevelSetTest, SemiLagrangianPlanar2D)
+  {
+    for (unsigned int degree = 1; degree <= 3; ++degree)
+      {
+        const auto [n_unchanged, n_flipped] = test_semi_lagrangian_planar<2>(degree);
+        EXPECT_GT(n_unchanged, 0U);
+        EXPECT_GT(n_flipped, 0U);
+      }
+  }
+
   TEST(NarrowBandLevelSetTest, LayeredBand2D)
   {
     // one cut cell, 8 cells sharing a vertex with it (first layer) and 16 cells in the second
@@ -1248,5 +1857,48 @@ namespace MeltPoolDG::LevelSet
 
     EXPECT_LT(compute_redistancing_error_circle<2>(2, 5, 2), 5e-4);
     EXPECT_LT(compute_redistancing_error_circle<2>(2, 4, 3), 4e-3);
+
+    // the redistanced signed distance function of a circle does not change its sign within a
+    // cell, i.e., the sign clamp does not modify it
+    EXPECT_EQ(compute_redistancing_error_circle<2>(2, 4, 2, 0.01),
+              compute_redistancing_error_circle<2>(2, 4, 2));
+  }
+
+  TEST(NarrowBandLevelSetTest, ExtensionSignClamp2D)
+  {
+    // the polynomial extension changes its sign within neighbor cells, which is removed by the
+    // sign clamp
+    EXPECT_GT(test_sign_clamp<2>(NarrowBandExtensionType::ghost_penalty), 0U);
+    EXPECT_GT(test_sign_clamp<2>(NarrowBandExtensionType::closest_point), 0U);
+  }
+
+  TEST(NarrowBandLevelSetTest, BoundPreservingLimiter2D)
+  {
+    // all face neighbors: the overshoot is within the range of the right neighbor
+    {
+      const auto [n_limited_cells, n_perturbed_cells] =
+        test_bound_preserving_limiter<2>(NarrowBandLimiterBounds::face_neighbors);
+      EXPECT_GT(n_perturbed_cells, 0U);
+      EXPECT_EQ(n_limited_cells, 0U);
+    }
+
+    // upwind face neighbors and upwind strips (velocity e_x): all perturbed cells are limited
+    for (const auto bounds_type :
+         {NarrowBandLimiterBounds::upwind_face_neighbors, NarrowBandLimiterBounds::upwind_strips})
+      {
+        const auto [n_limited_cells, n_perturbed_cells] =
+          test_bound_preserving_limiter<2>(bounds_type);
+        EXPECT_GT(n_perturbed_cells, 0U);
+        EXPECT_EQ(n_limited_cells, n_perturbed_cells);
+      }
+
+    // sign preservation: the negative values of the perturbed cells are removed
+    {
+      const auto [n_limited_cells, n_perturbed_cells] =
+        test_bound_preserving_limiter<2>(NarrowBandLimiterBounds::upwind_strips,
+                                         NarrowBandLimiterType::sign);
+      EXPECT_GT(n_perturbed_cells, 0U);
+      EXPECT_EQ(n_limited_cells, n_perturbed_cells);
+    }
   }
 } // namespace MeltPoolDG::LevelSet

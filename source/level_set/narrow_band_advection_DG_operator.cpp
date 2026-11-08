@@ -8,6 +8,7 @@
 #include <meltpooldg/utilities/vector_tools.hpp>
 
 #include <algorithm>
+#include <cmath>
 
 namespace MeltPoolDG::LevelSet
 {
@@ -52,11 +53,26 @@ namespace MeltPoolDG::LevelSet
       return;
 
     FECellIntegrator<dim, 1, number> phi(matrix_free, cell_range, band_dof_idx, quad_idx);
+    FECellIntegrator<dim, 1, number> epsilon(matrix_free, cell_range, band_dof_idx, quad_idx);
+
+    const bool has_viscosity = artificial_viscosity != nullptr;
+    const auto integration_flags =
+      has_viscosity ? dealii::EvaluationFlags::values | dealii::EvaluationFlags::gradients :
+                      dealii::EvaluationFlags::values;
 
     for (unsigned int cell = cell_range.first; cell < cell_range.second; ++cell)
       {
         phi.reinit(cell);
         phi.gather_evaluate(src, dealii::EvaluationFlags::gradients);
+
+        // cell-wise constant viscosity
+        VectorizedArrayType epsilon_cell = 0.;
+        if (has_viscosity)
+          {
+            epsilon.reinit(cell);
+            epsilon.read_dof_values_plain(*artificial_viscosity);
+            epsilon_cell = epsilon.begin_dof_values()[0];
+          }
 
         for (const unsigned int q : phi.quadrature_point_indices())
           {
@@ -65,9 +81,13 @@ namespace MeltPoolDG::LevelSet
                 *velocity_function, phi.quadrature_point(q));
 
             phi.submit_value(-(velocity * phi.get_gradient(q)), q);
+
+            // - (epsilon grad phi, grad v)
+            if (has_viscosity)
+              phi.submit_gradient(-epsilon_cell * phi.get_gradient(q), q);
           }
 
-        phi.integrate_scatter(dealii::EvaluationFlags::values, dst);
+        phi.integrate_scatter(integration_flags, dst);
       }
   }
 
@@ -87,13 +107,35 @@ namespace MeltPoolDG::LevelSet
 
     FEFaceIntegrator<dim, 1, number> phi_m(matrix_free, face_range, true, band_dof_idx, quad_idx);
     FEFaceIntegrator<dim, 1, number> phi_p(matrix_free, face_range, false, band_dof_idx, quad_idx);
+    FEFaceIntegrator<dim, 1, number> epsilon_m(
+      matrix_free, face_range, true, band_dof_idx, quad_idx);
+    FEFaceIntegrator<dim, 1, number> epsilon_p(
+      matrix_free, face_range, false, band_dof_idx, quad_idx);
+
+    const bool has_viscosity = artificial_viscosity != nullptr;
+    const auto flags         = has_viscosity ?
+                                 dealii::EvaluationFlags::values | dealii::EvaluationFlags::gradients :
+                                 dealii::EvaluationFlags::values;
+
+    // interior penalty factor (p+1)(p+2) / h_min of the viscous term
+    const number fe_degree = phi_m.get_shape_info().data[0].fe_degree;
+    const number penalty_factor =
+      (fe_degree + 1.) * (fe_degree + 2.) / scratch_data.get_min_cell_size();
 
     for (unsigned int face = face_range.first; face < face_range.second; ++face)
       {
         phi_m.reinit(face);
         phi_p.reinit(face);
-        phi_m.gather_evaluate(src, dealii::EvaluationFlags::values);
-        phi_p.gather_evaluate(src, dealii::EvaluationFlags::values);
+        phi_m.gather_evaluate(src, flags);
+        phi_p.gather_evaluate(src, flags);
+
+        if (has_viscosity)
+          {
+            epsilon_m.reinit(face);
+            epsilon_p.reinit(face);
+            epsilon_m.gather_evaluate(*artificial_viscosity, dealii::EvaluationFlags::values);
+            epsilon_p.gather_evaluate(*artificial_viscosity, dealii::EvaluationFlags::values);
+          }
 
         for (const unsigned int q : phi_m.quadrature_point_indices())
           {
@@ -108,12 +150,33 @@ namespace MeltPoolDG::LevelSet
             // upwind terms on the right-hand side: on the inflow part of the minus cell
             // (u.n_m < 0): (u.n_m)(phi_m - phi_p) v_m; on the inflow part of the plus cell
             // (u.n_p = -u.n_m < 0): (u.n_p)(phi_p - phi_m) v_p = (u.n_m)(phi_m - phi_p) v_p
-            phi_m.submit_value(std::min(normal_velocity, VectorizedArrayType(0.)) * jump, q);
-            phi_p.submit_value(std::max(normal_velocity, VectorizedArrayType(0.)) * jump, q);
+            VectorizedArrayType value_flux_m =
+              std::min(normal_velocity, VectorizedArrayType(0.)) * jump;
+            VectorizedArrayType value_flux_p =
+              std::max(normal_velocity, VectorizedArrayType(0.)) * jump;
+
+            if (has_viscosity)
+              {
+                // SIPG: ({eps grad phi}.n, [v]) + ({eps grad v}.n, [phi]) - sigma ([phi], [v])
+                const auto eps_m        = epsilon_m.get_value(q);
+                const auto eps_p        = epsilon_p.get_value(q);
+                const auto average_flux = 0.5 * (eps_m * phi_m.get_normal_derivative(q) +
+                                                 eps_p * phi_p.get_normal_derivative(q));
+                const auto sigma        = penalty_factor * std::max(eps_m, eps_p);
+
+                value_flux_m += average_flux - sigma * jump;
+                value_flux_p -= average_flux - sigma * jump;
+
+                phi_m.submit_gradient((0.5 * eps_m * jump) * phi_m.normal_vector(q), q);
+                phi_p.submit_gradient((0.5 * eps_p * jump) * phi_m.normal_vector(q), q);
+              }
+
+            phi_m.submit_value(value_flux_m, q);
+            phi_p.submit_value(value_flux_p, q);
           }
 
-        phi_m.integrate_scatter(dealii::EvaluationFlags::values, dst);
-        phi_p.integrate_scatter(dealii::EvaluationFlags::values, dst);
+        phi_m.integrate_scatter(flags, dst);
+        phi_p.integrate_scatter(flags, dst);
       }
   }
 
@@ -165,8 +228,12 @@ namespace MeltPoolDG::LevelSet
                      dst,
                      src,
                      true /*zero_dst_vector*/,
-                     dealii::MatrixFree<dim, number>::DataAccessOnFaces::values,
-                     dealii::MatrixFree<dim, number>::DataAccessOnFaces::values);
+                     artificial_viscosity != nullptr ?
+                       dealii::MatrixFree<dim, number>::DataAccessOnFaces::gradients :
+                       dealii::MatrixFree<dim, number>::DataAccessOnFaces::values,
+                     artificial_viscosity != nullptr ?
+                       dealii::MatrixFree<dim, number>::DataAccessOnFaces::gradients :
+                       dealii::MatrixFree<dim, number>::DataAccessOnFaces::values);
 
     matrix_free.cell_loop(&NarrowBandAdvectionDGOperator::local_apply_inverse_mass_matrix,
                           this,
@@ -175,6 +242,99 @@ namespace MeltPoolDG::LevelSet
 
     if (post)
       post(0, dst.locally_owned_size());
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandAdvectionDGOperator<dim, number>::set_artificial_viscosity(const VectorType *viscosity)
+  {
+    artificial_viscosity = viscosity;
+  }
+
+  template <int dim, typename number>
+  typename NarrowBandAdvectionDGOperator<dim, number>::ArtificialViscosityStatistics
+  NarrowBandAdvectionDGOperator<dim, number>::compute_artificial_viscosity(
+    const VectorType &level_set,
+    VectorType       &viscosity,
+    const number      time,
+    const number      time_step,
+    const number      factor,
+    const number      threshold,
+    const number      width,
+    const bool        only_non_cut_cells) const
+  {
+    AssertThrow(velocity_function, dealii::ExcMessage("No advection velocity has been set."));
+    AssertThrow(width > 0., dealii::ExcMessage("The indicator width must be positive."));
+    velocity_function->set_time(time);
+
+    const auto &matrix_free = scratch_data.get_matrix_free();
+    const auto &cell_sizes  = scratch_data.get_cell_sizes();
+
+    const auto &fe =
+      matrix_free.get_dof_handler(band_dof_idx).get_fe_collection()[NarrowBand::ActiveFEIndex::cut];
+    const NarrowBand::ModalSmoothnessIndicator<dim> indicator(fe);
+    const number                                    fe_degree = fe.degree;
+
+    viscosity = 0.;
+
+    ArtificialViscosityStatistics statistics;
+
+    for (unsigned int cell = 0; cell < matrix_free.n_cell_batches(); ++cell)
+      {
+        const unsigned int active_fe_index = matrix_free.get_cell_category(cell, band_dof_idx);
+        if (not is_band_fe_index(active_fe_index) or
+            (only_non_cut_cells and active_fe_index == NarrowBand::ActiveFEIndex::cut))
+          continue;
+
+        FECellIntegrator<dim, 1, number> phi(
+          matrix_free, band_dof_idx, quad_idx, 0, active_fe_index);
+        phi.reinit(cell);
+        phi.read_dof_values_plain(level_set);
+
+        const VectorizedArrayType ratio = indicator.compute_energy_ratio(phi.begin_dof_values());
+
+        // maximum velocity over the quadrature points
+        VectorizedArrayType max_speed = 0.;
+        for (const unsigned int q : phi.quadrature_point_indices())
+          max_speed =
+            std::max(max_speed,
+                     MeltPoolDG::VectorTools::evaluate_function_at_vectorized_points<dim, number>(
+                       *velocity_function, phi.quadrature_point(q))
+                       .norm());
+
+        VectorizedArrayType epsilon = 0.;
+        for (unsigned int v = 0; v < matrix_free.n_active_entries_per_cell_batch(cell); ++v)
+          {
+            const number s         = std::log10(std::max<number>(ratio[v], 1e-300));
+            const number epsilon_0 = factor * cell_sizes[cell][v] * max_speed[v] / fe_degree;
+
+            if (s > threshold + width)
+              epsilon[v] = epsilon_0;
+            else if (s >= threshold - width)
+              epsilon[v] = 0.5 * epsilon_0 *
+                           (1. + std::sin(0.5 * dealii::numbers::PI * (s - threshold) / width));
+
+            if (epsilon[v] > 0.)
+              {
+                ++statistics.n_cells;
+                statistics.max_diffusion_number =
+                  std::max(statistics.max_diffusion_number,
+                           epsilon[v] * time_step / (cell_sizes[cell][v] * cell_sizes[cell][v]));
+              }
+          }
+
+        for (unsigned int i = 0; i < phi.get_shape_info().dofs_per_component_on_cell; ++i)
+          phi.begin_dof_values()[i] = epsilon;
+        phi.set_dof_values_plain(viscosity);
+      }
+
+    viscosity.update_ghost_values();
+
+    const MPI_Comm comm = matrix_free.get_task_info().communicator;
+    statistics.n_cells  = dealii::Utilities::MPI::sum(statistics.n_cells, comm);
+    statistics.max_diffusion_number =
+      dealii::Utilities::MPI::max(statistics.max_diffusion_number, comm);
+    return statistics;
   }
 
   template <int dim, typename number>

@@ -378,19 +378,42 @@ namespace MeltPoolDG::LevelSet
         limit_sign_changes(mapping, dof_handler, level_set, data.sign_limiter_tolerance) :
         0;
 
+    // sign clamp: the extended level set does not change its sign within a neighbor cell
+    const bool   use_sign_clamp   = data.sign_clamp_epsilon > 0.;
+    unsigned int n_clamped_values = 0;
+    if (use_sign_clamp)
+      {
+        std::vector<bool> is_neighbor_cell(dof_handler.get_triangulation().n_active_cells(), false);
+        for (const auto &cell : dof_handler.active_cell_iterators())
+          if (cell->is_locally_owned() and cell->active_fe_index() == ActiveFEIndex::neighbor)
+            is_neighbor_cell[cell->active_cell_index()] = true;
+
+        // Note: level_set_relevant holds the given values of the cut cells (including the ghost
+        // cells).
+        n_clamped_values = clamp_signs(
+          dof_handler,
+          level_set,
+          compute_sides_from_cut_cells(mapping, dof_handler, level_set_relevant, is_neighbor_cell),
+          data.sign_clamp_epsilon);
+      }
+
     // Note: the number of excluded faces requires a collective operation.
     n_excluded_faces = dealii::Utilities::MPI::sum(n_excluded_faces, mpi_comm);
 
     {
+      const bool short_format = exclude_small_cut_cells or use_sign_clamp;
+
       std::ostringstream str;
       str << "extension to "
           << NarrowBand::n_cells_with_active_fe_index(dof_handler, ActiveFEIndex::neighbor)
           << " neighbor cells: " << n_iterations
-          << (exclude_small_cut_cells ? " iterations" : " linear iterations");
+          << (short_format ? " iterations" : " linear iterations");
       if (use_sign_limiter)
-        str << ", " << n_limited_cells << (exclude_small_cut_cells ? " limited" : " limited cells");
+        str << ", " << n_limited_cells << (short_format ? " limited" : " limited cells");
       if (exclude_small_cut_cells)
         str << ", " << n_excluded_faces << " excl. faces";
+      if (use_sign_clamp)
+        str << ", " << n_clamped_values << " clamped";
       Journal::print_line(pcout, str.str(), "narrow_band");
     }
 

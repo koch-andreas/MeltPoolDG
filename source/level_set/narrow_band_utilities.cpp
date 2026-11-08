@@ -1,5 +1,6 @@
 #include <deal.II/base/exceptions.h>
 #include <deal.II/base/mpi.h>
+#include <deal.II/base/polynomial.h>
 #include <deal.II/base/quadrature_lib.h>
 
 #include <deal.II/distributed/tria_base.h>
@@ -21,6 +22,7 @@
 #include <meltpooldg/level_set/narrow_band_utilities.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -162,12 +164,15 @@ namespace MeltPoolDG::LevelSet::NarrowBand
 
   template <int dim>
   void
-  distribute_dofs(const std::vector<bool>             &is_cut_cell,
-                  dealii::DoFHandler<dim>             &dof_handler_cut,
-                  const dealii::hp::FECollection<dim> &fe_collection_cut,
-                  dealii::DoFHandler<dim>             &dof_handler_band,
-                  const dealii::hp::FECollection<dim> &fe_collection_band,
-                  const std::vector<bool>             &is_small_cut_cell)
+  distribute_dofs(
+    const std::vector<bool>                       &is_cut_cell,
+    dealii::DoFHandler<dim>                       &dof_handler_cut,
+    const dealii::hp::FECollection<dim>           &fe_collection_cut,
+    dealii::DoFHandler<dim>                       &dof_handler_band,
+    const dealii::hp::FECollection<dim>           &fe_collection_band,
+    const std::vector<bool>                       &is_small_cut_cell,
+    const std::function<bool(const typename dealii::Triangulation<dim>::active_cell_iterator &,
+                             const unsigned int)> &is_activating_face)
   {
     AssertDimension(is_cut_cell.size(), dof_handler_cut.get_triangulation().n_active_cells());
     Assert(is_small_cut_cell.empty() or is_small_cut_cell.size() == is_cut_cell.size(),
@@ -217,8 +222,11 @@ namespace MeltPoolDG::LevelSet::NarrowBand
             Assert(neighbor->is_active(), dealii::ExcNotImplemented());
 
             // only cut cells with the (preliminary) FE index NarrowBand::cut activate their face
-            // neighbors
-            if (neighbor->active_fe_index() == ActiveFEIndex::cut)
+            // neighbors (optionally only across the activating faces)
+            if (neighbor->active_fe_index() == ActiveFEIndex::cut and
+                (not is_activating_face or
+                 is_activating_face(typename dealii::Triangulation<dim>::active_cell_iterator(cell),
+                                    f)))
               {
                 active_fe_indices[cell->active_cell_index()] = ActiveFEIndex::neighbor;
                 break;
@@ -235,6 +243,59 @@ namespace MeltPoolDG::LevelSet::NarrowBand
 
     dof_handler_cut.distribute_dofs(fe_collection_cut);
     dof_handler_band.distribute_dofs(fe_collection_band);
+  }
+
+  template <int dim>
+  bool
+  is_downstream_face(const dealii::Mapping<dim>                                      &mapping,
+                     dealii::Function<dim>                                           &velocity,
+                     const std::vector<double>                                       &times,
+                     const typename dealii::Triangulation<dim>::active_cell_iterator &cell,
+                     const unsigned int                                               face_no,
+                     const unsigned int                                               n_points_1d)
+  {
+    AssertThrow(velocity.n_components == dim,
+                dealii::ExcMessage("The velocity function needs dim components."));
+    AssertThrow(n_points_1d >= 2, dealii::ExcMessage("At least two points are required."));
+
+    // only the quadrature points and normal vectors are needed (any element)
+    const dealii::FE_Nothing<dim>     fe;
+    const dealii::Quadrature<dim - 1> face_quadrature = [&]() -> dealii::Quadrature<dim - 1> {
+      if constexpr (dim == 1)
+        return dealii::QGauss<0>(1);
+      else
+        return dealii::QGaussLobatto<dim - 1>(n_points_1d);
+    }();
+    dealii::FEFaceValues<dim> fe_face_values(mapping,
+                                             fe,
+                                             face_quadrature,
+                                             dealii::update_quadrature_points |
+                                               dealii::update_normal_vectors);
+    fe_face_values.reinit(cell, face_no);
+
+    const double old_time = velocity.get_time();
+
+    bool is_downstream = false;
+    for (const double time : times)
+      {
+        velocity.set_time(time);
+        for (const unsigned int q : fe_face_values.quadrature_point_indices())
+          {
+            double normal_velocity = 0., speed_square = 0.;
+            for (unsigned int d = 0; d < dim; ++d)
+              {
+                const double u_d = velocity.value(fe_face_values.quadrature_point(q), d);
+                normal_velocity += u_d * fe_face_values.normal_vector(q)[d];
+                speed_square += u_d * u_d;
+              }
+            if (normal_velocity < -1e-12 * std::sqrt(speed_square))
+              is_downstream = true;
+          }
+      }
+
+    velocity.set_time(old_time);
+
+    return is_downstream;
   }
 
   template <int dim>
@@ -307,8 +368,7 @@ namespace MeltPoolDG::LevelSet::NarrowBand
                           dealii::DoFHandler<dim>             &dof_handler_band,
                           const dealii::hp::FECollection<dim> &fe_collection_band)
   {
-    AssertThrow(n_layers >= 2,
-                dealii::ExcMessage("The advected band requires at least two layers."));
+    AssertThrow(n_layers >= 1, dealii::ExcMessage("The layered band requires at least one layer."));
     AssertThrow(fe_collection_cut.size() == 4 and fe_collection_band.size() == 4,
                 dealii::ExcMessage("The advected band requires the layered FE collections."));
     AssertThrow(not dof_handler_cut.get_triangulation().has_hanging_nodes(),
@@ -573,6 +633,201 @@ namespace MeltPoolDG::LevelSet::NarrowBand
     return dealii::Utilities::MPI::sum(n_limited_cells, dof_handler.get_mpi_communicator());
   }
 
+  template <int dim, typename number>
+  std::vector<int>
+  compute_sides_from_cut_cells(const dealii::Mapping<dim>    &mapping,
+                               const dealii::DoFHandler<dim> &dof_handler,
+                               const dealii::LinearAlgebra::distributed::Vector<number> &level_set,
+                               const std::vector<bool>                                  &cell_flags)
+  {
+    AssertDimension(cell_flags.size(), dof_handler.get_triangulation().n_active_cells());
+
+    std::vector<int> sides(cell_flags.size(), 0);
+
+    const auto &fe_cut = dof_handler.get_fe_collection()[ActiveFEIndex::cut];
+
+    const dealii::QGauss<dim - 1> face_quadrature(fe_cut.degree + 1);
+    dealii::FEFaceValues<dim>     fe_face_values(mapping,
+                                             fe_cut,
+                                             face_quadrature,
+                                             dealii::update_values | dealii::update_JxW_values);
+    std::vector<number>           values(face_quadrature.size());
+
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or not cell_flags[cell->active_cell_index()] or
+            cell->active_fe_index() == ActiveFEIndex::cut)
+          continue;
+
+        number integral = 0.;
+        for (const unsigned int f : cell->face_indices())
+          {
+            if (cell->at_boundary(f))
+              continue;
+
+            const auto neighbor = cell->neighbor(f);
+            if (neighbor->active_fe_index() != ActiveFEIndex::cut)
+              continue;
+
+            // trace of the cut cell on the shared face
+            fe_face_values.reinit(neighbor, cell->neighbor_of_neighbor(f));
+            fe_face_values.get_function_values(level_set, values);
+            for (const unsigned int q : fe_face_values.quadrature_point_indices())
+              integral += values[q] * fe_face_values.JxW(q);
+          }
+
+        sides[cell->active_cell_index()] = integral > 0. ? 1 : (integral < 0. ? -1 : 0);
+      }
+
+    return sides;
+  }
+
+  template <int dim, typename number>
+  unsigned int
+  clamp_signs(const dealii::DoFHandler<dim>                      &dof_handler,
+              dealii::LinearAlgebra::distributed::Vector<number> &level_set,
+              const std::vector<int>                             &cell_sides,
+              const number                                        epsilon)
+  {
+    AssertDimension(cell_sides.size(), dof_handler.get_triangulation().n_active_cells());
+
+    unsigned int           n_clamped_values = 0;
+    dealii::Vector<number> values;
+
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+          continue;
+
+        const int side = cell_sides[cell->active_cell_index()];
+        if (side == 0)
+          continue;
+
+        values.reinit(cell->get_fe().n_dofs_per_cell());
+        cell->get_dof_values(level_set, values);
+
+        const number clamped_value = side * epsilon * cell->minimum_vertex_distance();
+
+        bool is_modified = false;
+        for (auto &value : values)
+          if (side * value <= 0.)
+            {
+              value       = clamped_value;
+              is_modified = true;
+              ++n_clamped_values;
+            }
+
+        if (is_modified)
+          cell->set_dof_values(values, level_set);
+      }
+
+    return dealii::Utilities::MPI::sum(n_clamped_values, dof_handler.get_mpi_communicator());
+  }
+
+  template <int dim, typename number>
+  std::pair<unsigned int, unsigned int>
+  count_new_cut_cells(const dealii::Mapping<dim>                               &mapping,
+                      const dealii::DoFHandler<dim>                            &dof_handler,
+                      const dealii::LinearAlgebra::distributed::Vector<number> &level_set,
+                      const std::vector<bool>                                  &is_cut_cell)
+  {
+    AssertDimension(is_cut_cell.size(), dof_handler.get_triangulation().n_active_cells());
+
+    const auto &fe = dof_handler.get_fe_collection()[ActiveFEIndex::cut];
+
+    const dealii::Quadrature<dim - 1> face_quadrature = [&]() -> dealii::Quadrature<dim - 1> {
+      if constexpr (dim == 1)
+        return dealii::QGauss<0>(1);
+      else
+        return dealii::QGaussLobatto<dim - 1>(fe.degree + 2);
+    }();
+    dealii::FEFaceValues<dim> fe_face_values(mapping, fe, face_quadrature, dealii::update_values);
+    std::vector<number>       values(face_quadrature.size());
+
+    unsigned int n_new_cut_cells = 0, n_unconnected_cut_cells = 0;
+
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or not is_cut_cell[cell->active_cell_index()] or
+            cell->active_fe_index() == ActiveFEIndex::cut or cell->get_fe().n_dofs_per_cell() == 0)
+          continue;
+
+        ++n_new_cut_cells;
+
+        bool is_connected = false;
+        for (const unsigned int f : cell->face_indices())
+          {
+            if (cell->at_boundary(f) or cell->neighbor(f)->active_fe_index() != ActiveFEIndex::cut)
+              continue;
+
+            fe_face_values.reinit(cell, f);
+            fe_face_values.get_function_values(level_set, values);
+            if (*std::min_element(values.begin(), values.end()) <= 0. and
+                *std::max_element(values.begin(), values.end()) >= 0.)
+              is_connected = true;
+          }
+
+        if (not is_connected)
+          ++n_unconnected_cut_cells;
+      }
+
+    const MPI_Comm comm = dof_handler.get_mpi_communicator();
+    return {dealii::Utilities::MPI::sum(n_new_cut_cells, comm),
+            dealii::Utilities::MPI::sum(n_unconnected_cut_cells, comm)};
+  }
+
+  template <int dim>
+  ModalSmoothnessIndicator<dim>::ModalSmoothnessIndicator(const dealii::FiniteElement<dim> &fe)
+  {
+    const unsigned int p = fe.degree;
+    AssertThrow(p >= 2 and fe.n_dofs_per_cell() == dealii::Utilities::pow(p + 1, dim),
+                dealii::ExcMessage("The modal smoothness indicator requires a tensor-product "
+                                   "element of degree p >= 2."));
+
+    const unsigned int n_modes = dealii::Utilities::pow(p + 1, dim);
+
+    // Legendre polynomials on the unit interval
+    std::vector<dealii::Polynomials::Legendre> legendre;
+    for (unsigned int k = 0; k <= p; ++k)
+      legendre.emplace_back(k);
+
+    // Gauss quadrature, which integrates the products of the Legendre modes and the shape
+    // functions exactly
+    const dealii::QGauss<dim> quadrature(p + 1);
+
+    modal_projection.reinit(n_modes, fe.n_dofs_per_cell());
+    mode_norms.assign(n_modes, 0.);
+    is_highest_mode.assign(n_modes, false);
+
+    for (unsigned int a = 0; a < n_modes; ++a)
+      {
+        // tensor index of the mode (the constant mode a = 0 first)
+        std::array<unsigned int, dim> alpha;
+        for (unsigned int d = 0, index = a; d < dim; ++d)
+          {
+            alpha[d] = index % (p + 1);
+            index /= (p + 1);
+            if (alpha[d] == p)
+              is_highest_mode[a] = true;
+          }
+
+        for (unsigned int q = 0; q < quadrature.size(); ++q)
+          {
+            double mode = 1.;
+            for (unsigned int d = 0; d < dim; ++d)
+              mode *= legendre[alpha[d]].value(quadrature.point(q)[d]);
+
+            mode_norms[a] += mode * mode * quadrature.weight(q);
+            for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
+              modal_projection(a, i) +=
+                mode * fe.shape_value(i, quadrature.point(q)) * quadrature.weight(q);
+          }
+
+        for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
+          modal_projection(a, i) /= mode_norms[a];
+      }
+  }
+
   template <int dim>
   unsigned int
   n_cells_with_active_fe_index(const dealii::DoFHandler<dim> &dof_handler,
@@ -587,66 +842,91 @@ namespace MeltPoolDG::LevelSet::NarrowBand
   }
 
   // explicit instantiations
-#define MPDG_INSTANTIATE_NARROW_BAND_UTILITIES(dim)                                                        \
-  template dealii::hp::FECollection<dim> create_band_fe_collection<dim>(const unsigned int);               \
-  template dealii::hp::FECollection<dim> create_cut_fe_collection<dim>(const unsigned int);                \
-  template dealii::hp::FECollection<dim> create_layered_band_fe_collection<dim>(                           \
-    const unsigned int);                                                                                   \
-  template dealii::hp::FECollection<dim> create_layered_cut_fe_collection<dim>(                            \
-    const unsigned int);                                                                                   \
-  template std::vector<unsigned int> compute_layers<dim>(const dealii::Triangulation<dim> &,               \
-                                                         const std::vector<bool> &,                        \
-                                                         const unsigned int);                              \
-  template std::vector<unsigned int> distribute_dofs_layered<dim>(                                         \
-    const std::vector<bool> &,                                                                             \
-    const unsigned int,                                                                                    \
-    dealii::DoFHandler<dim> &,                                                                             \
-    const dealii::hp::FECollection<dim> &,                                                                 \
-    dealii::DoFHandler<dim> &,                                                                             \
-    const dealii::hp::FECollection<dim> &);                                                                \
-  template void copy_common_cell_values<dim, double>(                                                      \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    const dealii::LinearAlgebra::distributed::Vector<double> &,                                            \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    dealii::LinearAlgebra::distributed::Vector<double> &);                                                 \
-  template std::vector<bool> compute_cut_cells<dim, double>(                                               \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    const dealii::LinearAlgebra::distributed::Vector<double> &,                                            \
-    const unsigned int,                                                                                    \
-    std::vector<double> *);                                                                                \
-  template std::vector<double> compute_cut_cell_volume_fractions<dim, double>(                             \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    const dealii::LinearAlgebra::distributed::Vector<double> &,                                            \
-    const unsigned int);                                                                                   \
-  template void                                distribute_dofs<dim>(const std::vector<bool> &,             \
-                                     dealii::DoFHandler<dim> &,             \
-                                     const dealii::hp::FECollection<dim> &, \
-                                     dealii::DoFHandler<dim> &,             \
-                                     const dealii::hp::FECollection<dim> &, \
-                                     const std::vector<bool> &);            \
-  template std::vector<dealii::Vector<double>> extract_cell_values<dim, double>(                           \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    const dealii::LinearAlgebra::distributed::Vector<double> &,                                            \
-    const std::vector<bool> &);                                                                            \
-  template void set_cell_values<dim, double>(                                                              \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    const std::vector<dealii::Vector<double>> &,                                                           \
-    dealii::LinearAlgebra::distributed::Vector<double> &);                                                 \
-  template void copy_cut_cell_values<dim, double>(                                                         \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    const dealii::LinearAlgebra::distributed::Vector<double> &,                                            \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    dealii::LinearAlgebra::distributed::Vector<double> &);                                                 \
-  template double compute_eikonal_error<dim, double>(                                                      \
-    const dealii::Mapping<dim> &,                                                                          \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    const dealii::LinearAlgebra::distributed::Vector<double> &);                                           \
-  template unsigned int limit_sign_changes<dim, double>(                                                   \
-    const dealii::Mapping<dim> &,                                                                          \
-    const dealii::DoFHandler<dim> &,                                                                       \
-    dealii::LinearAlgebra::distributed::Vector<double> &,                                                  \
-    const double);                                                                                         \
-  template unsigned int n_cells_with_active_fe_index<dim>(const dealii::DoFHandler<dim> &,                 \
+#define MPDG_INSTANTIATE_NARROW_BAND_UTILITIES(dim)                                             \
+  template dealii::hp::FECollection<dim> create_band_fe_collection<dim>(const unsigned int);    \
+  template dealii::hp::FECollection<dim> create_cut_fe_collection<dim>(const unsigned int);     \
+  template dealii::hp::FECollection<dim> create_layered_band_fe_collection<dim>(                \
+    const unsigned int);                                                                        \
+  template dealii::hp::FECollection<dim> create_layered_cut_fe_collection<dim>(                 \
+    const unsigned int);                                                                        \
+  template std::vector<unsigned int> compute_layers<dim>(const dealii::Triangulation<dim> &,    \
+                                                         const std::vector<bool> &,             \
+                                                         const unsigned int);                   \
+  template std::vector<unsigned int> distribute_dofs_layered<dim>(                              \
+    const std::vector<bool> &,                                                                  \
+    const unsigned int,                                                                         \
+    dealii::DoFHandler<dim> &,                                                                  \
+    const dealii::hp::FECollection<dim> &,                                                      \
+    dealii::DoFHandler<dim> &,                                                                  \
+    const dealii::hp::FECollection<dim> &);                                                     \
+  template void copy_common_cell_values<dim, double>(                                           \
+    const dealii::DoFHandler<dim> &,                                                            \
+    const dealii::LinearAlgebra::distributed::Vector<double> &,                                 \
+    const dealii::DoFHandler<dim> &,                                                            \
+    dealii::LinearAlgebra::distributed::Vector<double> &);                                      \
+  template std::vector<bool> compute_cut_cells<dim, double>(                                    \
+    const dealii::DoFHandler<dim> &,                                                            \
+    const dealii::LinearAlgebra::distributed::Vector<double> &,                                 \
+    const unsigned int,                                                                         \
+    std::vector<double> *);                                                                     \
+  template std::vector<double> compute_cut_cell_volume_fractions<dim, double>(                  \
+    const dealii::DoFHandler<dim> &,                                                            \
+    const dealii::LinearAlgebra::distributed::Vector<double> &,                                 \
+    const unsigned int);                                                                        \
+  template void distribute_dofs<dim>(                                                           \
+    const std::vector<bool> &,                                                                  \
+    dealii::DoFHandler<dim> &,                                                                  \
+    const dealii::hp::FECollection<dim> &,                                                      \
+    dealii::DoFHandler<dim> &,                                                                  \
+    const dealii::hp::FECollection<dim> &,                                                      \
+    const std::vector<bool> &,                                                                  \
+    const std::function<bool(const typename dealii::Triangulation<dim>::active_cell_iterator &, \
+                             const unsigned int)> &);                                           \
+  template bool is_downstream_face<dim>(                                                        \
+    const dealii::Mapping<dim> &,                                                               \
+    dealii::Function<dim> &,                                                                    \
+    const std::vector<double> &,                                                                \
+    const typename dealii::Triangulation<dim>::active_cell_iterator &,                          \
+    const unsigned int,                                                                         \
+    const unsigned int);                                                                        \
+  template std::vector<dealii::Vector<double>> extract_cell_values<dim, double>(                \
+    const dealii::DoFHandler<dim> &,                                                            \
+    const dealii::LinearAlgebra::distributed::Vector<double> &,                                 \
+    const std::vector<bool> &);                                                                 \
+  template void set_cell_values<dim, double>(                                                   \
+    const dealii::DoFHandler<dim> &,                                                            \
+    const std::vector<dealii::Vector<double>> &,                                                \
+    dealii::LinearAlgebra::distributed::Vector<double> &);                                      \
+  template void copy_cut_cell_values<dim, double>(                                              \
+    const dealii::DoFHandler<dim> &,                                                            \
+    const dealii::LinearAlgebra::distributed::Vector<double> &,                                 \
+    const dealii::DoFHandler<dim> &,                                                            \
+    dealii::LinearAlgebra::distributed::Vector<double> &);                                      \
+  template double compute_eikonal_error<dim, double>(                                           \
+    const dealii::Mapping<dim> &,                                                               \
+    const dealii::DoFHandler<dim> &,                                                            \
+    const dealii::LinearAlgebra::distributed::Vector<double> &);                                \
+  template unsigned int limit_sign_changes<dim, double>(                                        \
+    const dealii::Mapping<dim> &,                                                               \
+    const dealii::DoFHandler<dim> &,                                                            \
+    dealii::LinearAlgebra::distributed::Vector<double> &,                                       \
+    const double);                                                                              \
+  template std::vector<int> compute_sides_from_cut_cells<dim, double>(                          \
+    const dealii::Mapping<dim> &,                                                               \
+    const dealii::DoFHandler<dim> &,                                                            \
+    const dealii::LinearAlgebra::distributed::Vector<double> &,                                 \
+    const std::vector<bool> &);                                                                 \
+  template unsigned int clamp_signs<dim, double>(                                               \
+    const dealii::DoFHandler<dim> &,                                                            \
+    dealii::LinearAlgebra::distributed::Vector<double> &,                                       \
+    const std::vector<int> &,                                                                   \
+    const double);                                                                              \
+  template std::pair<unsigned int, unsigned int> count_new_cut_cells<dim, double>(              \
+    const dealii::Mapping<dim> &,                                                               \
+    const dealii::DoFHandler<dim> &,                                                            \
+    const dealii::LinearAlgebra::distributed::Vector<double> &,                                 \
+    const std::vector<bool> &);                                                                 \
+  template unsigned int n_cells_with_active_fe_index<dim>(const dealii::DoFHandler<dim> &,      \
                                                           const unsigned int);
 
   MPDG_INSTANTIATE_NARROW_BAND_UTILITIES(1)
@@ -654,4 +934,8 @@ namespace MeltPoolDG::LevelSet::NarrowBand
   MPDG_INSTANTIATE_NARROW_BAND_UTILITIES(3)
 
 #undef MPDG_INSTANTIATE_NARROW_BAND_UTILITIES
+
+  template class ModalSmoothnessIndicator<1>;
+  template class ModalSmoothnessIndicator<2>;
+  template class ModalSmoothnessIndicator<3>;
 } // namespace MeltPoolDG::LevelSet::NarrowBand

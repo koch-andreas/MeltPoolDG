@@ -41,7 +41,13 @@ namespace MeltPoolDG::LevelSet
         "and several layers of vertex neighbors, which are advected together with the cut cells; "
         "the level set of the layers is only reconstructed by geometric redistancing (closest "
         "point on the discrete interface of the cut cells) for newly added cells and after the "
-        "elliptic reinitialization of the cut cells.");
+        "elliptic reinitialization of the cut cells. semi_lagrangian: the level set is only "
+        "stored on the cut cells; in each time step, it is evaluated on the cut cells and their "
+        "vertex neighbors (candidate cells) by nodal interpolation of the back-traced level set "
+        "(foot point of the characteristic in a cut cell: polynomial of the cut cell; otherwise: "
+        "distance to the discrete interface with the sign of the cell containing the foot point). "
+        "The new cut cells are determined from the candidate cells; no extension is needed. "
+        "Requires a displacement below one cell per time step.");
       prm.add_parameter("number of layers",
                         n_layers,
                         "Number of layers of vertex neighbors around the cut cells "
@@ -80,6 +86,17 @@ namespace MeltPoolDG::LevelSet
           "e.g., due to the polynomial extrapolation near under-resolved interface tips, would "
           "otherwise create spurious cut cells. Set to a negative value to disable the limiter.");
         prm.add_parameter(
+          "sign clamp epsilon",
+          extension.sign_clamp_epsilon,
+          "Sign clamp of the extrapolated level set (extension and geometric redistancing): each "
+          "extended cell is assigned to the side of the interface, on which it is located (from "
+          "the traces of the adjacent cut cells or from the closest point on the interface). "
+          "Nodal values of the opposite sign (or zero) are set to -epsilon * h on the negative side "
+          "and to +epsilon * h on the positive side (h: cell size), such that extrapolated values "
+          "never introduce a new interface. The sign clamp is applied after the sign limiter. Set "
+          "to 0 to disable the sign clamp.",
+          dealii::Patterns::Double(0.0));
+        prm.add_parameter(
           "minimum source volume fraction",
           extension.minimum_source_volume_fraction,
           "Minimum volume fraction |K cap {phi > 0}| / |K| of the positive phase of a cut cell K, "
@@ -101,9 +118,103 @@ namespace MeltPoolDG::LevelSet
       prm.enter_subsection("advection");
       {
         time_integrator.add_parameters(prm);
+
+        prm.enter_subsection("artificial viscosity");
+        {
+          prm.add_parameter(
+            "factor",
+            artificial_viscosity.factor,
+            "Artificial viscosity of the advection in the cells flagged by the modal smoothness "
+            "indicator of Persson & Peraire (2006): the term div(epsilon grad phi) is added to the "
+            "advection equation (SIPG discretization on the band, natural boundary condition at "
+            "the outer boundary of the band). The viscosity is constant per cell and determined "
+            "at the beginning of each time step from the indicator S = log10(E_p / E_var), where "
+            "E_p is the energy of the highest Legendre modes (degree p in any direction) and E_var "
+            "the energy of all modes except the cell mean: epsilon = epsilon_0 for S > s_0 + "
+            "kappa, epsilon = epsilon_0 / 2 (1 + sin(pi (S - s_0) / (2 kappa))) for |S - s_0| <= "
+            "kappa and zero otherwise, with epsilon_0 = factor h max |u| / p (h: cell size, max "
+            "|u| over the cell) and s_0 = -4 log10(p) + offset. The viscous term is integrated "
+            "explicitly, i.e., large factors violate the stability limit of the explicit time "
+            "integration (the maximum diffusion number epsilon dt / h^2 is printed for verbosity "
+            "level 1). A factor of zero disables the artificial viscosity. Requires p >= 2.",
+            dealii::Patterns::Double(0.0));
+          prm.add_parameter("indicator offset",
+                            artificial_viscosity.indicator_offset,
+                            "Offset of the threshold s_0 = -4 log10(p) + offset of the smoothness "
+                            "indicator.");
+          prm.add_parameter("indicator width",
+                            artificial_viscosity.indicator_width,
+                            "Half width kappa of the transition of the viscosity around the "
+                            "threshold s_0.",
+                            dealii::Patterns::Double(0.0));
+          prm.add_parameter("cells",
+                            artificial_viscosity.cells,
+                            "Cells, in which the artificial viscosity is applied: all cells of the "
+                            "band (all_band_cells) or all cells of the band, which are not cut at "
+                            "the beginning of the time step (non_cut_cells).");
+        }
+        prm.leave_subsection();
+
+        prm.enter_subsection("limiter");
+        {
+          prm.add_parameter(
+            "cells",
+            advection_limiter.cells,
+            "Bound-preserving limiter of the advection: after each stage of the SSP Runge-Kutta "
+            "scheme, the level set of the limited cells is scaled around its cell mean, such that "
+            "its values at the Gauss-Lobatto points remain within the bounds given by the minimum "
+            "m and maximum M of the level set at the beginning of the time step on the domain of "
+            "dependence of the cell. none: no limiter; all_band_cells: all cells of the band; "
+            "non_cut_cells: all cells of the band, which are not cut at the beginning of the time "
+            "step.");
+          prm.add_parameter(
+            "type",
+            advection_limiter.type,
+            "Type of the bounds. maximum_principle: local maximum principle [m - r h, M + r h]; "
+            "cells with an inflow face to an inactive cell or at the boundary of the domain are "
+            "not limited (unknown domain of dependence). sign: cells, whose domain of dependence "
+            "has a definite sign, keep this sign, i.e., phi >= min(m, epsilon h) if m > 0 and "
+            "phi <= max(M, -epsilon h) if M < 0; cells with values of both signs in their domain "
+            "of dependence are not limited; inactive cells and the boundary of the domain have "
+            "the sign of the adjacent band cell. In contrast to the sign preservation, the local "
+            "maximum principle also clips smooth extrema of the level set (e.g., the ridge of a "
+            "thin filament).");
+          prm.add_parameter(
+            "bounds",
+            advection_limiter.bounds,
+            "Approximation of the domain of dependence of a cell: the cell and all its face "
+            "neighbors in the band (face_neighbors), the cell and its face neighbors in the band "
+            "across inflow faces (upwind_face_neighbors), or the cell and the strips of width "
+            "|u.n| dt of the face neighbors in the band along the inflow faces, which are "
+            "extended by |u| dt beyond the edges of the faces (upwind_strips).");
+          prm.add_parameter("relaxation",
+                            advection_limiter.relaxation,
+                            "Relaxation r of the bounds of the local maximum principle relative to "
+                            "the cell size h: [m - r h, M + r h].",
+                            dealii::Patterns::Double(0.0));
+          prm.add_parameter(
+            "sign epsilon",
+            advection_limiter.sign_epsilon,
+            "Minimum distance epsilon h of the level set from zero (relative to the "
+            "cell size h), which is enforced by the sign-preserving limiter, unless "
+            "the domain of dependence attains values closer to zero.",
+            dealii::Patterns::Double(0.0));
+        }
+        prm.leave_subsection();
       }
       prm.leave_subsection();
 
+      prm.add_parameter(
+        "neighbor activation",
+        neighbor_activation,
+        "Face neighbors of the cut cells, which are activated as neighbor cells of the band "
+        "(extension band). all_face_neighbors: all face neighbors; downstream_face_neighbors: "
+        "only the face neighbors, into which the velocity points across a face shared with a cut "
+        "cell (at any Gauss-Lobatto point of the face at the beginning or the end of the next "
+        "time step), i.e., the cells into which the interface can move. The level set is only "
+        "extended to these cells. At the faces of the cut cells to inactive upstream cells, the "
+        "upwind flux uses the interior trace of the cut cell, i.e., the cut cell is not "
+        "influenced by extrapolated values from upstream.");
       prm.add_parameter(
         "neighbor activation volume fraction",
         neighbor_activation_volume_fraction,
@@ -147,6 +258,22 @@ namespace MeltPoolDG::LevelSet
         AssertThrow(neighbor_activation_volume_fraction == 0.,
                     dealii::ExcMessage("The neighbor activation volume fraction is not "
                                        "supported by the advected band."));
+        AssertThrow(neighbor_activation == NarrowBandNeighborActivation::all_face_neighbors,
+                    dealii::ExcMessage("The downstream neighbor activation is not supported by "
+                                       "the advected band."));
+      }
+
+    if (type == NarrowBandType::semi_lagrangian)
+      {
+        AssertThrow(neighbor_activation_volume_fraction == 0. and
+                      neighbor_activation == NarrowBandNeighborActivation::all_face_neighbors,
+                    dealii::ExcMessage("The neighbor activation options are not supported by the "
+                                       "semi-Lagrangian narrow band."));
+        AssertThrow(advection_limiter.cells == NarrowBandLimiterCells::none and
+                      artificial_viscosity.factor == 0.,
+                    dealii::ExcMessage("The limiter and the artificial viscosity of the DG "
+                                       "advection are not supported by the semi-Lagrangian "
+                                       "narrow band."));
       }
 
     if (type == NarrowBandType::extension and
@@ -179,6 +306,23 @@ namespace MeltPoolDG::LevelSet
                   time_integrator.integrator_type),
                 dealii::ExcMessage("The advection of the narrow-band level set requires an "
                                    "explicit time integration scheme."));
+
+    AssertThrow(artificial_viscosity.factor == 0. or fe_degree >= 2,
+                dealii::ExcMessage("The artificial viscosity of the narrow-band advection "
+                                   "requires p >= 2."));
+    AssertThrow(artificial_viscosity.factor == 0. or artificial_viscosity.indicator_width > 0.,
+                dealii::ExcMessage("The indicator width of the artificial viscosity must be "
+                                   "positive."));
+
+    AssertThrow(advection_limiter.cells == NarrowBandLimiterCells::none or
+                  time_integrator.integrator_type ==
+                    TimeIntegration::TimeIntegratorSchemes::SSP_RK_stage_1_order_1 or
+                  time_integrator.integrator_type ==
+                    TimeIntegration::TimeIntegratorSchemes::SSP_RK_stage_2_order_2 or
+                  time_integrator.integrator_type ==
+                    TimeIntegration::TimeIntegratorSchemes::SSP_RK_stage_3_order_3,
+                dealii::ExcMessage("The bound-preserving limiter of the narrow-band advection "
+                                   "requires an SSP Runge-Kutta scheme."));
   }
 
   template struct NarrowBandData<double>;

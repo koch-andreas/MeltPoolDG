@@ -35,6 +35,19 @@ namespace MeltPoolDG::LevelSet
    * on the domain boundary, no exterior data is available and $\phi_h^\mathrm{ext} =
    * \phi_h^\mathrm{int}$ is used, i.e., these faces do not contribute.
    *
+   * Optionally, an artificial viscosity term $\nabla \cdot (\epsilon \nabla \phi)$ with a
+   * cell-wise constant viscosity $\epsilon_K \geq 0$ is added (see
+   * compute_artificial_viscosity()), which is discretized by the symmetric interior penalty
+   * method on the faces between two band cells, i.e., the residual contains
+   *
+   * $- \sum_K (\epsilon \nabla \phi_h, \nabla v)_K + \sum_F \int_F \left( \{\epsilon \nabla
+   * \phi_h\} \cdot \boldsymbol{n} [v] + \{\epsilon \nabla v\} \cdot \boldsymbol{n} [\phi_h] -
+   * \sigma_F [\phi_h][v] \right) \mathrm{d}s$
+   *
+   * with $\sigma_F = (p+1)(p+2) \max(\epsilon^-, \epsilon^+) / h_\mathrm{min}$. At the outer
+   * boundary of the band and on the domain boundary, the natural boundary condition
+   * $\epsilon \nabla \phi \cdot \boldsymbol{n} = 0$ is used.
+   *
    * The operator evaluates $M^{-1} r(\phi_h)$ with the block-diagonal mass matrix $M$ and the
    * residual $r(\phi_h) = -\sum_K (\boldsymbol{u}_h \cdot \nabla \phi_h, v)_K + \sum_K
    * \int_{\partial K^-} \ldots$, which is the right-hand side of the semi-discrete system for
@@ -83,6 +96,49 @@ namespace MeltPoolDG::LevelSet
                    VectorType                                            &dst,
                    const VectorType                                      &src,
                    const std::function<void(unsigned int, unsigned int)> &post = {}) const;
+
+    /**
+     * @brief Statistics of the artificial viscosity.
+     */
+    struct ArtificialViscosityStatistics
+    {
+      /// Number of cells with a positive viscosity (summed over all processes).
+      unsigned int n_cells = 0;
+
+      /// Maximum diffusion number $\epsilon_K \Delta t / h_K^2$ (over all processes).
+      number max_diffusion_number = 0.;
+    };
+
+    /**
+     * @brief Compute the cell-wise constant artificial viscosity from the modal smoothness
+     * indicator (see NarrowBand::ModalSmoothnessIndicator and
+     * NarrowBandData::ArtificialViscosity) of the level set.
+     *
+     * @param level_set Level-set field on the band.
+     * @param viscosity Viscosity field on the band (constant per cell, ghost values are updated).
+     * @param time Time at which the velocity is evaluated.
+     * @param time_step Time-step size (statistics).
+     * @param factor Factor c of the maximum viscosity c h max|u| / p.
+     * @param threshold Threshold s_0 of the indicator log10(E_p / E_var).
+     * @param width Half width kappa of the transition around the threshold.
+     * @param only_non_cut_cells Only cells, which are not cut, get a viscosity.
+     */
+    ArtificialViscosityStatistics
+    compute_artificial_viscosity(const VectorType &level_set,
+                                 VectorType       &viscosity,
+                                 const number      time,
+                                 const number      time_step,
+                                 const number      factor,
+                                 const number      threshold,
+                                 const number      width,
+                                 const bool        only_non_cut_cells) const;
+
+    /**
+     * @brief Set the artificial viscosity field (see compute_artificial_viscosity()), which is used
+     * by apply_operator() with updated ghost values. A null pointer disables the viscosity.
+     */
+    void
+    set_artificial_viscosity(const VectorType *viscosity);
 
     /**
      * @brief Compute the CFL number $\Delta t (2p+1) \max |\boldsymbol{u}_h| / h$ over the
@@ -141,5 +197,8 @@ namespace MeltPoolDG::LevelSet
 
     /// Advection velocity.
     std::shared_ptr<dealii::Function<dim>> velocity_function;
+
+    /// Artificial viscosity field (constant per cell); nullptr if disabled.
+    const VectorType *artificial_viscosity = nullptr;
   };
 } // namespace MeltPoolDG::LevelSet

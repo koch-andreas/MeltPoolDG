@@ -36,7 +36,7 @@
 namespace MeltPoolDG::Simulation::VortexBubble
 {
   // period of the vortex flow
-  static double Tf = 2.0;
+  static double Tf = 4.0;
 
   /*
    * this function specifies the initial field of the level set equation

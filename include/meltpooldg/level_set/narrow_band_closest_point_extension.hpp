@@ -52,6 +52,12 @@ namespace MeltPoolDG::LevelSet
    * in the search, if no other cut cell shares a vertex with the neighbor cell (see
    * NarrowBandData::Extension::minimum_source_volume_fraction).
    *
+   * Optionally, nodal values of the extended (or redistanced) field, whose sign differs from the
+   * side of the cell, are set to $\mp\epsilon h$ (see
+   * NarrowBandData::Extension::sign_clamp_epsilon). The side is determined from the traces of the
+   * face-adjacent cut cells (extend()) or from the closest-point value at the cell center
+   * (redistance()).
+   *
    * Optionally, spurious sign changes of the extended field on the neighbor cells are removed by
    * NarrowBand::limit_sign_changes().
    *

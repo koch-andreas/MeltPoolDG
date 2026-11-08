@@ -2,7 +2,11 @@
 #include <deal.II/base/mpi.h>
 #include <deal.II/base/quadrature_lib.h>
 
+#include <deal.II/distributed/tria_base.h>
+
 #include <deal.II/fe/fe_q.h>
+
+#include <deal.II/grid/grid_tools.h>
 
 #include <deal.II/non_matching/mesh_classifier.h>
 
@@ -15,7 +19,9 @@
 #include <meltpooldg/utilities/scoped_name.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -33,10 +39,10 @@ namespace MeltPoolDG::LevelSet
     , narrow_band_data(narrow_band_data_in)
     , reinit_data(reinit_data_in)
     , fe_degree(fe_degree_in)
-    , fe_collection_band(narrow_band_data_in.type == NarrowBandType::advected_layers ?
+    , fe_collection_band(narrow_band_data_in.type != NarrowBandType::extension ?
                            NarrowBand::create_layered_band_fe_collection<dim>(fe_degree_in) :
                            NarrowBand::create_band_fe_collection<dim>(fe_degree_in))
-    , fe_collection_cut(narrow_band_data_in.type == NarrowBandType::advected_layers ?
+    , fe_collection_cut(narrow_band_data_in.type != NarrowBandType::extension ?
                           NarrowBand::create_layered_cut_fe_collection<dim>(fe_degree_in) :
                           NarrowBand::create_cut_fe_collection<dim>(fe_degree_in))
     , dof_handler_band(triangulation)
@@ -52,7 +58,10 @@ namespace MeltPoolDG::LevelSet
     , closest_point_extension(narrow_band_data_in.extension,
                               scratch_data_in.get_mapping(),
                               scratch_data_in.get_pcout(1))
+    , semi_lagrangian_advection(scratch_data_in.get_pcout(1))
     , advection_operator(scratch_data_in, band_dof_idx, quad_idx)
+    , velocity_function(velocity_function)
+    , advection_limiter(narrow_band_data_in.advection_limiter, scratch_data_in.get_mapping())
   {
     narrow_band_data.check_input_parameters(fe_degree);
 
@@ -96,13 +105,38 @@ namespace MeltPoolDG::LevelSet
 
     is_small_cut_cell = is_small_cut_cell_in;
 
-    if (is_advected_band())
+    if (is_layered_band())
       NarrowBand::distribute_dofs_layered(is_cut_cell,
-                                          narrow_band_data.n_layers,
+                                          is_semi_lagrangian() ? 1 : narrow_band_data.n_layers,
                                           dof_handler_cut,
                                           fe_collection_cut,
                                           dof_handler_band,
                                           fe_collection_band);
+    else if (narrow_band_data.neighbor_activation ==
+             NarrowBandNeighborActivation::downstream_face_neighbors)
+      {
+        AssertThrow(not neighbor_activation_times.empty(), dealii::ExcInternalError());
+
+        // the face neighbors are only activated across the faces, across which the velocity
+        // points from the cut cell into the neighbor, i.e., the interface can only move into these
+        // cells within the next time step
+        NarrowBand::distribute_dofs<dim>(
+          is_cut_cell,
+          dof_handler_cut,
+          fe_collection_cut,
+          dof_handler_band,
+          fe_collection_band,
+          is_small_cut_cell,
+          [&](const typename dealii::Triangulation<dim>::active_cell_iterator &cell,
+              const unsigned int                                               face_no) {
+            return NarrowBand::is_downstream_face<dim>(scratch_data.get_mapping(),
+                                                       *velocity_function,
+                                                       neighbor_activation_times,
+                                                       cell,
+                                                       face_no,
+                                                       fe_degree + 2);
+          });
+      }
     else
       NarrowBand::distribute_dofs(is_cut_cell,
                                   dof_handler_cut,
@@ -143,6 +177,8 @@ namespace MeltPoolDG::LevelSet
     }
 
     scratch_data.initialize_dof_vector(level_set, cut_dof_idx);
+    if (narrow_band_data.artificial_viscosity.factor > 0.)
+      scratch_data.initialize_dof_vector(artificial_viscosity, band_dof_idx);
     solution_history_band.apply(
       [this](VectorType &v) { scratch_data.initialize_dof_vector(v, band_dof_idx); });
 
@@ -178,6 +214,9 @@ namespace MeltPoolDG::LevelSet
     ScopedName                 sc("narrow_band::set_initial_condition");
     dealii::TimerOutput::Scope scope(scratch_data.get_timer(), sc);
 
+    // the band of the first time step: the velocity is evaluated at its current time
+    neighbor_activation_times = {velocity_function->get_time()};
+
     // 1) Determine the candidates of the cut cells from the analytical function. Note: the
     // MeshClassifier keeps a pointer to the element; thus, it must outlive the MeshClassifier.
     const dealii::FE_Q<dim>                  fe_classification(fe_degree);
@@ -208,13 +247,17 @@ namespace MeltPoolDG::LevelSet
 
     setup_dof_system(is_cut_cell, compute_small_cut_cells(is_cut_cell, volume_fractions));
 
+    // semi-Lagrangian band: signs of all cells from the initial level set
+    if (is_semi_lagrangian())
+      update_cell_signs(is_cut_cell, &level_set_function);
+
     // 3) level-set field on the cut cells
     dealii::VectorTools::interpolate(scratch_data.get_mapping(),
                                      dof_handler_cut,
                                      level_set_function,
                                      level_set);
 
-    if (is_advected_band())
+    if (is_layered_band())
       {
         // level-set field on the band
         dealii::VectorTools::interpolate(scratch_data.get_mapping(),
@@ -225,7 +268,8 @@ namespace MeltPoolDG::LevelSet
         if (do_reinitialize)
           {
             reinitialize();
-            redistance_layers();
+            if (is_advected_band())
+              redistance_layers();
           }
 
         print_band_statistics();
@@ -255,7 +299,75 @@ namespace MeltPoolDG::LevelSet
       dealii::TimerOutput::Scope scope_advection(scratch_data.get_timer(), sc_advection);
 
       level_set_band.zero_out_ghost_values();
-      time_integrator->perform_time_step(time, time_step, solution_history_band);
+
+      // semi-Lagrangian band: evaluation of the back-traced level set of the cut cells on the
+      // candidate cells
+      if (is_semi_lagrangian())
+        semi_lagrangian_advection.advect(dof_handler_cut,
+                                         level_set,
+                                         dof_handler_band,
+                                         level_set_band,
+                                         cell_signs,
+                                         *velocity_function,
+                                         time,
+                                         time_step);
+
+      // artificial viscosity from the level set at the beginning of the time step
+      else if (const auto &data = narrow_band_data.artificial_viscosity; data.factor > 0.)
+        {
+          const auto statistics = advection_operator.compute_artificial_viscosity(
+            level_set_band,
+            artificial_viscosity,
+            time,
+            time_step,
+            data.factor,
+            -4. * std::log10(static_cast<number>(fe_degree)) + data.indicator_offset,
+            data.indicator_width,
+            data.cells == NarrowBandViscosityCells::non_cut_cells);
+          advection_operator.set_artificial_viscosity(&artificial_viscosity);
+
+          if (statistics.n_cells > 0)
+            {
+              std::ostringstream str;
+              str << "artificial viscosity: " << statistics.n_cells
+                  << " cells, max diffusion number eps dt / h^2: " << std::scientific
+                  << std::setprecision(2) << statistics.max_diffusion_number;
+              Journal::print_line(scratch_data.get_pcout(1), str.str(), "narrow_band");
+            }
+        }
+
+      if (is_semi_lagrangian())
+        {
+          // no DG advection
+        }
+      else if (narrow_band_data.advection_limiter.cells == NarrowBandLimiterCells::none)
+        time_integrator->perform_time_step(time, time_step, solution_history_band);
+      else
+        {
+          // bounds from the level set at the beginning of the time step; limiting after each
+          // stage of the SSP Runge-Kutta scheme
+          const unsigned int n_bounded_cells = advection_limiter.compute_bounds(
+            dof_handler_band, level_set_band, *velocity_function, time, time_step);
+
+          typename NarrowBandBoundPreservingLimiter<dim, number>::Statistics statistics;
+          time_integrator->perform_time_step(
+            time,
+            time_step,
+            solution_history_band,
+            {},
+            [&](const number, const number, VectorType &stage_solution, const VectorType &) {
+              statistics += advection_limiter.limit(dof_handler_band, stage_solution);
+            });
+
+          if (statistics.n_limited_cells + statistics.n_mean_violations > 0)
+            Journal::print_line(scratch_data.get_pcout(1),
+                                "advection limiter: " + std::to_string(n_bounded_cells) +
+                                  " bounded cells, " + std::to_string(statistics.n_limited_cells) +
+                                  " limited cells, " +
+                                  std::to_string(statistics.n_mean_violations) +
+                                  " mean violations (sum over stages)",
+                                "narrow_band");
+        }
     }
 
     // S1: new cut cells and band, cell-wise transfer of the level-set values of the new cut cells
@@ -271,9 +383,34 @@ namespace MeltPoolDG::LevelSet
       std::vector<bool>       is_small_cut_cell_new =
         compute_small_cut_cells(is_cut_cell, volume_fractions);
 
+      // semi-Lagrangian band: signs of the candidate cells, which are not cut at t^{n+1}
+      if (is_semi_lagrangian())
+        update_cell_signs(is_cut_cell, nullptr);
+
+      // diagnostics: new cut cells, whose interface is not connected to the previous interface
+      // Note: the output stream is only active on the root process; the decision has to be
+      // taken by all processes.
+      if (dealii::Utilities::MPI::logical_or(scratch_data.get_pcout(1).is_active(),
+                                             scratch_data.get_mpi_comm()))
+        {
+          const auto [n_new_cut_cells, n_unconnected_cut_cells] = NarrowBand::count_new_cut_cells(
+            scratch_data.get_mapping(), dof_handler_band, level_set_band, is_cut_cell);
+          if (n_new_cut_cells > 0)
+            Journal::print_line(scratch_data.get_pcout(1),
+                                "new cut cells: " + std::to_string(n_new_cut_cells) + " (" +
+                                  std::to_string(n_unconnected_cut_cells) +
+                                  " not connected to the previous interface)",
+                                "narrow_band");
+        }
+
       // The DoF system is only rebuilt if the cut cells or the cut cells, which do not activate
-      // their face neighbors, have changed on any process.
-      bool cut_cells_changed = is_small_cut_cell_new.size() != is_small_cut_cell.size();
+      // their face neighbors, have changed on any process. For the downstream neighbor
+      // activation, the neighbor cells depend on the velocity of the next time step; thus, the
+      // DoF system is rebuilt in every time step.
+      neighbor_activation_times = {time + time_step, time + 2. * time_step};
+      bool cut_cells_changed    = is_small_cut_cell_new.size() != is_small_cut_cell.size() or
+                               narrow_band_data.neighbor_activation ==
+                                 NarrowBandNeighborActivation::downstream_face_neighbors;
       for (const auto &cell : dof_handler_band.active_cell_iterators())
         {
           if (cut_cells_changed)
@@ -395,7 +532,7 @@ namespace MeltPoolDG::LevelSet
           redistance_layers();
       }
 
-    if (is_advected_band())
+    if (is_layered_band())
       {
         print_band_statistics();
         return;
@@ -424,6 +561,72 @@ namespace MeltPoolDG::LevelSet
   NarrowBandLevelSetOperation<dim, number>::is_advected_band() const
   {
     return narrow_band_data.type == NarrowBandType::advected_layers;
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::update_cell_signs(const std::vector<bool> &is_cut_cell,
+                                                              const dealii::Function<dim> *function)
+  {
+    const auto &triangulation = dof_handler_band.get_triangulation();
+    AssertDimension(is_cut_cell.size(), triangulation.n_active_cells());
+
+    if (function != nullptr or cell_signs.size() != triangulation.n_active_cells())
+      cell_signs.assign(triangulation.n_active_cells(), 0);
+
+    const auto sign = [](const number value) { return value > 0. ? 1 : (value < 0. ? -1 : 0); };
+
+    if (function != nullptr)
+      {
+        // initialization of all locally owned cells
+        for (const auto &cell : triangulation.active_cell_iterators())
+          if (cell->is_locally_owned())
+            cell_signs[cell->active_cell_index()] = sign(function->value(cell->center()));
+      }
+    else
+      {
+        // candidate cells (band), which are not cut: sign of the mean of the nodal values
+        const VectorType      &level_set_band = solution_history_band.get_current_solution();
+        dealii::Vector<number> values;
+        for (const auto &cell : dof_handler_band.active_cell_iterators())
+          {
+            if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0 or
+                is_cut_cell[cell->active_cell_index()])
+              continue;
+
+            values.reinit(cell->get_fe().n_dofs_per_cell());
+            cell->get_dof_values(level_set_band, values);
+            number mean = 0.;
+            for (const auto value : values)
+              mean += value;
+            if (const int s = sign(mean); s != 0)
+              cell_signs[cell->active_cell_index()] = s;
+          }
+      }
+
+    // communicate the signs of the locally owned cells to the ghost cells
+    if (dynamic_cast<const dealii::parallel::TriangulationBase<dim> *>(&triangulation) != nullptr)
+      dealii::GridTools::exchange_cell_data_to_ghosts<int, dealii::Triangulation<dim>>(
+        triangulation,
+        [&](const typename dealii::Triangulation<dim>::active_cell_iterator &cell)
+          -> std::optional<int> { return cell_signs[cell->active_cell_index()]; },
+        [&](const typename dealii::Triangulation<dim>::active_cell_iterator &cell, const int &s) {
+          cell_signs[cell->active_cell_index()] = s;
+        });
+  }
+
+  template <int dim, typename number>
+  bool
+  NarrowBandLevelSetOperation<dim, number>::is_semi_lagrangian() const
+  {
+    return narrow_band_data.type == NarrowBandType::semi_lagrangian;
+  }
+
+  template <int dim, typename number>
+  bool
+  NarrowBandLevelSetOperation<dim, number>::is_layered_band() const
+  {
+    return is_advected_band() or is_semi_lagrangian();
   }
 
   template <int dim, typename number>
@@ -490,7 +693,11 @@ namespace MeltPoolDG::LevelSet
         str << " (" << n_small_cut_cells << " small)";
       }
 
-    if (is_advected_band())
+    if (is_semi_lagrangian())
+      str << ", " << std::setw(6)
+          << NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::neighbor)
+          << " candidate cells, " << std::setw(8) << dof_handler_band.n_dofs() << " DoFs";
+    else if (is_advected_band())
       str << ", " << std::setw(6)
           << NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::neighbor) +
                NarrowBand::n_cells_with_active_fe_index(dof_handler_band, NarrowBand::outer)

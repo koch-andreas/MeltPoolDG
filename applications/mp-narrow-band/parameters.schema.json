@@ -103,9 +103,10 @@
           "type": "string",
           "enum": [
             "extension",
-            "advected_layers"
+            "advected_layers",
+            "semi_lagrangian"
           ],
-          "description": "Type of the narrow band. extension: the band consists of the cut cells and their face neighbors; the level set of the neighbor cells is reconstructed by the extension from the cut cells in every time step. advected_layers: the band consists of the cut cells and several layers of vertex neighbors, which are advected together with the cut cells; the level set of the layers is only reconstructed by geometric redistancing (closest point on the discrete interface of the cut cells) for newly added cells and after the elliptic reinitialization of the cut cells.",
+          "description": "Type of the narrow band. extension: the band consists of the cut cells and their face neighbors; the level set of the neighbor cells is reconstructed by the extension from the cut cells in every time step. advected_layers: the band consists of the cut cells and several layers of vertex neighbors, which are advected together with the cut cells; the level set of the layers is only reconstructed by geometric redistancing (closest point on the discrete interface of the cut cells) for newly added cells and after the elliptic reinitialization of the cut cells. semi_lagrangian: the level set is only stored on the cut cells; in each time step, it is evaluated on the cut cells and their vertex neighbors (candidate cells) by nodal interpolation of the back-traced level set (foot point of the characteristic in a cut cell: polynomial of the cut cell; otherwise: distance to the discrete interface with the sign of the cell containing the foot point). The new cut cells are determined from the candidate cells; no extension is needed. Requires a displacement below one cell per time step.",
           "default": "extension"
         },
         "number of layers": {
@@ -146,6 +147,12 @@
               "type": "number",
               "description": "Tolerance of the sign limiter for the extended level-set field on the neighbor cells, relative to the cell size h. If the extended level set attains values of the opposite sign of its cell mean with a magnitude larger than tolerance * h in a neighbor cell, its deviation from the cell mean is scaled such that it does not change its sign. Neighbor cells do not contain the interface by definition; spurious zero crossings, e.g., due to the polynomial extrapolation near under-resolved interface tips, would otherwise create spurious cut cells. Set to a negative value to disable the limiter.",
               "default": 0.05
+            },
+            "sign clamp epsilon": {
+              "type": "number",
+              "minimum": 0.0,
+              "description": "Sign clamp of the extrapolated level set (extension and geometric redistancing): each extended cell is assigned to the side of the interface, on which it is located (from the traces of the adjacent cut cells or from the closest point on the interface). Nodal values of the opposite sign (or zero) are set to -epsilon * h on the negative side and to +epsilon * h on the positive side (h: cell size), such that extrapolated values never introduce a new interface. The sign clamp is applied after the sign limiter. Set to 0 to disable the sign clamp.",
+              "default": 0.0
             },
             "minimum source volume fraction": {
               "type": "number",
@@ -371,9 +378,97 @@
                 }
               },
               "additionalProperties": false
+            },
+            "artificial viscosity": {
+              "type": "object",
+              "properties": {
+                "factor": {
+                  "type": "number",
+                  "minimum": 0.0,
+                  "description": "Artificial viscosity of the advection in the cells flagged by the modal smoothness indicator of Persson & Peraire (2006): the term div(epsilon grad phi) is added to the advection equation (SIPG discretization on the band, natural boundary condition at the outer boundary of the band). The viscosity is constant per cell and determined at the beginning of each time step from the indicator S = log10(E_p / E_var), where E_p is the energy of the highest Legendre modes (degree p in any direction) and E_var the energy of all modes except the cell mean: epsilon = epsilon_0 for S > s_0 + kappa, epsilon = epsilon_0 / 2 (1 + sin(pi (S - s_0) / (2 kappa))) for |S - s_0| <= kappa and zero otherwise, with epsilon_0 = factor h max |u| / p (h: cell size, max |u| over the cell) and s_0 = -4 log10(p) + offset. The viscous term is integrated explicitly, i.e., large factors violate the stability limit of the explicit time integration (the maximum diffusion number epsilon dt / h^2 is printed for verbosity level 1). A factor of zero disables the artificial viscosity. Requires p >= 2.",
+                  "default": 0.0
+                },
+                "indicator offset": {
+                  "type": "number",
+                  "description": "Offset of the threshold s_0 = -4 log10(p) + offset of the smoothness indicator.",
+                  "default": 0.0
+                },
+                "indicator width": {
+                  "type": "number",
+                  "minimum": 0.0,
+                  "description": "Half width kappa of the transition of the viscosity around the threshold s_0.",
+                  "default": 0.5
+                },
+                "cells": {
+                  "type": "string",
+                  "enum": [
+                    "all_band_cells",
+                    "non_cut_cells"
+                  ],
+                  "description": "Cells, in which the artificial viscosity is applied: all cells of the band (all_band_cells) or all cells of the band, which are not cut at the beginning of the time step (non_cut_cells).",
+                  "default": "all_band_cells"
+                }
+              },
+              "additionalProperties": false
+            },
+            "limiter": {
+              "type": "object",
+              "properties": {
+                "cells": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "all_band_cells",
+                    "non_cut_cells"
+                  ],
+                  "description": "Bound-preserving limiter of the advection: after each stage of the SSP Runge-Kutta scheme, the level set of the limited cells is scaled around its cell mean, such that its values at the Gauss-Lobatto points remain within the bounds given by the minimum m and maximum M of the level set at the beginning of the time step on the domain of dependence of the cell. none: no limiter; all_band_cells: all cells of the band; non_cut_cells: all cells of the band, which are not cut at the beginning of the time step.",
+                  "default": "none"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "maximum_principle",
+                    "sign"
+                  ],
+                  "description": "Type of the bounds. maximum_principle: local maximum principle [m - r h, M + r h]; cells with an inflow face to an inactive cell or at the boundary of the domain are not limited (unknown domain of dependence). sign: cells, whose domain of dependence has a definite sign, keep this sign, i.e., phi >= min(m, epsilon h) if m > 0 and phi <= max(M, -epsilon h) if M < 0; cells with values of both signs in their domain of dependence are not limited; inactive cells and the boundary of the domain have the sign of the adjacent band cell. In contrast to the sign preservation, the local maximum principle also clips smooth extrema of the level set (e.g., the ridge of a thin filament).",
+                  "default": "sign"
+                },
+                "bounds": {
+                  "type": "string",
+                  "enum": [
+                    "face_neighbors",
+                    "upwind_face_neighbors",
+                    "upwind_strips"
+                  ],
+                  "description": "Approximation of the domain of dependence of a cell: the cell and all its face neighbors in the band (face_neighbors), the cell and its face neighbors in the band across inflow faces (upwind_face_neighbors), or the cell and the strips of width |u.n| dt of the face neighbors in the band along the inflow faces, which are extended by |u| dt beyond the edges of the faces (upwind_strips).",
+                  "default": "upwind_strips"
+                },
+                "relaxation": {
+                  "type": "number",
+                  "minimum": 0.0,
+                  "description": "Relaxation r of the bounds of the local maximum principle relative to the cell size h: [m - r h, M + r h].",
+                  "default": 0.0
+                },
+                "sign epsilon": {
+                  "type": "number",
+                  "minimum": 0.0,
+                  "description": "Minimum distance epsilon h of the level set from zero (relative to the cell size h), which is enforced by the sign-preserving limiter, unless the domain of dependence attains values closer to zero.",
+                  "default": 0.01
+                }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
+        },
+        "neighbor activation": {
+          "type": "string",
+          "enum": [
+            "all_face_neighbors",
+            "downstream_face_neighbors"
+          ],
+          "description": "Face neighbors of the cut cells, which are activated as neighbor cells of the band (extension band). all_face_neighbors: all face neighbors; downstream_face_neighbors: only the face neighbors, into which the velocity points across a face shared with a cut cell (at any Gauss-Lobatto point of the face at the beginning or the end of the next time step), i.e., the cells into which the interface can move. The level set is only extended to these cells. At the faces of the cut cells to inactive upstream cells, the upwind flux uses the interior trace of the cut cell, i.e., the cut cell is not influenced by extrapolated values from upstream.",
+          "default": "all_face_neighbors"
         },
         "neighbor activation volume fraction": {
           "type": "number",

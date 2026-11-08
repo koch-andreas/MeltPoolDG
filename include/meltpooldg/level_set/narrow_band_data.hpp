@@ -18,7 +18,53 @@ namespace MeltPoolDG::LevelSet
               // band of the cut cells and several layers of vertex neighbors, which is advected;
               // the level set of the layers is only reconstructed by geometric redistancing for
               // newly added cells and after the reinitialization of the cut cells
-              advected_layers)
+              advected_layers,
+              // level set only on the cut cells; semi-Lagrangian advection onto the cut cells and
+              // their vertex neighbors (candidate cells), without extension
+              semi_lagrangian)
+
+  BETTER_ENUM(NarrowBandLimiterCells,
+              char,
+              // no limiter
+              none,
+              // all cells of the band (cut cells and their neighbors or layers)
+              all_band_cells,
+              // all cells of the band, which are not cut at the beginning of the time step
+              non_cut_cells)
+
+  BETTER_ENUM(NarrowBandNeighborActivation,
+              char,
+              // all face neighbors of the cut cells
+              all_face_neighbors,
+              // only the face neighbors, into which the velocity points across the face shared
+              // with a cut cell (cells, into which the interface can move)
+              downstream_face_neighbors)
+
+  BETTER_ENUM(NarrowBandViscosityCells,
+              char,
+              // all cells of the band
+              all_band_cells,
+              // all cells of the band, which are not cut at the beginning of the time step
+              non_cut_cells)
+
+  BETTER_ENUM(NarrowBandLimiterType,
+              char,
+              // local maximum principle: the level set remains within [m, M] of the domain of
+              // dependence
+              maximum_principle,
+              // sign preservation: cells, whose domain of dependence has a definite sign, keep this
+              // sign
+              sign)
+
+  BETTER_ENUM(NarrowBandLimiterBounds,
+              char,
+              // the cell and all its face neighbors in the band
+              face_neighbors,
+              // the cell and its face neighbors in the band across inflow faces
+              upwind_face_neighbors,
+              // the cell and the strips of width |u.n| dt of its face neighbors in the band along
+              // the inflow faces (domain of dependence of the time step)
+              upwind_strips)
 
   BETTER_ENUM(NarrowBandExtensionType,
               char,
@@ -100,6 +146,14 @@ namespace MeltPoolDG::LevelSet
       /// create spurious cut cells. A negative value disables the limiter.
       number sign_limiter_tolerance = 0.05;
 
+      /// Sign clamp of the extrapolated level set: each extended (or geometrically redistanced)
+      /// cell is assigned to the side of the interface, on which it is located (from the traces
+      /// of the adjacent cut cells or the closest point on the interface). Nodal values of the
+      /// opposite sign (or zero) are set to -epsilon * h on the negative side and to +epsilon * h
+      /// on the positive side, where h is the cell size. Thus, extrapolated values never
+      /// introduce a new interface. A value of zero disables the sign clamp.
+      number sign_clamp_epsilon = 0.0;
+
       /// Minimum volume fraction |K cap {phi > 0}| / |K| of the positive phase of a cut cell K, for
       /// which K serves as source of the extension. For the ghost-penalty extension, the
       /// ghost-penalty faces between cut cells with a smaller volume fraction (small cut cells)
@@ -124,6 +178,69 @@ namespace MeltPoolDG::LevelSet
     /// Time integrator for the advection on the narrow band.
     TimeIntegration::TimeIntegratorData<number> time_integrator{
       TimeIntegration::TimeIntegratorSchemes::SSP_RK_stage_3_order_3};
+
+    /// Bound-preserving limiter of the advection: after each stage of the SSP Runge-Kutta scheme,
+    /// the level set of each limited cell is scaled around its cell mean, such that its values at
+    /// the Gauss-Lobatto points (p+2 per direction) remain within the bounds given by the minimum
+    /// m and maximum M of the level set at the beginning of the time step on the domain of
+    /// dependence of the cell (Zhang & Shu, 2010).
+    struct AdvectionLimiter
+    {
+      /// Cells, which are limited.
+      NarrowBandLimiterCells cells = NarrowBandLimiterCells::none;
+
+      /// Type of the bounds: local maximum principle [m - r h, M + r h] or sign preservation
+      /// (m > 0: phi >= min(m, epsilon h); M < 0: phi <= max(M, -epsilon h)).
+      NarrowBandLimiterType type = NarrowBandLimiterType::sign;
+
+      /// Approximation of the domain of dependence of a cell.
+      NarrowBandLimiterBounds bounds = NarrowBandLimiterBounds::upwind_strips;
+
+      /// Relaxation of the bounds of the local maximum principle relative to the cell size h:
+      /// [m - r h, M + r h].
+      number relaxation = 0.0;
+
+      /// Minimum distance epsilon h (relative to the cell size h) of the level set from zero,
+      /// which is enforced by the sign-preserving limiter, unless the domain of dependence attains
+      /// values closer to zero.
+      number sign_epsilon = 0.01;
+    } advection_limiter;
+
+    /// Artificial viscosity of the advection in the cells flagged by the modal smoothness
+    /// indicator of Persson & Peraire (2006): the term div(epsilon grad phi) is added to the
+    /// advection equation (SIPG discretization on the band, natural boundary condition at the outer
+    /// boundary of the band). The viscosity epsilon_K is constant per cell and determined at the
+    /// beginning of each time step from the indicator S_K = log10(E_p / E_var), where E_p is the
+    /// energy of the highest Legendre modes (maximum degree p in any direction) and E_var the
+    /// energy of all modes except the cell mean, as
+    /// epsilon_K = epsilon_0 for S_K > s_0 + kappa,
+    /// epsilon_K = epsilon_0 / 2 (1 + sin(pi (S_K - s_0) / (2 kappa))) for |S_K - s_0| <= kappa,
+    /// and zero otherwise, with epsilon_0 = c h_K max_K |u| / p and s_0 = -4 log10(p) + offset.
+    /// The viscous term is integrated explicitly, i.e., the factor c is limited by the stability
+    /// of the explicit time integration.
+    struct ArtificialViscosity
+    {
+      /// Factor c of the maximum viscosity; zero disables the artificial viscosity.
+      number factor = 0.0;
+
+      /// Offset of the threshold s_0 = -4 log10(p) + offset of the indicator.
+      number indicator_offset = 0.0;
+
+      /// Half width kappa of the transition of the viscosity around the threshold.
+      number indicator_width = 0.5;
+
+      /// Cells, in which the artificial viscosity is applied.
+      NarrowBandViscosityCells cells = NarrowBandViscosityCells::all_band_cells;
+    } artificial_viscosity;
+
+    /// Face neighbors of the cut cells, which are activated as neighbor cells of the band
+    /// (extension band). For downstream_face_neighbors, only the face neighbors, into which the
+    /// velocity points across a face shared with a cut cell (at the beginning or the end of the
+    /// next time step), are activated, i.e., the cells into which the interface can move. The
+    /// level set is only extended to these cells. At the faces of the cut cells to inactive
+    /// upstream cells, the upwind flux uses the interior trace of the cut cell.
+    NarrowBandNeighborActivation neighbor_activation =
+      NarrowBandNeighborActivation::all_face_neighbors;
 
     /// Minimum volume fraction |K cap {phi > 0}| / |K| of a cut cell K, for which its face
     /// neighbors are activated as neighbor cells of the band. Face neighbors of cut cells with a

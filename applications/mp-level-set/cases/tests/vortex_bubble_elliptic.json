@@ -13,7 +13,7 @@
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 2.0,
+    "end time": 4.0,
     "time step size": 0.01
   },
   "output": {
@@ -33,10 +33,10 @@
       "enable": true,
       "type": "elliptic",
       "elliptic": {
-        "penalty parameter": 10000.0,
+        "penalty parameter": 1000.0,
         "nonlinear solver type": "fixed point",
         "nlsolve": {
-          "max nonlinear iterations": 100,
+          "max nonlinear iterations": 1000,
           "residual tolerance": 0.01,
           "residual tolerance alt": 0.1,
           "field correction tolerance": 0.01,

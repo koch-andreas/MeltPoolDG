@@ -49,6 +49,11 @@ namespace MeltPoolDG::LevelSet
    * volume fraction via the remaining ghost-penalty faces (directly or via other neighbor cells).
    * Otherwise, the faces are kept to obtain a regular system.
    *
+   * Optionally, nodal values of the extended field, whose sign differs from the side of the
+   * neighbor cell (determined from the traces of the face-adjacent cut cells), are set to
+   * $\mp\epsilon h$ (see NarrowBandData::Extension::sign_clamp_epsilon and
+   * NarrowBand::clamp_signs()).
+   *
    * Optionally, spurious sign changes of the extended field on the neighbor cells are removed
    * (see NarrowBand::limit_sign_changes()), since the neighbor cells do not contain the interface
    * by definition.

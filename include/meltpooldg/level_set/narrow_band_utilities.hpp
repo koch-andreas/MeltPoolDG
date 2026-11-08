@@ -1,16 +1,22 @@
 #pragma once
 
+#include <deal.II/base/function.h>
+
 #include <deal.II/dofs/dof_handler.h>
 
+#include <deal.II/fe/fe.h>
 #include <deal.II/fe/mapping.h>
 
 #include <deal.II/hp/fe_collection.h>
 
+#include <deal.II/lac/full_matrix.h>
 #include <deal.II/lac/la_parallel_vector.h>
 #include <deal.II/lac/vector.h>
 
 #include <meltpooldg/cut/util.hpp>
 
+#include <functional>
+#include <utility>
 #include <vector>
 
 /**
@@ -170,20 +176,62 @@ namespace MeltPoolDG::LevelSet::NarrowBand
    * @param dof_handler_band Band DoFHandler.
    * @param fe_collection_band FE collection of the band DoFHandler (see
    * create_band_fe_collection()).
+   * Optionally, a face neighbor is only activated across the faces, for which @p is_activating_face
+   * returns true (e.g., the faces, across which the velocity points from the cut cell into the
+   * neighbor, see is_downstream_face()).
+   *
+   * @param is_cut_cell Flags indexed by the active cell index, which are true for the locally
+   * owned cut cells (see compute_cut_cells()).
+   * @param dof_handler_cut Cut DoFHandler.
+   * @param fe_collection_cut FE collection of the cut DoFHandler (see create_cut_fe_collection()).
+   * @param dof_handler_band Band DoFHandler.
+   * @param fe_collection_band FE collection of the band DoFHandler (see
+   * create_band_fe_collection()).
    * @param is_small_cut_cell Flags indexed by the active cell index, which are true for the
    * locally owned cut cells, whose face neighbors are not activated. If empty, all face
    * neighbors of the cut cells are activated.
+   * @param is_activating_face Predicate for a locally owned cell, which is not cut, and one of
+   * its faces shared with a cut cell: the cell is activated as neighbor cell, if the predicate
+   * returns true for at least one such face. If empty, all faces shared with a cut cell activate
+   * the cell.
    *
    * @note Triangulations with hanging nodes and periodic boundaries are not supported.
    */
   template <int dim>
   void
-  distribute_dofs(const std::vector<bool>             &is_cut_cell,
-                  dealii::DoFHandler<dim>             &dof_handler_cut,
-                  const dealii::hp::FECollection<dim> &fe_collection_cut,
-                  dealii::DoFHandler<dim>             &dof_handler_band,
-                  const dealii::hp::FECollection<dim> &fe_collection_band,
-                  const std::vector<bool>             &is_small_cut_cell = {});
+  distribute_dofs(
+    const std::vector<bool>                       &is_cut_cell,
+    dealii::DoFHandler<dim>                       &dof_handler_cut,
+    const dealii::hp::FECollection<dim>           &fe_collection_cut,
+    dealii::DoFHandler<dim>                       &dof_handler_band,
+    const dealii::hp::FECollection<dim>           &fe_collection_band,
+    const std::vector<bool>                       &is_small_cut_cell  = {},
+    const std::function<bool(const typename dealii::Triangulation<dim>::active_cell_iterator &,
+                             const unsigned int)> &is_activating_face = {});
+
+  /**
+   * @brief Check whether the velocity points into the cell @p cell across its face @p face_no,
+   * i.e., $\boldsymbol{u} \cdot \boldsymbol{n} < -\epsilon |\boldsymbol{u}|$ with the outer
+   * normal $\boldsymbol{n}$ of the cell and a tolerance $\epsilon = 10^{-12}$ for round-off
+   * errors, at any of the Gauss-Lobatto points of the face (@p n_points_1d points per direction)
+   * at any of the given times. Since the interface moves with the velocity, it can only enter a
+   * cell across such faces.
+   *
+   * @param mapping Mapping.
+   * @param velocity Velocity (dim components). Its time is restored on exit.
+   * @param times Times at which the velocity is evaluated.
+   * @param cell Cell.
+   * @param face_no Face of the cell.
+   * @param n_points_1d Number of Gauss-Lobatto points per direction (at least 2).
+   */
+  template <int dim>
+  bool
+  is_downstream_face(const dealii::Mapping<dim>                                      &mapping,
+                     dealii::Function<dim>                                           &velocity,
+                     const std::vector<double>                                       &times,
+                     const typename dealii::Triangulation<dim>::active_cell_iterator &cell,
+                     const unsigned int                                               face_no,
+                     const unsigned int                                               n_points_1d);
 
   /**
    * @brief Compute the layers of vertex neighbors around the cut cells.
@@ -341,6 +389,145 @@ namespace MeltPoolDG::LevelSet::NarrowBand
                      const dealii::DoFHandler<dim>                      &dof_handler,
                      dealii::LinearAlgebra::distributed::Vector<number> &level_set,
                      const number                                        tolerance);
+
+  /**
+   * @brief Determine the side of the interface, on which the flagged locally owned cells are
+   * located, from the traces of the face-adjacent cut cells.
+   *
+   * The side of a cell is the sign of $\sum_F \int_F \phi_K \, \mathrm{d}s$, where the sum runs
+   * over all faces $F$ shared with a cut cell $K$ and $\phi_K$ is the level set of the cut cell.
+   *
+   * @param mapping Mapping.
+   * @param dof_handler Band DoFHandler.
+   * @param level_set Level-set vector of the band DoFHandler, whose ghost set contains the DoFs of
+   * the ghost cells (locally relevant DoFs).
+   * @param cell_flags Flags indexed by the active cell index of the cells, whose side is
+   * determined.
+   *
+   * @return Sides (+1 or -1) indexed by the active cell index; 0 for all other cells and for
+   * cells without face-adjacent cut cell.
+   */
+  template <int dim, typename number>
+  std::vector<int>
+  compute_sides_from_cut_cells(const dealii::Mapping<dim>    &mapping,
+                               const dealii::DoFHandler<dim> &dof_handler,
+                               const dealii::LinearAlgebra::distributed::Vector<number> &level_set,
+                               const std::vector<bool> &cell_flags);
+
+  /**
+   * @brief Sign clamp: set the nodal values of the locally owned cells with a given side, which
+   * have the opposite sign of the side or are zero, to side * epsilon * h (h: minimum vertex
+   * distance of the cell). Thus, the level set of these cells does not change its sign.
+   *
+   * @param dof_handler (hp-)DoFHandler of the nodal level-set field.
+   * @param level_set Level-set vector.
+   * @param cell_sides Sides (+1, -1, or 0 for cells, which are not modified) indexed by the active
+   * cell index.
+   * @param epsilon Factor of the cell size.
+   *
+   * @return Number of modified nodal values (summed over all processes).
+   */
+  template <int dim, typename number>
+  unsigned int
+  clamp_signs(const dealii::DoFHandler<dim>                      &dof_handler,
+              dealii::LinearAlgebra::distributed::Vector<number> &level_set,
+              const std::vector<int>                             &cell_sides,
+              const number                                        epsilon);
+
+  /**
+   * @brief Count the new cut cells and the new cut cells, whose interface is not connected to the
+   * interface of the previous cut cells (diagnostics of spurious interfaces).
+   *
+   * A new cut cell is a locally owned cell flagged in @p is_cut_cell, which is not a cut cell of
+   * @p dof_handler (i.e., of the previous time step). Its interface is considered as connected, if
+   * the level set changes its sign (including zero) on a face shared with a previous cut cell
+   * (evaluated at the Gauss-Lobatto points with $p+2$ points per direction). A moving interface
+   * usually enters a cell through such a face; thus, new cut cells without connection indicate
+   * spurious interfaces. Note that an interface entering through a vertex shared with a previous
+   * cut cell (but no face) is also counted as not connected.
+   *
+   * @param mapping Mapping.
+   * @param dof_handler Band DoFHandler of the previous time step.
+   * @param level_set Level-set vector of the band DoFHandler (after the advection).
+   * @param is_cut_cell Flags of the locally owned new cut cells (see compute_cut_cells()).
+   *
+   * @return Number of new cut cells and number of new cut cells without connection to the
+   * previous interface (summed over all processes).
+   */
+  template <int dim, typename number>
+  std::pair<unsigned int, unsigned int>
+  count_new_cut_cells(const dealii::Mapping<dim>                               &mapping,
+                      const dealii::DoFHandler<dim>                            &dof_handler,
+                      const dealii::LinearAlgebra::distributed::Vector<number> &level_set,
+                      const std::vector<bool>                                  &is_cut_cell);
+
+  /**
+   * @brief Modal smoothness indicator of Persson & Peraire (2006,
+   * https://doi.org/10.2514/6.2006-112) for nodal tensor-product elements.
+   *
+   * The polynomial $\phi_h|_K$ of degree $p$ is expanded in the tensor-product Legendre basis
+   * $P_\alpha$ on the reference cell, $\phi_h = \sum_\alpha c_\alpha P_\alpha$. The indicator is
+   * the ratio $E_p / E_\mathrm{var}$ of the energy $E_p = \sum_{\max_d \alpha_d = p} c_\alpha^2
+   * \|P_\alpha\|^2$ of the highest modes and the energy $E_\mathrm{var} = \sum_{\alpha \neq 0}
+   * c_\alpha^2 \|P_\alpha\|^2$ of all modes except the cell mean. In contrast to the original
+   * indicator, which is normalized by the total energy, the cell mean is excluded, since the level
+   * set is close to zero near the interface. The ratio vanishes for polynomials of degree $p-1$
+   * (e.g., linear fields for $p \geq 2$) and approaches one for under-resolved features.
+   */
+  template <int dim>
+  class ModalSmoothnessIndicator
+  {
+  public:
+    /**
+     * @brief Constructor.
+     *
+     * @param fe Nodal element (e.g., FE_DGQ) of degree p >= 2. The DoF values passed to
+     * compute_energy_ratio() are ordered as the DoFs of @p fe.
+     */
+    explicit ModalSmoothnessIndicator(const dealii::FiniteElement<dim> &fe);
+
+    /**
+     * @brief Compute the ratio $E_p / E_\mathrm{var}$ (zero for a constant polynomial; a relative
+     * floor of $10^{-24}$ times the sum of the squared DoF values is added to $E_\mathrm{var}$
+     * to suppress round-off errors).
+     *
+     * @param dof_values Pointer to the DoF values of a cell (scalar or vectorized).
+     */
+    template <typename Number>
+    Number
+    compute_energy_ratio(const Number *dof_values) const
+    {
+      Number energy_highest = 0., energy_variation = 0., sum_of_squares = 0.;
+      for (unsigned int i = 0; i < modal_projection.n(); ++i)
+        sum_of_squares += dof_values[i] * dof_values[i];
+
+      for (unsigned int a = 1; a < modal_projection.m(); ++a)
+        {
+          Number coefficient = 0.;
+          for (unsigned int i = 0; i < modal_projection.n(); ++i)
+            coefficient += modal_projection(a, i) * dof_values[i];
+
+          const Number energy = coefficient * coefficient * mode_norms[a];
+          energy_variation += energy;
+          if (is_highest_mode[a])
+            energy_highest += energy;
+        }
+
+      // relative floor for round-off errors of (nearly) constant polynomials
+      return energy_highest / (energy_variation + 1e-24 * sum_of_squares + 1e-300);
+    }
+
+  private:
+    /// Projection of the DoF values onto the Legendre coefficients (rows: modes, the constant mode
+    /// first).
+    dealii::FullMatrix<double> modal_projection;
+
+    /// Squared L2 norms of the Legendre modes on the reference cell.
+    std::vector<double> mode_norms;
+
+    /// Flags of the highest modes (degree p in any direction).
+    std::vector<bool> is_highest_mode;
+  };
 
   /**
    * @brief Count the number of cells with the given active FE index (summed over all processes).

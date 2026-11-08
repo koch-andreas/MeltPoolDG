@@ -14,38 +14,24 @@
   "case specific": {
     "center point": "0.5, 0.75",
     "radius": 0.15,
-    "T": 2.0
+    "T": 4.0
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 2.0,
-    "time step size": 0.001
+    "end time": 4.0,
+    "time step size": 0.01
   },
   "output": {
-    "directory": "output_vortex_bubble",
+    "directory": "output_vortex_bubble_semi_lagrangian",
     "do user defined postprocessing": true,
-    "write frequency": 1,
+    "write frequency": 10,
     "paraview": {
       "enable": true
     }
   },
   "narrow band": {
-    "extension": {
-      "ghost penalty parameters": "100., 1.",
-      "ghost penalty faces": "all_band_faces",
-      "linear solver": {
-        "solver type": "CG",
-        "preconditioner type": "ILU",
-        "rel tolerance": 1e-12,
-        "do matrix free": false
-      }
-    },
-    "advection": {
-      "time integration": {
-        "type": "SSP_RK_stage_3_order_3"
-      }
-    },
-    "reinitialization frequency": 10
+    "type": "semi_lagrangian",
+    "reinitialization frequency": 1
   },
   "reinitialization": {
     "type": "elliptic",
@@ -60,7 +46,6 @@
     "elliptic": {
       "intersected cells only": true,
       "penalty parameter": 10000.0,
-      "interior penalty scaling factor": 1.0,
       "nlsolve": {
         "max nonlinear iterations": 1000,
         "residual tolerance": 1e-05,

@@ -1,0 +1,16 @@
+| t = 0.0000e+00: 20 cut cells, 40 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0688e-02  interface length: 9.4251e-01  circularity: 9.9998e-01    vortex_bubble |
+| rel. L2 error signed distance: 2.3308e-03  L2 error |grad phi|-1: 4.6329e-03       vortex_bubble |
+| interface error L2: 7.7402e-05  max: 1.8029e-04  rel. error measure: 3.6647e-05    vortex_bubble |
+| t = 1.0000e-01: 20 cut cells, 39 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0713e-02  interface length: 9.5880e-01  circularity: 9.8317e-01    vortex_bubble |
+| t = 2.0000e-01: 20 cut cells, 37 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0637e-02  interface length: 9.8872e-01  circularity: 9.5291e-01    vortex_bubble |
+| t = 3.0000e-01: 20 cut cells, 37 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0655e-02  interface length: 9.8857e-01  circularity: 9.5317e-01    vortex_bubble |
+| t = 4.0000e-01: 20 cut cells, 39 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0595e-02  interface length: 9.5781e-01  circularity: 9.8336e-01    vortex_bubble |
+| t = 5.0000e-01: 20 cut cells, 40 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0560e-02  interface length: 9.4182e-01  circularity: 9.9980e-01    vortex_bubble |
+| rel. L2 error signed distance: 1.6123e-02  L2 error |grad phi|-1: 4.7992e-03       vortex_bubble |
+| interface error L2: 4.5970e-04  max: 1.3940e-03  rel. error measure: -6.9403e-04   vortex_bubble |
