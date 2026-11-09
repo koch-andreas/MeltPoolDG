@@ -14,6 +14,11 @@ namespace MeltPoolDG::LevelSet
     extension.linear_solver.preconditioner_type = PreconditionerType::ILU;
     extension.linear_solver.do_matrix_free      = false;
     extension.linear_solver.max_iterations      = 1000;
+
+    continuous_level_set.linear_solver.solver_type         = LinearSolverType::CG;
+    continuous_level_set.linear_solver.preconditioner_type = PreconditionerType::ILU;
+    continuous_level_set.linear_solver.do_matrix_free      = true;
+    continuous_level_set.linear_solver.max_iterations      = 1000;
   }
 
   template <typename number>
@@ -241,6 +246,35 @@ namespace MeltPoolDG::LevelSet
                         "sqrt(int (|grad phi| - 1)^2 dx / V) on the cut cells exceeds this value. "
                         "Set to 0 to disable the error-based reinitialization.",
                         dealii::Patterns::Double(0.0));
+
+      prm.enter_subsection("continuous level set");
+      {
+        prm.add_parameter(
+          "enable",
+          continuous_level_set.enable,
+          "Compute a continuous level-set field psi on the cut cells (FE_Q of the same degree, "
+          "continuous across the faces between cut cells) after each time step by the "
+          "constrained L2-projection of the DG level set phi: (psi, w) + sum_K gamma_K (psi, "
+          "w)_{Gamma cap K} = (phi, w) on the cut cells, where Gamma is the zero level set of phi. "
+          "The normal vector (projection of grad psi, normalized at the nodes) and the curvature "
+          "(projection of -div n) are computed from psi with the filter parameters and linear "
+          "solvers of the subsections 'normal vector' and 'curvature'. A filter parameter of zero "
+          "is recommended: the damping biases the normal vector and the curvature on the thin band "
+          "of cut cells independently of the mesh size. The fields are written to the output as "
+          "level_set_cg, normal and curvature. The continuous level set does not feed back into "
+          "the DG level set.");
+        prm.add_parameter(
+          "interface penalty",
+          continuous_level_set.interface_penalty,
+          "Dimensionless factor c of the interface penalty gamma_K = c h_K (h_K: cell size), which "
+          "pins the zero level set of the continuous level set to the zero level set of the DG "
+          "level set in a least-squares sense. Since the DG level set is discontinuous, the "
+          "interface may still move; the maximum shift is printed for verbosity level 1. Set to "
+          "0 for the plain L2-projection.",
+          dealii::Patterns::Double(0.0));
+        continuous_level_set.linear_solver.add_parameters(prm);
+      }
+      prm.leave_subsection();
     }
     prm.leave_subsection();
   }
@@ -313,6 +347,11 @@ namespace MeltPoolDG::LevelSet
     AssertThrow(artificial_viscosity.factor == 0. or artificial_viscosity.indicator_width > 0.,
                 dealii::ExcMessage("The indicator width of the artificial viscosity must be "
                                    "positive."));
+
+    AssertThrow(not continuous_level_set.enable or
+                  continuous_level_set.linear_solver.do_matrix_free,
+                dealii::ExcMessage("The continuous level set of the narrow band is only "
+                                   "implemented matrix-free. Set 'do matrix free' to true."));
 
     AssertThrow(advection_limiter.cells == NarrowBandLimiterCells::none or
                   time_integrator.integrator_type ==

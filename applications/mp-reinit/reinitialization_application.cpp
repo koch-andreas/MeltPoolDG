@@ -125,6 +125,19 @@ namespace MeltPoolDG::LevelSet
             time_iterator->print_me(scratch_data->get_pcout(1));
             reinit_operation->solve();
 
+            // number of faces with SIPG terms
+            if (param.application_specific_parameters.interface_faces_only)
+              {
+                const auto [n_interface_faces, n_faces] =
+                  dynamic_cast<const ReinitializationEllipticOperation<dim, number> &>(
+                    *reinit_operation)
+                    .get_n_interface_faces();
+                Journal::print_line(scratch_data->get_pcout(0),
+                                    "SIPG terms on " + std::to_string(n_interface_faces) + " of " +
+                                      std::to_string(n_faces) + " faces between intersected cells",
+                                    "reinitialization");
+              }
+
             output_results(time_iterator->get_current_time_step_number(),
                            time_iterator->get_current_time());
 
@@ -257,8 +270,12 @@ namespace MeltPoolDG::LevelSet
                 param.reinit.fe.type == FiniteElementType::FE_DGQ)
               AssertThrow(false, ExcNotImplemented());
 
-            reinit_operation = std::make_unique<ReinitializationEllipticOperation<dim, number>>(
-              *scratch_data, param.reinit, reinit_dof_idx, reinit_quad_idx, reinit_dof_idx);
+            auto elliptic_operation =
+              std::make_unique<ReinitializationEllipticOperation<dim, number>>(
+                *scratch_data, param.reinit, reinit_dof_idx, reinit_quad_idx, reinit_dof_idx);
+            elliptic_operation->set_face_terms_on_interface_faces_only(
+              param.application_specific_parameters.interface_faces_only);
+            reinit_operation = std::move(elliptic_operation);
           }
         else if (param.reinit.modeltype == ModelType::geometric)
           {

@@ -27,6 +27,22 @@
 
 namespace MeltPoolDG::LevelSet
 {
+  namespace
+  {
+    /**
+     * Throw an exception, if no process has a cut cell, i.e., if the interface has vanished
+     * (e.g., a droplet smaller than a cell) or does not intersect the domain.
+     */
+    void
+    check_cut_cells_exist(const std::vector<bool> &is_cut_cell, const MPI_Comm mpi_comm)
+    {
+      const unsigned int n_cut_cells = std::count(is_cut_cell.begin(), is_cut_cell.end(), true);
+      AssertThrow(dealii::Utilities::MPI::sum(n_cut_cells, mpi_comm) > 0,
+                  dealii::ExcMessage("The narrow band contains no cut cells: the interface has "
+                                     "vanished or does not intersect the domain."));
+    }
+  } // namespace
+
   template <int dim, typename number>
   NarrowBandLevelSetOperation<dim, number>::NarrowBandLevelSetOperation(
     ScratchData<dim, dim, number>                &scratch_data_in,
@@ -34,7 +50,9 @@ namespace MeltPoolDG::LevelSet
     const NarrowBandData<number>                 &narrow_band_data_in,
     const ReinitializationData<number>           &reinit_data_in,
     const unsigned int                            fe_degree_in,
-    const std::shared_ptr<dealii::Function<dim>> &velocity_function)
+    const std::shared_ptr<dealii::Function<dim>> &velocity_function,
+    const NormalVectorData<number>               *normal_vector_data,
+    const CurvatureData<number>                  *curvature_data)
     : scratch_data(scratch_data_in)
     , narrow_band_data(narrow_band_data_in)
     , reinit_data(reinit_data_in)
@@ -92,6 +110,27 @@ namespace MeltPoolDG::LevelSet
       scratch_data, reinit_data, cut_dof_idx, quad_idx, cut_dof_idx);
     reinit_operation->set_face_terms_on_interface_faces_only(
       narrow_band_data.reinitialization_faces == NarrowBandReinitializationFaces::interface_faces);
+
+    // continuous level set on the cut cells: its DoFHandler is attached to the scratch data after
+    // the band and the cut DoFHandler
+    if (narrow_band_data.continuous_level_set.enable)
+      {
+        // default parameters: no damping (see NarrowBandContinuousLevelSet)
+        NormalVectorData<number> default_normal_vector_data;
+        CurvatureData<number>    default_curvature_data;
+        default_normal_vector_data.filter_parameter = 0.;
+        default_curvature_data.filter_parameter     = 0.;
+
+        continuous_level_set = std::make_unique<NarrowBandContinuousLevelSet<dim, number>>(
+          scratch_data,
+          narrow_band_data.continuous_level_set,
+          normal_vector_data != nullptr ? *normal_vector_data : default_normal_vector_data,
+          curvature_data != nullptr ? *curvature_data : default_curvature_data,
+          fe_collection_cut,
+          fe_degree,
+          cut_dof_idx,
+          quad_idx);
+      }
   }
 
   template <int dim, typename number>
@@ -145,6 +184,10 @@ namespace MeltPoolDG::LevelSet
                                   fe_collection_band,
                                   is_small_cut_cell);
 
+    // continuous level set: same active FE indices as the cut DoFHandler
+    if (continuous_level_set)
+      continuous_level_set->distribute_dofs(dof_handler_cut);
+
     // DG: no constraints
     constraints_band.clear();
     constraints_band.close();
@@ -184,6 +227,9 @@ namespace MeltPoolDG::LevelSet
 
     time_integrator->reinit(solution_history_band);
     reinit_operation->reinit();
+
+    if (continuous_level_set)
+      continuous_level_set->reinit();
   }
 
   template <int dim, typename number>
@@ -209,7 +255,8 @@ namespace MeltPoolDG::LevelSet
   void
   NarrowBandLevelSetOperation<dim, number>::set_initial_condition(
     const dealii::Function<dim> &level_set_function,
-    const bool                   do_reinitialize)
+    const bool                   do_reinitialize,
+    const CellwiseFunction      &cellwise_level_set_function)
   {
     ScopedName                 sc("narrow_band::set_initial_condition");
     dealii::TimerOutput::Scope scope(scratch_data.get_timer(), sc);
@@ -244,6 +291,7 @@ namespace MeltPoolDG::LevelSet
     std::vector<number>     volume_fractions;
     const std::vector<bool> is_cut_cell =
       NarrowBand::compute_cut_cells(dof_handler_band, level_set_band, fe_degree, &volume_fractions);
+    check_cut_cells_exist(is_cut_cell, scratch_data.get_mpi_comm());
 
     setup_dof_system(is_cut_cell, compute_small_cut_cells(is_cut_cell, volume_fractions));
 
@@ -252,10 +300,32 @@ namespace MeltPoolDG::LevelSet
       update_cell_signs(is_cut_cell, &level_set_function);
 
     // 3) level-set field on the cut cells
-    dealii::VectorTools::interpolate(scratch_data.get_mapping(),
-                                     dof_handler_cut,
-                                     level_set_function,
-                                     level_set);
+    if (cellwise_level_set_function)
+      {
+        // interpolation cell by cell at the support points
+        dealii::Vector<number> values;
+        for (const auto &cell : dof_handler_cut.active_cell_iterators())
+          {
+            if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+              continue;
+
+            const auto &unit_support_points = cell->get_fe().get_unit_support_points();
+            values.reinit(unit_support_points.size());
+            for (unsigned int i = 0; i < unit_support_points.size(); ++i)
+              {
+                const dealii::Point<dim> point =
+                  scratch_data.get_mapping().transform_unit_to_real_cell(cell,
+                                                                         unit_support_points[i]);
+                values[i] = cellwise_level_set_function(*cell, point);
+              }
+            cell->set_dof_values(values, level_set);
+          }
+      }
+    else
+      dealii::VectorTools::interpolate(scratch_data.get_mapping(),
+                                       dof_handler_cut,
+                                       level_set_function,
+                                       level_set);
 
     if (is_layered_band())
       {
@@ -273,6 +343,7 @@ namespace MeltPoolDG::LevelSet
           }
 
         print_band_statistics();
+        update_continuous_level_set();
         return;
       }
 
@@ -280,6 +351,7 @@ namespace MeltPoolDG::LevelSet
       reinitialize();
 
     extend();
+    update_continuous_level_set();
   }
 
   template <int dim, typename number>
@@ -380,7 +452,8 @@ namespace MeltPoolDG::LevelSet
                                                                           level_set_band,
                                                                           fe_degree,
                                                                           &volume_fractions);
-      std::vector<bool>       is_small_cut_cell_new =
+      check_cut_cells_exist(is_cut_cell, scratch_data.get_mpi_comm());
+      std::vector<bool> is_small_cut_cell_new =
         compute_small_cut_cells(is_cut_cell, volume_fractions);
 
       // semi-Lagrangian band: signs of the candidate cells, which are not cut at t^{n+1}
@@ -535,11 +608,15 @@ namespace MeltPoolDG::LevelSet
     if (is_layered_band())
       {
         print_band_statistics();
+        update_continuous_level_set();
         return;
       }
 
     // S2: extension to the neighbor cells
     extend();
+
+    // S6, S7: continuous level set, normal vector and curvature
+    update_continuous_level_set();
   }
 
   template <int dim, typename number>
@@ -711,6 +788,21 @@ namespace MeltPoolDG::LevelSet
   }
 
   template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::update_continuous_level_set()
+  {
+    if (continuous_level_set)
+      continuous_level_set->compute(level_set);
+  }
+
+  template <int dim, typename number>
+  const NarrowBandContinuousLevelSet<dim, number> *
+  NarrowBandLevelSetOperation<dim, number>::get_continuous_level_set() const
+  {
+    return continuous_level_set.get();
+  }
+
+  template <int dim, typename number>
   const typename NarrowBandLevelSetOperation<dim, number>::VectorType &
   NarrowBandLevelSetOperation<dim, number>::get_level_set() const
   {
@@ -749,6 +841,9 @@ namespace MeltPoolDG::LevelSet
     const auto &level_set_band = solution_history_band.get_current_solution();
     level_set_band.update_ghost_values();
     data_out.add_data_vector(dof_handler_band, level_set_band, "level_set_band");
+
+    if (continuous_level_set)
+      continuous_level_set->attach_output_vectors(data_out);
   }
 
   template <int dim, typename number>

@@ -3,7 +3,7 @@
   "base": {
     "case name": "vortex_bubble",
     "dimension": 2,
-    "global refinements": 6,
+    "global refinements": 5,
     "do print parameters": false,
     "fe": {
       "degree": 2,
@@ -14,24 +14,27 @@
   "case specific": {
     "center point": "0.5, 0.75",
     "radius": 0.15,
-    "T": 4.0
+    "T": 2.0
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 4.0,
+    "end time": 2.0,
     "time step size": 0.01
   },
   "output": {
     "directory": "output_vortex_bubble_semi_lagrangian",
     "do user defined postprocessing": true,
-    "write frequency": 10,
+    "write frequency": 25,
     "paraview": {
       "enable": true
     }
   },
   "narrow band": {
     "type": "semi_lagrangian",
-    "reinitialization frequency": 1
+    "reinitialization frequency": 2,
+    "continuous level set": {
+      "enable": true
+    }
   },
   "reinitialization": {
     "type": "elliptic",

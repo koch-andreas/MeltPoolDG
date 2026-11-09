@@ -29,16 +29,30 @@ namespace MeltPoolDG::MeltPool
   template <int dim, typename number>
   class PowderBedLevelSet : public dealii::Function<dim, number>
   {
+  public:
     // pair of center and radius
     using Particle = std::pair<dealii::Point<3>, number>;
 
-  public:
     PowderBedLevelSet(const PowderBedData<number> &powder_bed_data,
                       const LevelSet::LevelSetType level_set_type = LevelSet::LevelSetType::tanh,
                       const number                 eps            = 0.0);
 
     number
     value(const dealii::Point<dim> &p, const unsigned int /* component */) const override;
+
+    /**
+     * @brief Return the particles (center in particle space and radius).
+     */
+    const std::vector<Particle> &
+    get_particles() const;
+
+    /**
+     * @brief Return the point in particle space (3D) of a point @p p of the simulation domain. In
+     * 2D, the plane of the simulation is the slice y = slice location of the particle space, and
+     * its y-axis corresponds to the z-axis of the particle space.
+     */
+    dealii::Point<3>
+    to_particle_space(const dealii::Point<dim> &p) const;
 
   private:
     std::vector<Particle>

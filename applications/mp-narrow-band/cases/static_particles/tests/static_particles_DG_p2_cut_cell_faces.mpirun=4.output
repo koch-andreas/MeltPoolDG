@@ -1,0 +1,16 @@
+| t = 0.0000e+00: 76 cut cells, 136 neighbor cells                                static_particles |
+| rel. L2 error signed distance: 1.9989e-01  L2 error |grad phi|-1: 2.0001e-01    static_particles |
+| interface error L2: 7.8571e-06  max: 2.4757e-05                                 static_particles |
+| area (phi>0): 1.4137e-01  interface length: 1.8849e+00  circularity: 7.0711e-01     level_set_cg |
+| t = 1.0000e+00: 76 cut cells, 136 neighbor cells                                static_particles |
+| rel. L2 error signed distance: 3.0943e-02  L2 error |grad phi|-1: 7.8366e-02    static_particles |
+| interface error L2: 1.6947e-05  max: 8.9344e-05                                 static_particles |
+| area (phi>0): 1.4137e-01  interface length: 1.8848e+00  circularity: 7.0719e-01     level_set_cg |
+| t = 2.0000e+00: 76 cut cells, 135 neighbor cells                                static_particles |
+| rel. L2 error signed distance: 3.5251e-02  L2 error |grad phi|-1: 7.9266e-02    static_particles |
+| interface error L2: 2.5856e-05  max: 1.2665e-04                                 static_particles |
+| area (phi>0): 1.4138e-01  interface length: 1.8850e+00  circularity: 7.0712e-01     level_set_cg |
+| t = 3.0000e+00: 76 cut cells, 136 neighbor cells                                static_particles |
+| rel. L2 error signed distance: 3.0557e-02  L2 error |grad phi|-1: 7.7141e-02    static_particles |
+| interface error L2: 3.8479e-05  max: 1.8554e-04                                 static_particles |
+| area (phi>0): 1.4138e-01  interface length: 1.8847e+00  circularity: 7.0722e-01     level_set_cg |

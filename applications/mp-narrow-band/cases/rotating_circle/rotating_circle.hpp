@@ -108,7 +108,8 @@ namespace MeltPoolDG::Simulation::RotatingCircle
    * Since the rigid-body rotation preserves distances, the exact solution is the signed distance
    * function of the rotated circle at all times. If user-defined postprocessing is enabled, the
    * errors of the level-set field on the cut cells with respect to the exact solution are
-   * printed.
+   * printed. If the continuous level set of the narrow band is enabled, the errors of the
+   * continuous level set and of its curvature and normal vector are printed as well.
    */
   template <int dim, typename number>
   class SimulationRotatingCircle : public LevelSet::NarrowBandCase<dim, number>
@@ -198,6 +199,32 @@ namespace MeltPoolDG::Simulation::RotatingCircle
                                                       exact_interface_measure,
                                                       this->mpi_communicator,
                                                       "rotating_circle");
+
+      // continuous level set: interface errors, curvature (dim - 1) / R (positive inside) and
+      // inner normal vector of the circle
+      if (this->parameters.narrow_band.continuous_level_set.enable)
+        {
+          LevelSet::print_narrow_band_errors<dim, number>(generic_data_out,
+                                                          "level_set_cg",
+                                                          exact_solution,
+                                                          exact_interface_measure,
+                                                          this->mpi_communicator,
+                                                          "level_set_cg");
+
+          if (this->parameters.curvature.enable)
+            {
+              const dealii::Point<dim> center = exact_solution.get_center();
+              LevelSet::print_interface_geometry_errors<dim, number>(
+                generic_data_out,
+                (dim - 1.) / radius,
+                [&](const dealii::Point<dim> &p) {
+                  const dealii::Tensor<1, dim, number> r = center - p;
+                  return r / r.norm();
+                },
+                this->mpi_communicator,
+                "level_set_cg");
+            }
+        }
     }
 
   private:

@@ -170,6 +170,13 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
                                                       this->mpi_communicator,
                                                       "vortex_bubble");
 
+      // continuous level set of the narrow band (closed interface)
+      if (this->parameters.narrow_band.continuous_level_set.enable)
+        LevelSet::print_interface_measures<dim, number>(generic_data_out,
+                                                        "level_set_cg",
+                                                        this->mpi_communicator,
+                                                        "level_set_cg");
+
       // the exact solution is known at multiples of the period
       const number n_periods =
         (generic_data_out.get_time() - this->parameters.time_stepping.start_time) / period;

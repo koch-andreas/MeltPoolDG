@@ -277,28 +277,38 @@ namespace MeltPoolDG::LevelSet
             statistics.max_displacement =
               std::max<number>(statistics.max_displacement, x.distance(x_foot) / map.cell_size);
 
-            // (a) foot point in a cut cell: polynomial of the cut cell
+            // (a) foot point in a cut cell: polynomial of the cut cell. On the common boundary of
+            // several cut cells, the cell of the node is preferred: the level set may jump across
+            // the faces, and a vanishing displacement reproduces the old polynomial.
             containing_boxes.clear();
             box_tree.query(boost::geometry::index::intersects(x_foot),
                            std::back_inserter(containing_boxes));
 
-            bool is_located = false;
+            int located_cell = -1;
             for (const auto &box : containing_boxes)
               {
-                const auto              &cut_cell   = cut_cells[box.second];
-                const dealii::Point<dim> unit_point = cut_cell.map.to_unit(x_foot);
-                if (is_inside(unit_point, 1e-10))
+                const auto &cut_cell = cut_cells[box.second];
+                if (not is_inside(cut_cell.map.to_unit(x_foot), 1e-10))
+                  continue;
+
+                if (located_cell < 0)
+                  located_cell = box.second;
+                if (cut_cell.map.origin.distance(map.origin) < 1e-10 * map.cell_size)
                   {
-                    double                 value = 0.;
-                    dealii::Tensor<1, dim> gradient;
-                    basis.evaluate(cut_cell.values, unit_point, value, gradient, nullptr);
-                    values[i]  = value;
-                    is_located = true;
+                    located_cell = box.second;
                     break;
                   }
               }
-            if (is_located)
-              continue;
+            if (located_cell >= 0)
+              {
+                const auto            &cut_cell = cut_cells[located_cell];
+                double                 value    = 0.;
+                dealii::Tensor<1, dim> gradient;
+                basis.evaluate(
+                  cut_cell.values, cut_cell.map.to_unit(x_foot), value, gradient, nullptr);
+                values[i] = value;
+                continue;
+              }
 
             // (b) foot point in a cell, which is not cut: distance to the interface with the sign
             // of the cell

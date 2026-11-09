@@ -264,6 +264,23 @@ namespace MeltPoolDG::LevelSet
     /// disables the error-based reinitialization.
     number reinitialization_eikonal_threshold = 0.0;
 
+    /// Continuous level-set field on the cut cells, which is computed after each time step by the
+    /// constrained L2-projection of the DG level set, and the normal vector and the curvature
+    /// computed from it (see NarrowBandContinuousLevelSet).
+    struct ContinuousLevelSet
+    {
+      /// Compute the continuous level set, the normal vector and the curvature.
+      bool enable = false;
+
+      /// Dimensionless factor c of the interface penalty gamma_K = c h_K of the projection, which
+      /// pins the zero level set of the continuous level set to the zero level set of the DG
+      /// level set. A value of zero results in the plain L2-projection.
+      number interface_penalty = 100.0;
+
+      /// Linear solver of the projection.
+      LinearSolverData<number> linear_solver;
+    } continuous_level_set;
+
     /**
      * @brief Add the parameters to the parameter handler.
      *

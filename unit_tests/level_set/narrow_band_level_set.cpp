@@ -32,6 +32,7 @@
 #include <meltpooldg/level_set/narrow_band_closest_point_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
+#include <meltpooldg/level_set/narrow_band_level_set_operation.hpp>
 #include <meltpooldg/level_set/narrow_band_semi_lagrangian_advection.hpp>
 #include <meltpooldg/level_set/narrow_band_utilities.hpp>
 #include <meltpooldg/level_set/reinitialization_data.hpp>
@@ -1208,6 +1209,91 @@ namespace MeltPoolDG::LevelSet
     }
 
     /**
+     * Semi-Lagrangian advection with a vanishing velocity of a level set that jumps across the
+     * faces between the cut cells (planar level set plus a cell-wise constant). The foot points
+     * coincide with the nodes, and the polynomial of the cell of the node is evaluated also at the
+     * nodes on the faces. Returns the maximum difference between the advected and the old values
+     * on the cut cells.
+     */
+    template <int dim>
+    number
+    compute_semi_lagrangian_zero_velocity_error(const unsigned int fe_degree)
+    {
+      dealii::Tensor<1, dim> normal;
+      normal[0] = 0.8;
+      normal[1] = 0.6;
+      const dealii::ScalarFunctionFromFunctionObject<dim> planar(
+        [&](const dealii::Point<dim> &p) { return normal * p - 0.1037; });
+
+      NarrowBandFixture<dim> fixture(fe_degree, 3, 1, &planar);
+
+      std::vector<bool> is_cut_cell(fixture.triangulation.n_active_cells(), false);
+      for (const auto &cell : fixture.dof_handler_band.active_cell_iterators())
+        if (cell->is_locally_owned())
+          is_cut_cell[cell->active_cell_index()] =
+            cell->active_fe_index() == NarrowBand::ActiveFEIndex::cut;
+
+      const auto fe_collection_band = NarrowBand::create_layered_band_fe_collection<dim>(fe_degree);
+      const auto fe_collection_cut  = NarrowBand::create_layered_cut_fe_collection<dim>(fe_degree);
+      dealii::DoFHandler<dim> dof_handler_band(fixture.triangulation);
+      dealii::DoFHandler<dim> dof_handler_cut(fixture.triangulation);
+      NarrowBand::distribute_dofs_layered(
+        is_cut_cell, 1, dof_handler_cut, fe_collection_cut, dof_handler_band, fe_collection_band);
+
+      VectorType level_set_cut, level_set_band;
+      fixture.initialize_vector(dof_handler_cut, level_set_cut);
+      fixture.initialize_vector(dof_handler_band, level_set_band);
+      dealii::VectorTools::interpolate(fixture.mapping, dof_handler_cut, planar, level_set_cut);
+
+      // cell-wise constant: the level set jumps across the faces between the cut cells
+      dealii::Vector<number> values;
+      for (const auto &cell : dof_handler_cut.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+            continue;
+          values.reinit(cell->get_fe().n_dofs_per_cell());
+          cell->get_dof_values(level_set_cut, values);
+          for (auto &value : values)
+            value += 0.01 * (cell->active_cell_index() % 3);
+          cell->set_dof_values(values, level_set_cut);
+        }
+
+      std::vector<int> cell_signs(fixture.triangulation.n_active_cells(), 0);
+      for (const auto &cell : fixture.triangulation.active_cell_iterators())
+        if (not cell->is_artificial())
+          cell_signs[cell->active_cell_index()] = planar.value(cell->center()) > 0. ? 1 : -1;
+
+      dealii::Functions::ZeroFunction<dim>           velocity_function(dim);
+      const dealii::ConditionalOStream               pcout(std::cout, false);
+      NarrowBandSemiLagrangianAdvection<dim, number> advection(pcout);
+      advection.advect(dof_handler_cut,
+                       level_set_cut,
+                       dof_handler_band,
+                       level_set_band,
+                       cell_signs,
+                       velocity_function,
+                       0.,
+                       0.1);
+
+      number                 error = 0.;
+      dealii::Vector<number> values_band;
+      for (const auto &cell : dof_handler_cut.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+            continue;
+          values.reinit(cell->get_fe().n_dofs_per_cell());
+          values_band.reinit(values.size());
+          cell->get_dof_values(level_set_cut, values);
+          cell->as_dof_handler_iterator(dof_handler_band)
+            ->get_dof_values(level_set_band, values_band);
+          for (unsigned int i = 0; i < values.size(); ++i)
+            error = std::max<number>(error, std::abs(values[i] - values_band[i]));
+        }
+
+      return dealii::Utilities::MPI::max(error, MPI_COMM_WORLD);
+    }
+
+    /**
      * Semi-Lagrangian advection of a planar signed distance function phi = n.x - c (|n| = 1) with
      * a constant velocity u: the back-traced level set phi(x - u dt) is reproduced exactly on all
      * candidate cells (cut cells and their vertex neighbors), since the polynomials of the cut
@@ -1605,6 +1691,125 @@ namespace MeltPoolDG::LevelSet
       return {statistics.n_limited_cells,
               dealii::Utilities::MPI::sum(n_perturbed_cells, MPI_COMM_WORLD)};
     }
+
+    /**
+     * Continuous level set, normal vector and curvature of the semi-Lagrangian narrow band on
+     * [-1,1]^dim for the level-set function @p level_set_function, which is interpolated onto the
+     * cut cells (without reinitialization). Returns the statistics of the continuous level set and
+     * the maximum nodal errors of the continuous level set (with respect to
+     * @p level_set_function), of the normal vector (with respect to @p exact_normal) and of the
+     * curvature (with respect to @p exact_curvature, i.e., the curvature of the iso-surface
+     * through the node) at the locally owned DoFs of the continuous fields.
+     */
+    template <int dim>
+    std::pair<typename NarrowBandContinuousLevelSet<dim, number>::Statistics, std::array<number, 3>>
+    compute_continuous_level_set(
+      const dealii::Function<dim>                                             &level_set_function,
+      const std::function<dealii::Tensor<1, dim>(const dealii::Point<dim> &)> &exact_normal,
+      const std::function<number(const dealii::Point<dim> &)>                 &exact_curvature,
+      const unsigned int                                                       fe_degree,
+      const unsigned int                                                       n_refinements,
+      const bool   do_reinitialize   = false,
+      const number interface_penalty = 100.)
+    {
+      dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
+      dealii::GridGenerator::hyper_cube(triangulation, -1., 1.);
+      triangulation.refine_global(n_refinements);
+
+      ScratchData<dim, dim, number> scratch_data(MPI_COMM_WORLD, 0, true);
+      scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
+
+      NarrowBandData<number> narrow_band_data;
+      narrow_band_data.type                                   = NarrowBandType::semi_lagrangian;
+      narrow_band_data.continuous_level_set.enable            = true;
+      narrow_band_data.continuous_level_set.interface_penalty = interface_penalty;
+      narrow_band_data.continuous_level_set.linear_solver.rel_tolerance = 1e-13;
+
+      ReinitializationData<number> reinit_data;
+      reinit_data.modeltype                                   = ModelType::elliptic;
+      reinit_data.fe.type                                     = FiniteElementType::FE_DGQ;
+      reinit_data.fe.degree                                   = fe_degree;
+      reinit_data.elliptic.intersected_cells_only             = true;
+      reinit_data.elliptic.penalty_parameter                  = 1e4;
+      reinit_data.elliptic.nlsolve.max_nonlinear_iterations   = 1000;
+      reinit_data.elliptic.nlsolve.residual_tolerance         = 1e-8;
+      reinit_data.elliptic.nlsolve.field_correction_tolerance = 1e-8;
+      reinit_data.elliptic.nlsolve.verbosity_level            = 0;
+      reinit_data.linear_solver.solver_type                   = LinearSolverType::CG;
+      reinit_data.linear_solver.preconditioner_type           = PreconditionerType::ILU;
+      reinit_data.linear_solver.rel_tolerance                 = 1e-12;
+      reinit_data.linear_solver.abs_tolerance                 = 1e-20;
+      reinit_data.linear_solver.max_iterations                = 1000;
+
+      NormalVectorData<number> normal_vector_data;
+      normal_vector_data.filter_parameter            = 0.;
+      normal_vector_data.linear_solver.rel_tolerance = 1e-13;
+      CurvatureData<number> curvature_data;
+      curvature_data.filter_parameter            = 0.;
+      curvature_data.linear_solver.rel_tolerance = 1e-13;
+
+      NarrowBandLevelSetOperation<dim, number> operation(
+        scratch_data,
+        triangulation,
+        narrow_band_data,
+        reinit_data,
+        fe_degree,
+        std::make_shared<dealii::Functions::ZeroFunction<dim>>(dim),
+        &normal_vector_data,
+        &curvature_data);
+      operation.set_initial_condition(level_set_function, do_reinitialize);
+
+      const auto *continuous_level_set = operation.get_continuous_level_set();
+      EXPECT_NE(continuous_level_set, nullptr);
+      const auto        &dof_handler = continuous_level_set->get_dof_handler();
+      const unsigned int dof_idx     = continuous_level_set->get_dof_index();
+
+      // exact nodal values
+      const auto interpolate = [&](const std::function<number(const dealii::Point<dim> &)> &f) {
+        VectorType vector;
+        scratch_data.initialize_dof_vector(vector, dof_idx);
+        dealii::VectorTools::interpolate(scratch_data.get_mapping(),
+                                         dof_handler,
+                                         dealii::ScalarFunctionFromFunctionObject<dim>(f),
+                                         vector);
+        return vector;
+      };
+
+      const VectorType level_set_exact =
+        interpolate([&](const dealii::Point<dim> &p) { return level_set_function.value(p); });
+      const VectorType        curvature_exact = interpolate(exact_curvature);
+      std::vector<VectorType> normal_exact;
+      for (unsigned int d = 0; d < dim; ++d)
+        normal_exact.push_back(
+          interpolate([&](const dealii::Point<dim> &p) { return exact_normal(p)[d]; }));
+
+      const auto &level_set = continuous_level_set->get_level_set();
+      const auto &normal    = continuous_level_set->get_normal_vector();
+      const auto &curvature = continuous_level_set->get_curvature();
+
+      std::array<number, 3> errors = {{0., 0., 0.}};
+      for (unsigned int i = 0; i < level_set.locally_owned_size(); ++i)
+        {
+          errors[0] =
+            std::max(errors[0],
+                     std::abs(level_set.local_element(i) - level_set_exact.local_element(i)));
+
+          number error_normal = 0.;
+          for (unsigned int d = 0; d < dim; ++d)
+            error_normal += dealii::Utilities::fixed_power<2>(normal.block(d).local_element(i) -
+                                                              normal_exact[d].local_element(i));
+          errors[1] = std::max(errors[1], std::sqrt(error_normal));
+
+          errors[2] =
+            std::max(errors[2],
+                     std::abs(curvature.local_element(i) - curvature_exact.local_element(i)));
+        }
+
+      for (auto &error : errors)
+        error = dealii::Utilities::MPI::max(error, MPI_COMM_WORLD);
+
+      return {continuous_level_set->get_statistics(), errors};
+    }
   } // namespace
 
   TEST(NarrowBandLevelSetTest, ExtensionReproducesPolynomials2D)
@@ -1839,6 +2044,14 @@ namespace MeltPoolDG::LevelSet
       }
   }
 
+  TEST(NarrowBandLevelSetTest, SemiLagrangianZeroVelocityDiscontinuous2D)
+  {
+    // with a vanishing velocity, the advected level set equals the old one also at the nodes on
+    // the faces, where the level set jumps
+    for (unsigned int degree = 1; degree <= 3; ++degree)
+      EXPECT_LT(compute_semi_lagrangian_zero_velocity_error<2>(degree), 1e-12);
+  }
+
   TEST(NarrowBandLevelSetTest, LayeredBand2D)
   {
     // one cut cell, 8 cells sharing a vertex with it (first layer) and 16 cells in the second
@@ -1870,6 +2083,89 @@ namespace MeltPoolDG::LevelSet
     // sign clamp
     EXPECT_GT(test_sign_clamp<2>(NarrowBandExtensionType::ghost_penalty), 0U);
     EXPECT_GT(test_sign_clamp<2>(NarrowBandExtensionType::closest_point), 0U);
+  }
+
+  TEST(NarrowBandLevelSetTest, ContinuousLevelSetPlanar2D)
+  {
+    // A planar level set is reproduced exactly by the constrained projection (it belongs to the
+    // continuous space and vanishes on the interface), its normal vector is constant and its
+    // curvature vanishes.
+    dealii::Tensor<1, 2> normal;
+    normal[0] = 0.8;
+    normal[1] = -0.6;
+    const dealii::ScalarFunctionFromFunctionObject<2> planar(
+      [&](const dealii::Point<2> &p) { return normal * p - 0.1037; });
+
+    for (unsigned int degree = 1; degree <= 3; ++degree)
+      {
+        const auto [statistics, errors] = compute_continuous_level_set<2>(
+          planar,
+          [&](const dealii::Point<2> &) { return normal; },
+          [](const dealii::Point<2> &) { return 0.; },
+          degree,
+          3);
+
+        EXPECT_LT(errors[0], 1e-11);
+        EXPECT_LT(errors[1], 1e-11);
+        EXPECT_LT(errors[2], 1e-9);
+        EXPECT_LT(statistics.max_interface_shift, 1e-11);
+        EXPECT_NEAR(statistics.interface_measure, 2. / 0.8, 1e-10);
+        EXPECT_LT(std::abs(statistics.min_curvature), 1e-9);
+        EXPECT_LT(std::abs(statistics.max_curvature), 1e-9);
+      }
+  }
+
+  TEST(NarrowBandLevelSetTest, ContinuousLevelSetCircle2D)
+  {
+    // reinitialized signed distance function of a circle (positive inside), i.e., the DG level set
+    // is discontinuous across the faces of the cut cells; exact curvature 1/r of the iso-lines and
+    // inner unit normal
+    const dealii::Point<2>                            center(0.031, -0.027);
+    const double                                      radius = 0.5;
+    const dealii::ScalarFunctionFromFunctionObject<2> circle(
+      [&](const dealii::Point<2> &p) { return radius - p.distance(center); });
+    const auto exact_normal = [&](const dealii::Point<2> &p) {
+      const dealii::Tensor<1, 2> r = center - p;
+      return r / r.norm();
+    };
+    const auto exact_curvature = [&](const dealii::Point<2> &p) { return 1. / p.distance(center); };
+
+    // nodal errors of the level set and the normal vector, maximum and mean relative error of the
+    // curvature on the interface
+    std::vector<std::array<double, 4>> errors;
+    for (const unsigned int n_refinements : {4U, 5U})
+      {
+        const auto [statistics, nodal_errors] = compute_continuous_level_set<2>(
+          circle, exact_normal, exact_curvature, 2, n_refinements, true /*reinitialize*/);
+
+        const double h = 2. / dealii::Utilities::pow(2, n_refinements);
+        EXPECT_GT(statistics.max_relative_interface_shift, 0.);
+        EXPECT_LT(statistics.max_relative_interface_shift, 2e-5);
+        EXPECT_NEAR(statistics.interface_measure, 2. * dealii::numbers::PI * radius, 1e-3 * h);
+
+        errors.push_back({{nodal_errors[0],
+                           nodal_errors[1],
+                           std::max(std::abs(statistics.min_curvature * radius - 1.),
+                                    std::abs(statistics.max_curvature * radius - 1.)),
+                           std::abs(statistics.mean_curvature * radius - 1.)}});
+      }
+
+    // (observed for 16^2 cells: 9.0e-5, 9.4e-3, 4.9e-2, 1.4e-3; the maximum curvature error
+    // converges with the order p - 1)
+    const std::array<double, 4> tolerances = {{1.5e-4, 1.5e-2, 7e-2, 2.5e-3}};
+    for (unsigned int i = 0; i < 4; ++i)
+      {
+        EXPECT_LT(errors[0][i], tolerances[i]);
+        EXPECT_LT(errors[1][i], errors[0][i]);
+      }
+
+    // the interface penalty reduces the shift of the interface
+    const auto shift = [&](const double interface_penalty) {
+      return compute_continuous_level_set<2>(
+               circle, exact_normal, exact_curvature, 2, 4, true, interface_penalty)
+        .first.max_relative_interface_shift;
+    };
+    EXPECT_LT(shift(100.), 0.5 * shift(0.));
   }
 
   TEST(NarrowBandLevelSetTest, BoundPreservingLimiter2D)

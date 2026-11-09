@@ -54,22 +54,7 @@ namespace MeltPoolDG::MeltPool
                                         const unsigned int /* component */) const
   {
     // compute the signed distance in particle space, which is always 3D
-
-    dealii::Point<3> point;
-    if constexpr (dim == 3)
-      point = p;
-    else if (dim == 2)
-      {
-        // convert 2D space into particle space:
-        // both x-axis coincide
-        point[0] = p[0];
-        // slice plane location specified by input parameter
-        point[1] = data.slice_location;
-        // y-axis of 2D plane coincides with z-axis in particle space
-        point[2] = p[1];
-      }
-    else
-      AssertThrow(false, dealii::ExcNotImplemented());
+    const dealii::Point<3> point = to_particle_space(p);
 
     number signed_distance = std::numeric_limits<number>::lowest();
     for (const auto &particle : particles)
@@ -95,6 +80,35 @@ namespace MeltPoolDG::MeltPool
       }
     // unreachable dummy return
     return 0.0;
+  }
+
+  template <int dim, typename number>
+  const std::vector<typename PowderBedLevelSet<dim, number>::Particle> &
+  PowderBedLevelSet<dim, number>::get_particles() const
+  {
+    return particles;
+  }
+
+  template <int dim, typename number>
+  dealii::Point<3>
+  PowderBedLevelSet<dim, number>::to_particle_space(const dealii::Point<dim> &p) const
+  {
+    dealii::Point<3> point;
+    if constexpr (dim == 3)
+      point = p;
+    else if constexpr (dim == 2)
+      {
+        // convert 2D space into particle space:
+        // both x-axis coincide
+        point[0] = p[0];
+        // slice plane location specified by input parameter
+        point[1] = data.slice_location;
+        // y-axis of 2D plane coincides with z-axis in particle space
+        point[2] = p[1];
+      }
+    else
+      AssertThrow(false, dealii::ExcNotImplemented());
+    return point;
   }
 
   template <int dim, typename number>

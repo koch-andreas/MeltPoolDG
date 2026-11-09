@@ -331,6 +331,11 @@
               "description": "Scaling factor for the interior penalty term in the elliptic reinitialization operator.",
               "default": 10.0
             },
+            "intersected cells only": {
+              "type": "boolean",
+              "description": "If true, the level-set field is only defined on the cells intersected by the zero level-set iso-surface (FE_DGQ on intersected cells, FE_Nothing elsewhere) and the elliptic reinitialization is solved on these cells only. Requires FE_DGQ elements and the fixed point solver.",
+              "default": false
+            },
             "nlsolve": {
               "type": "object",
               "properties": {
@@ -1028,6 +1033,11 @@
         "do update normal vector": {
           "type": "boolean",
           "description": "Set this parameter to true to update the normal vector each pseudo-time step.",
+          "default": false
+        },
+        "interface faces only": {
+          "type": "boolean",
+          "description": "Set this parameter to true to evaluate the SIPG face terms of the elliptic reinitialization on intersected cells only on the faces between two intersected cells, which are crossed by the interface. Then, interface branches in neighboring cells are not coupled. By default, the face terms are evaluated on all faces between two intersected cells.",
           "default": false
         }
       },

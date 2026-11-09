@@ -38,6 +38,14 @@ namespace MeltPoolDG::LevelSet
           "do update normal vector",
           application_specific_parameters.do_update_normal_vector,
           "Set this parameter to true to update the normal vector each pseudo-time step.");
+        prm.add_parameter(
+          "interface faces only",
+          application_specific_parameters.interface_faces_only,
+          "Set this parameter to true to evaluate the SIPG face terms of the elliptic "
+          "reinitialization on intersected cells only on the faces between two intersected cells, "
+          "which are crossed by the interface. Then, interface branches in neighboring cells are "
+          "not coupled. By default, the face terms are evaluated on all faces between two "
+          "intersected cells.");
       }
       prm.leave_subsection();
     }
@@ -56,6 +64,12 @@ namespace MeltPoolDG::LevelSet
       normal_vec.check_input_parameters(reinit.interface_thickness_parameter.type);
       curv.check_input_parameters(reinit.interface_thickness_parameter.type);
       profiling.check_input_parameters(time_stepping.time_step_size);
+
+      AssertThrow(not application_specific_parameters.interface_faces_only or
+                    (reinit.modeltype == ModelType::elliptic and
+                     reinit.elliptic.intersected_cells_only),
+                  dealii::ExcMessage("The parameter <interface faces only> requires the elliptic "
+                                     "reinitialization on intersected cells only."));
     }
 
   public:
@@ -71,6 +85,7 @@ namespace MeltPoolDG::LevelSet
     struct
     {
       bool do_update_normal_vector = false;
+      bool interface_faces_only    = false;
     } application_specific_parameters;
   };
 

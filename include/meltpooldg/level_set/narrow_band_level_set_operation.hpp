@@ -5,6 +5,7 @@
 #include <deal.II/dofs/dof_handler.h>
 
 #include <deal.II/grid/tria.h>
+#include <deal.II/grid/tria_accessor.h>
 
 #include <deal.II/hp/fe_collection.h>
 
@@ -12,18 +13,22 @@
 #include <deal.II/lac/la_parallel_vector.h>
 
 #include <meltpooldg/core/scratch_data.hpp>
+#include <meltpooldg/level_set/curvature_data.hpp>
 #include <meltpooldg/level_set/narrow_band_advection_DG_operator.hpp>
 #include <meltpooldg/level_set/narrow_band_bound_preserving_limiter.hpp>
 #include <meltpooldg/level_set/narrow_band_closest_point_extension.hpp>
+#include <meltpooldg/level_set/narrow_band_continuous_level_set.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_semi_lagrangian_advection.hpp>
+#include <meltpooldg/level_set/normal_vector_data.hpp>
 #include <meltpooldg/level_set/reinitialization_data.hpp>
 #include <meltpooldg/level_set/reinitialization_elliptic_operation.hpp>
 #include <meltpooldg/post_processing/generic_data_out.hpp>
 #include <meltpooldg/time_integration/solution_history.hpp>
 #include <meltpooldg/time_integration/time_integrator_base.hpp>
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -83,13 +88,18 @@ namespace MeltPoolDG::LevelSet
    * bound-preserving limiter (local maximum principle or sign preservation, see
    * NarrowBandBoundPreservingLimiter).
    *
-   * The velocity extension (S3), the projection to a continuous level set (S6) and the
-   * computation of the interface geometry (S7) are not part of this class. The advection
-   * velocity is prescribed by a function.
+   * Optionally (NarrowBandData::ContinuousLevelSet), a continuous level-set field is computed on
+   * the cut cells at the end of each time step and after setting the initial condition by the
+   * constrained L2-projection of the DG level set (S6), and the normal vector and the curvature
+   * are computed from it (S7, see NarrowBandContinuousLevelSet). The continuous level set does
+   * not feed back into the DG level set.
+   *
+   * The velocity extension (S3) is not part of this class. The advection velocity is prescribed
+   * by a function.
    *
    * The DoFHandlers are attached to the given ScratchData object, which is rebuilt whenever the
-   * cut cells change. Both DoFHandlers share the same active FE indices, as required by MatrixFree
-   * for several hp-DoFHandlers.
+   * cut cells change. All DoFHandlers (band, cut and, optionally, the continuous fields) share the
+   * same active FE indices, as required by MatrixFree for several hp-DoFHandlers.
    *
    * @note Only triangulations without hanging nodes and without periodic boundaries are
    * supported. The time step size has to satisfy the CFL condition such that the interface does
@@ -102,23 +112,37 @@ namespace MeltPoolDG::LevelSet
     using VectorType = dealii::LinearAlgebra::distributed::Vector<number>;
 
     /**
+     * Level-set function evaluated at a point of a given cell.
+     */
+    using CellwiseFunction =
+      std::function<number(const dealii::CellAccessor<dim, dim> &, const dealii::Point<dim> &)>;
+
+    /**
      * @brief Constructor.
      *
      * @param scratch_data Scratch data, to which the DoFHandlers and the quadrature rule are
      * attached. It is rebuilt whenever the narrow band changes. No other hp-DoFHandler may be
-     * attached, since MatrixFree requires the same active FE indices for all hp-DoFHandlers.
+     * attached (except the DoFHandler of the continuous level set, which is attached by this
+     * class), since MatrixFree requires the same active FE indices for all hp-DoFHandlers.
      * @param triangulation Triangulation.
      * @param narrow_band_data Parameters of the narrow-band method.
      * @param reinit_data Parameters of the elliptic reinitialization on the cut cells.
      * @param fe_degree Polynomial degree of the level-set field.
      * @param velocity_function Advection velocity.
+     * @param normal_vector_data Parameters of the normal vector of the continuous level set
+     * (NarrowBandData::ContinuousLevelSet). If nullptr, the default parameters without damping
+     * (filter parameter zero) are used.
+     * @param curvature_data Parameters of the curvature of the continuous level set. If nullptr,
+     * the default parameters without damping (filter parameter zero) are used.
      */
     NarrowBandLevelSetOperation(ScratchData<dim, dim, number>                &scratch_data,
                                 const dealii::Triangulation<dim>             &triangulation,
                                 const NarrowBandData<number>                 &narrow_band_data,
                                 const ReinitializationData<number>           &reinit_data,
                                 const unsigned int                            fe_degree,
-                                const std::shared_ptr<dealii::Function<dim>> &velocity_function);
+                                const std::shared_ptr<dealii::Function<dim>> &velocity_function,
+                                const NormalVectorData<number> *normal_vector_data = nullptr,
+                                const CurvatureData<number>    *curvature_data     = nullptr);
 
     /**
      * @brief Set the initial condition.
@@ -131,10 +155,16 @@ namespace MeltPoolDG::LevelSet
      *
      * @param level_set_function Initial level-set function.
      * @param do_reinitialize Reinitialize the initial level-set field on the cut cells.
+     * @param cellwise_level_set_function Optional level-set function, which is evaluated with the
+     * cell and is interpolated onto the cut cells instead of @p level_set_function (the cut cells
+     * and the signs of the other cells are still determined from @p level_set_function). It allows
+     * for an initial level set that jumps across the faces between the cut cells, e.g., the signed
+     * distance function of the interface branch of each cut cell.
      */
     void
     set_initial_condition(const dealii::Function<dim> &level_set_function,
-                          const bool                   do_reinitialize = false);
+                          const bool                   do_reinitialize             = false,
+                          const CellwiseFunction      &cellwise_level_set_function = {});
 
     /**
      * @brief Advance the level-set field by one time step.
@@ -174,8 +204,17 @@ namespace MeltPoolDG::LevelSet
     get_dof_handler_band() const;
 
     /**
+     * @brief Continuous level set, normal vector and curvature on the cut cells (nullptr, if
+     * NarrowBandData::ContinuousLevelSet::enable is false).
+     */
+    const NarrowBandContinuousLevelSet<dim, number> *
+    get_continuous_level_set() const;
+
+    /**
      * @brief Attach the level-set field on the cut cells ("level_set") and the extended level-set
-     * field on the band ("level_set_band") to the output.
+     * field on the band ("level_set_band") to the output. If enabled, the continuous level set
+     * ("level_set_cg"), the normal vector ("normal") and the curvature ("curvature") are attached
+     * as well.
      */
     void
     attach_output_vectors(GenericDataOut<dim, number> &data_out) const;
@@ -282,6 +321,13 @@ namespace MeltPoolDG::LevelSet
     void
     print_band_statistics() const;
 
+    /**
+     * @brief Compute the continuous level set, the normal vector and the curvature from the
+     * level-set field on the cut cells (S6, S7), if enabled.
+     */
+    void
+    update_continuous_level_set();
+
     /// Scratch data.
     ScratchData<dim, dim, number> &scratch_data;
 
@@ -355,5 +401,8 @@ namespace MeltPoolDG::LevelSet
 
     /// Explicit time integrator of the advection.
     std::unique_ptr<TimeIntegration::TimeIntegratorBase<number>> time_integrator;
+
+    /// Continuous level set, normal vector and curvature on the cut cells (optional).
+    std::unique_ptr<NarrowBandContinuousLevelSet<dim, number>> continuous_level_set;
   };
 } // namespace MeltPoolDG::LevelSet

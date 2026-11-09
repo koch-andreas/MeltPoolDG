@@ -8,6 +8,8 @@
 #include <deal.II/base/tensor.h>
 #include <deal.II/base/utilities.h>
 
+#include <deal.II/fe/fe_values_extractors.h>
+
 #include <deal.II/hp/fe_values.h>
 #include <deal.II/hp/mapping_collection.h>
 #include <deal.II/hp/q_collection.h>
@@ -21,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -303,6 +306,131 @@ namespace MeltPoolDG::LevelSet
       if (exact_interface_measure > 0.)
         str << "  rel. error measure: "
             << (interface_measure - exact_interface_measure) / exact_interface_measure;
+      Journal::print_line(pcout, str.str(), label);
+    }
+  }
+
+  /**
+   * @brief Compute and print the errors of the curvature and the normal vector of the continuous
+   * level set on the cut cells (see NarrowBandContinuousLevelSet) at the quadrature points of the
+   * zero level set of the continuous level set.
+   *
+   * The output vectors "level_set_cg", "curvature" and "normal" have to be attached to
+   * @p generic_data_out. The following errors are printed:
+   * - the L2-error $\sqrt{\int_{\Gamma_h} (\kappa_h - \kappa)^2 \, \mathrm{d}s / |\Gamma_h|}$
+   *   of the curvature relative to $|\kappa|$ and the maximum relative error,
+   * - the L2-error and the maximum error of the normal vector $|\boldsymbol{n}_h -
+   *   \boldsymbol{n}|$.
+   *
+   * @param generic_data_out Output data containing the continuous fields.
+   * @param exact_curvature Exact curvature (constant along the interface).
+   * @param exact_normal Exact unit normal vector at a point on the interface.
+   * @param mpi_communicator MPI communicator.
+   * @param label Label of the printed lines.
+   */
+  template <int dim, typename number>
+  void
+  print_interface_geometry_errors(
+    const GenericDataOut<dim, number> &generic_data_out,
+    const number                       exact_curvature,
+    const std::function<dealii::Tensor<1, dim, number>(const dealii::Point<dim> &)> &exact_normal,
+    const MPI_Comm     mpi_communicator,
+    const std::string &label)
+  {
+    const auto &dof_handler        = generic_data_out.get_dof_handler("level_set_cg");
+    const auto &level_set          = generic_data_out.get_vector("level_set_cg");
+    const auto &curvature          = generic_data_out.get_vector("curvature");
+    const auto &dof_handler_normal = generic_data_out.get_dof_handler("normal");
+    const auto &normal             = generic_data_out.get_vector("normal");
+    const auto &mapping            = generic_data_out.get_mapping();
+
+    for (const auto *vector : {&level_set, &curvature, &normal})
+      AssertThrow(vector->has_ghost_elements(),
+                  dealii::ExcMessage("The output vectors require ghost values."));
+
+    unsigned int max_degree = 1;
+    for (const auto &fe : dof_handler.get_fe_collection())
+      max_degree = std::max(max_degree, fe.degree);
+
+    const dealii::hp::QCollection<1> q_collection_1d(dealii::QGauss<1>(max_degree + 1));
+    dealii::NonMatching::DiscreteQuadratureGenerator<dim> quadrature_generator(q_collection_1d,
+                                                                               dof_handler,
+                                                                               level_set);
+
+    const dealii::FEValuesExtractors::Vector normal_extractor(0);
+
+    std::vector<number>                         curvature_values;
+    std::vector<dealii::Tensor<1, dim, number>> normal_values;
+
+    number error_curvature = 0., max_error_curvature = 0., error_normal = 0., max_error_normal = 0.,
+           interface_measure = 0.;
+
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+          continue;
+
+        quadrature_generator.generate(cell);
+        const auto &surface_quadrature = quadrature_generator.get_surface_quadrature();
+        if (surface_quadrature.size() == 0)
+          continue;
+
+        dealii::NonMatching::FEImmersedSurfaceValues<dim> fe_values(
+          mapping,
+          cell->get_fe(),
+          surface_quadrature,
+          dealii::update_values | dealii::update_JxW_values | dealii::update_quadrature_points);
+        fe_values.reinit(cell);
+        curvature_values.resize(surface_quadrature.size());
+        fe_values.get_function_values(curvature, curvature_values);
+
+        const auto cell_normal = cell->as_dof_handler_iterator(dof_handler_normal);
+        dealii::NonMatching::FEImmersedSurfaceValues<dim> fe_values_normal(mapping,
+                                                                           cell_normal->get_fe(),
+                                                                           surface_quadrature,
+                                                                           dealii::update_values);
+        fe_values_normal.reinit(cell_normal);
+        normal_values.resize(surface_quadrature.size());
+        fe_values_normal[normal_extractor].get_function_values(normal, normal_values);
+
+        for (const unsigned int q : fe_values.quadrature_point_indices())
+          {
+            const number e_curvature = std::abs(curvature_values[q] - exact_curvature);
+            const number e_normal =
+              (normal_values[q] - exact_normal(fe_values.quadrature_point(q))).norm();
+
+            error_curvature += e_curvature * e_curvature * fe_values.JxW(q);
+            error_normal += e_normal * e_normal * fe_values.JxW(q);
+            max_error_curvature = std::max(max_error_curvature, e_curvature);
+            max_error_normal    = std::max(max_error_normal, e_normal);
+            interface_measure += fe_values.JxW(q);
+          }
+      }
+
+    error_curvature     = dealii::Utilities::MPI::sum(error_curvature, mpi_communicator);
+    error_normal        = dealii::Utilities::MPI::sum(error_normal, mpi_communicator);
+    interface_measure   = dealii::Utilities::MPI::sum(interface_measure, mpi_communicator);
+    max_error_curvature = dealii::Utilities::MPI::max(max_error_curvature, mpi_communicator);
+    max_error_normal    = dealii::Utilities::MPI::max(max_error_normal, mpi_communicator);
+
+    dealii::ConditionalOStream pcout(std::cout,
+                                     dealii::Utilities::MPI::this_mpi_process(mpi_communicator) ==
+                                       0);
+
+    const number scale = std::abs(exact_curvature) > 0. ? std::abs(exact_curvature) : 1.;
+
+    {
+      std::ostringstream str;
+      str << std::scientific << std::setprecision(4)
+          << "rel. curvature error L2: " << std::sqrt(error_curvature / interface_measure) / scale
+          << "  max: " << max_error_curvature / scale;
+      Journal::print_line(pcout, str.str(), label);
+    }
+    {
+      std::ostringstream str;
+      str << std::scientific << std::setprecision(4)
+          << "normal error L2: " << std::sqrt(error_normal / interface_measure)
+          << "  max: " << max_error_normal;
       Journal::print_line(pcout, str.str(), label);
     }
   }

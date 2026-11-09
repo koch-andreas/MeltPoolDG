@@ -90,10 +90,14 @@ namespace MeltPoolDG::LevelSet
       param.narrow_band,
       param.reinit,
       param.base.fe.degree,
-      simulation_case->get_field_function("prescribed_velocity", "level_set"));
+      simulation_case->get_field_function("prescribed_velocity", "level_set"),
+      &param.normal_vector,
+      &param.curvature);
 
-    narrow_band_operation->set_initial_condition(
-      *simulation_case->get_initial_condition("level_set"));
+    const auto &initial_condition = *simulation_case->get_initial_condition("level_set");
+    narrow_band_operation->set_initial_condition(initial_condition,
+                                                 false /*do_reinitialize*/,
+                                                 simulation_case->get_cellwise_initial_condition());
 
     post_processor = std::make_unique<Postprocessor<dim, number>>(scratch_data->get_mpi_comm(),
                                                                   param.output,

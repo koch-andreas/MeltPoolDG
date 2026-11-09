@@ -496,6 +496,79 @@
           "minimum": 0.0,
           "description": "Reinitialize the level-set field on the cut cells, if the eikonal error sqrt(int (|grad phi| - 1)^2 dx / V) on the cut cells exceeds this value. Set to 0 to disable the error-based reinitialization.",
           "default": 0.0
+        },
+        "continuous level set": {
+          "type": "object",
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "description": "Compute a continuous level-set field psi on the cut cells (FE_Q of the same degree, continuous across the faces between cut cells) after each time step by the constrained L2-projection of the DG level set phi: (psi, w) + sum_K gamma_K (psi, w)_{Gamma cap K} = (phi, w) on the cut cells, where Gamma is the zero level set of phi. The normal vector (projection of grad psi, normalized at the nodes) and the curvature (projection of -div n) are computed from psi with the filter parameters and linear solvers of the subsections 'normal vector' and 'curvature'. A filter parameter of zero is recommended: the damping biases the normal vector and the curvature on the thin band of cut cells independently of the mesh size. The fields are written to the output as level_set_cg, normal and curvature. The continuous level set does not feed back into the DG level set.",
+              "default": false
+            },
+            "interface penalty": {
+              "type": "number",
+              "minimum": 0.0,
+              "description": "Dimensionless factor c of the interface penalty gamma_K = c h_K (h_K: cell size), which pins the zero level set of the continuous level set to the zero level set of the DG level set in a least-squares sense. Since the DG level set is discontinuous, the interface may still move; the maximum shift is printed for verbosity level 1. Set to 0 for the plain L2-projection.",
+              "default": 100.0
+            },
+            "linear solver": {
+              "type": "object",
+              "properties": {
+                "solver type": {
+                  "type": "string",
+                  "enum": [
+                    "CG",
+                    "GMRES"
+                  ],
+                  "description": "Set this parameter for choosing an iterative linear solver type.",
+                  "default": "CG"
+                },
+                "preconditioner type": {
+                  "type": "string",
+                  "enum": [
+                    "Identity",
+                    "AMG",
+                    "ILU",
+                    "Diagonal"
+                  ],
+                  "description": "Set this parameter for choosing a preconditioner type.",
+                  "default": "ILU"
+                },
+                "max iterations": {
+                  "type": "integer",
+                  "description": "Set the maximum number of iterations for solving the linear system of equations.",
+                  "default": 1000
+                },
+                "rel tolerance": {
+                  "type": "number",
+                  "description": "Set the relative tolerance for a successful solution of the linear system of equations.",
+                  "default": 1e-12
+                },
+                "abs tolerance": {
+                  "type": "number",
+                  "description": "Set the absolute tolerance for a successful solution of the linear system of equations.",
+                  "default": 1e-20
+                },
+                "do matrix free": {
+                  "type": "boolean",
+                  "description": "Set this parameter if a matrix free solution procedure should be performed.",
+                  "default": true
+                },
+                "monitor type": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "reduced",
+                    "all"
+                  ],
+                  "description": "Set the monitor type of the linear solver.",
+                  "default": "none"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -939,6 +1012,285 @@
                 }
               },
               "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "normal vector": {
+      "type": "object",
+      "properties": {
+        "filter parameter": {
+          "type": "number",
+          "description": "normal vector computation: damping = (cell size)²  * filter parameter",
+          "default": 0.0
+        },
+        "implementation": {
+          "type": "string",
+          "enum": [
+            "meltpooldg",
+            "adaflo"
+          ],
+          "description": "Choose the corresponding implementation of the normal vector operation.",
+          "default": "meltpooldg"
+        },
+        "verbosity level": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647,
+          "description": "Sets the maximum verbosity level of the console output. The maximum level with respect to the  base value is decisive.",
+          "default": -1
+        },
+        "compute normalized vector": {
+          "type": "boolean",
+          "description": "If set to true, the normal vector resulting from the filtering equation will be a unit vector.",
+          "default": false
+        },
+        "narrow band": {
+          "type": "object",
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "description": "Set this parameter to true to compute the normal vector only in the interfacial region.",
+              "default": false
+            },
+            "level set threshold": {
+              "type": "number",
+              "description": "If narrow band is enabled to true this parameter determines the level set treshold for the narrow band.",
+              "default": 1.0
+            }
+          },
+          "additionalProperties": false
+        },
+        "predictor": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "none",
+                "zero",
+                "linear_extrapolation",
+                "least_squares_projection"
+              ],
+              "description": "Choose a predictor type: none: use old value as initial guess; zero: se zeros as initial guess; linear_extrapolation: calculate the predictor by a linear combination from the two old solution vectors; least_squares_projection: least squares projection (WIP)",
+              "default": "none"
+            },
+            "n old solutions": {
+              "type": "integer",
+              "description": "Choose the number of old solution vectors considered.This parameter is only relevant for least squares projection.For all other predictors, this parameter will be set appropriately.",
+              "default": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        "linear solver": {
+          "type": "object",
+          "properties": {
+            "solver type": {
+              "type": "string",
+              "enum": [
+                "CG",
+                "GMRES"
+              ],
+              "description": "Set this parameter for choosing an iterative linear solver type.",
+              "default": "CG"
+            },
+            "preconditioner type": {
+              "type": "string",
+              "enum": [
+                "Identity",
+                "AMG",
+                "ILU",
+                "Diagonal"
+              ],
+              "description": "Set this parameter for choosing a preconditioner type.",
+              "default": "Diagonal"
+            },
+            "max iterations": {
+              "type": "integer",
+              "description": "Set the maximum number of iterations for solving the linear system of equations.",
+              "default": 10000
+            },
+            "rel tolerance": {
+              "type": "number",
+              "description": "Set the relative tolerance for a successful solution of the linear system of equations.",
+              "default": 1e-12
+            },
+            "abs tolerance": {
+              "type": "number",
+              "description": "Set the absolute tolerance for a successful solution of the linear system of equations.",
+              "default": 1e-20
+            },
+            "do matrix free": {
+              "type": "boolean",
+              "description": "Set this parameter if a matrix free solution procedure should be performed.",
+              "default": true
+            },
+            "monitor type": {
+              "type": "string",
+              "enum": [
+                "none",
+                "reduced",
+                "all"
+              ],
+              "description": "Set the monitor type of the linear solver.",
+              "default": "none"
+            }
+          },
+          "additionalProperties": false
+        },
+        "Discontinous Galerkin": {
+          "type": "object",
+          "properties": {
+            "penalty factor": {
+              "type": "number",
+              "description": "Set the jump penalty factor of the diffusion term",
+              "default": 100.0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "curvature": {
+      "type": "object",
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Set this parameter to true if curvature should be computed. This is required in case of surface tension forces.",
+          "default": true
+        },
+        "do curvature correction": {
+          "type": "boolean",
+          "description": "Set this parameter to true if the curvature value at the discrete interface i.e. where the level set is 0, should be extended to the interface region.",
+          "default": false
+        },
+        "filter parameter": {
+          "type": "number",
+          "description": "curvature computation: damping = (cell size)² * filter parameter",
+          "default": 0.0
+        },
+        "implementation": {
+          "type": "string",
+          "enum": [
+            "meltpooldg",
+            "adaflo"
+          ],
+          "description": "Choose the corresponding implementation of the curvature operation.",
+          "default": "meltpooldg"
+        },
+        "verbosity level": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647,
+          "description": "Sets the maximum verbosity level of the console output. The maximum level with respect to the base value is decisive.",
+          "default": -1
+        },
+        "narrow band": {
+          "type": "object",
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "description": "Set this parameter to true to compute the normal vector only in the interfacial region.",
+              "default": false
+            },
+            "level set threshold": {
+              "type": "number",
+              "description": "If narrow band is enabled to true this parameter determines the level set treshold for the narrow band.",
+              "default": 1.0
+            }
+          },
+          "additionalProperties": false
+        },
+        "Discontinous Galerkin": {
+          "type": "object",
+          "properties": {
+            "penalty factor": {
+              "type": "number",
+              "description": "Set the jump penalty factor of the diffusion term",
+              "default": 100.0
+            }
+          },
+          "additionalProperties": false
+        },
+        "predictor": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "none",
+                "zero",
+                "linear_extrapolation",
+                "least_squares_projection"
+              ],
+              "description": "Choose a predictor type: none: use old value as initial guess; zero: se zeros as initial guess; linear_extrapolation: calculate the predictor by a linear combination from the two old solution vectors; least_squares_projection: least squares projection (WIP)",
+              "default": "none"
+            },
+            "n old solutions": {
+              "type": "integer",
+              "description": "Choose the number of old solution vectors considered.This parameter is only relevant for least squares projection.For all other predictors, this parameter will be set appropriately.",
+              "default": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        "linear solver": {
+          "type": "object",
+          "properties": {
+            "solver type": {
+              "type": "string",
+              "enum": [
+                "CG",
+                "GMRES"
+              ],
+              "description": "Set this parameter for choosing an iterative linear solver type.",
+              "default": "CG"
+            },
+            "preconditioner type": {
+              "type": "string",
+              "enum": [
+                "Identity",
+                "AMG",
+                "ILU",
+                "Diagonal"
+              ],
+              "description": "Set this parameter for choosing a preconditioner type.",
+              "default": "Diagonal"
+            },
+            "max iterations": {
+              "type": "integer",
+              "description": "Set the maximum number of iterations for solving the linear system of equations.",
+              "default": 10000
+            },
+            "rel tolerance": {
+              "type": "number",
+              "description": "Set the relative tolerance for a successful solution of the linear system of equations.",
+              "default": 1e-12
+            },
+            "abs tolerance": {
+              "type": "number",
+              "description": "Set the absolute tolerance for a successful solution of the linear system of equations.",
+              "default": 1e-20
+            },
+            "do matrix free": {
+              "type": "boolean",
+              "description": "Set this parameter if a matrix free solution procedure should be performed.",
+              "default": true
+            },
+            "monitor type": {
+              "type": "string",
+              "enum": [
+                "none",
+                "reduced",
+                "all"
+              ],
+              "description": "Set the monitor type of the linear solver.",
+              "default": "none"
             }
           },
           "additionalProperties": false
