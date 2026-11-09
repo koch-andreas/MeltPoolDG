@@ -14,23 +14,24 @@
   "case specific": {
     "center point": "0.5, 0.75",
     "radius": 0.15,
-    "T": 2.0
+    "T": 4.0
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 2.0,
+    "end time": 4.0,
     "time step size": 0.01
   },
   "output": {
     "directory": "output_vortex_bubble_semi_lagrangian",
     "do user defined postprocessing": true,
-    "write frequency": 10,
+    "write frequency": 100,
     "paraview": {
       "enable": true
     }
   },
   "narrow band": {
     "type": "semi_lagrangian",
+    "reinitialization interface": "advected_points",
     "continuous level set": {
       "enable": true
     },

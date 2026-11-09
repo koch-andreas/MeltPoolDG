@@ -18,6 +18,7 @@
 #include <meltpooldg/utilities/enum.hpp>
 #include <meltpooldg/utilities/fe_integrator.hpp>
 
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -274,6 +275,11 @@ namespace MeltPoolDG::CutUtil
    * @param level_set Discrete level-set vector.
    * @param matrix_free Matrix-free object, provides the cell numbering.
    * @param fe_degree Polynomial degree of the level-set field on the intersected cells.
+   * @param surface_quadrature Optional surface quadrature of a locally owned intersected cell
+   * (unit points, reference weights and reference normal vectors, e.g., of points of the
+   * interface tracked by a Lagrangian advection). If it is given and returns a non-empty
+   * quadrature for a cell, this quadrature is used instead of the one of the zero level set of
+   * @p level_set.
    */
   template <int dim, typename number, typename VectorType>
   void
@@ -282,7 +288,9 @@ namespace MeltPoolDG::CutUtil
     const dealii::DoFHandler<dim>                                          &level_set_dof_handler,
     const VectorType                                                       &level_set,
     const dealii::MatrixFree<dim, number, dealii::VectorizedArray<number>> &matrix_free,
-    const int                                                               fe_degree);
+    const int                                                               fe_degree,
+    const std::function<dealii::NonMatching::ImmersedSurfaceQuadrature<dim>(
+      const typename dealii::Triangulation<dim>::cell_iterator &)> &surface_quadrature = {});
 
   /**
    * @brief Evaluates solution values in the intersected domain for a specific SIMD lane within a cell batch.

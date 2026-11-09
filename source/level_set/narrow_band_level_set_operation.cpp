@@ -111,6 +111,19 @@ namespace MeltPoolDG::LevelSet
     reinit_operation->set_face_terms_on_interface_faces_only(
       narrow_band_data.reinitialization_faces == NarrowBandReinitializationFaces::interface_faces);
 
+    // advected interface points for the interface penalty term of the reinitialization
+    if (narrow_band_data.reinitialization_interface ==
+        NarrowBandReinitializationInterface::advected_points)
+      {
+        AssertThrow(reinit_data.enable,
+                    dealii::ExcMessage("The reinitialization interface advected_points requires "
+                                       "the reinitialization."));
+        interface_points = std::make_unique<NarrowBandInterfacePoints<dim, number>>(
+          scratch_data.get_pcout(1),
+          narrow_band_data.advected_points.unresolved_distance,
+          narrow_band_data.advected_points.support_tolerance);
+      }
+
     // continuous level set on the cut cells: its DoFHandler is attached to the scratch data after
     // the band and the cut DoFHandler
     if (narrow_band_data.continuous_level_set.enable)
@@ -342,6 +355,10 @@ namespace MeltPoolDG::LevelSet
               redistance_layers();
           }
 
+        // advected interface points: seeding on the initial zero level set
+        if (interface_points)
+          interface_points->seed(dof_handler_cut, level_set, fe_degree + 1);
+
         print_band_statistics();
         update_continuous_level_set();
         return;
@@ -349,6 +366,10 @@ namespace MeltPoolDG::LevelSet
 
     if (do_reinitialize)
       reinitialize();
+
+    // advected interface points: seeding on the initial zero level set
+    if (interface_points)
+      interface_points->seed(dof_handler_cut, level_set, fe_degree + 1);
 
     extend();
     update_continuous_level_set();
@@ -442,6 +463,10 @@ namespace MeltPoolDG::LevelSet
         }
     }
 
+    // advected interface points: Lagrangian tracking from t^n to t^{n+1}
+    if (interface_points)
+      interface_points->advect(*velocity_function, time, time_step);
+
     // S1: new cut cells and band, cell-wise transfer of the level-set values of the new cut cells
     {
       ScopedName                 sc_band("narrow_band::update_band");
@@ -453,6 +478,10 @@ namespace MeltPoolDG::LevelSet
                                                                           fe_degree,
                                                                           &volume_fractions);
       check_cut_cells_exist(is_cut_cell, scratch_data.get_mpi_comm());
+
+      // advected interface points: assignment to the cells, repair of the point set
+      if (interface_points)
+        interface_points->locate(dof_handler_band, level_set_band, fe_degree + 1, is_cut_cell);
       std::vector<bool> is_small_cut_cell_new =
         compute_small_cut_cells(is_cut_cell, volume_fractions);
 
@@ -625,6 +654,16 @@ namespace MeltPoolDG::LevelSet
   {
     ScopedName                 sc("narrow_band::reinitialize");
     dealii::TimerOutput::Scope scope(scratch_data.get_timer(), sc);
+
+    // interface penalty term: advected interface points (if they are assigned to the cells) or
+    // the zero level set of the level set before the reinitialization
+    if (interface_points and interface_points->is_located())
+      reinit_operation->set_surface_quadrature_function(
+        [this](const typename dealii::Triangulation<dim>::cell_iterator &cell) {
+          return interface_points->get_surface_quadrature(cell);
+        });
+    else
+      reinit_operation->set_surface_quadrature_function({});
 
     reinit_operation->set_initial_condition(level_set);
     reinit_operation->solve();

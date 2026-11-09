@@ -24,6 +24,8 @@
 #include <deal.II/lac/la_parallel_vector.h>
 #include <deal.II/lac/vector.h>
 
+#include <deal.II/non_matching/quadrature_generator.h>
+
 #include <deal.II/numerics/vector_tools_interpolate.h>
 
 #include <meltpooldg/core/scratch_data.hpp>
@@ -32,6 +34,7 @@
 #include <meltpooldg/level_set/narrow_band_closest_point_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
+#include <meltpooldg/level_set/narrow_band_interface_points.hpp>
 #include <meltpooldg/level_set/narrow_band_level_set_operation.hpp>
 #include <meltpooldg/level_set/narrow_band_semi_lagrangian_advection.hpp>
 #include <meltpooldg/level_set/narrow_band_utilities.hpp>
@@ -44,6 +47,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <tuple>
 #include <vector>
 
 namespace MeltPoolDG::LevelSet
@@ -1294,6 +1298,348 @@ namespace MeltPoolDG::LevelSet
     }
 
     /**
+     * Rigid rotation u = omega (-x_1, x_0) about the origin (dim components).
+     */
+    template <int dim>
+    class RotationVelocity : public dealii::Function<dim>
+    {
+    public:
+      explicit RotationVelocity(const number omega)
+        : dealii::Function<dim>(dim)
+        , omega(omega)
+      {}
+
+      number
+      value(const dealii::Point<dim> &p, const unsigned int component) const override
+      {
+        if (component == 0)
+          return -omega * p[1];
+        if (component == 1)
+          return omega * p[0];
+        return 0.;
+      }
+
+    private:
+      const number omega;
+    };
+
+    /**
+     * Uniform contraction u = -a (x - c) towards a center c (dim components).
+     */
+    template <int dim>
+    class ContractionVelocity : public dealii::Function<dim>
+    {
+    public:
+      ContractionVelocity(const dealii::Point<dim> &center, const number rate)
+        : dealii::Function<dim>(dim)
+        , center(center)
+        , rate(rate)
+      {}
+
+      number
+      value(const dealii::Point<dim> &p, const unsigned int component) const override
+      {
+        return -rate * (p[component] - center[component]);
+      }
+
+    private:
+      const dealii::Point<dim> center;
+      const number             rate;
+    };
+
+    /**
+     * Statistics of the interface points of a circle (radius 0.3, signed distance function, p = 1,
+     * 16^2 cells, narrow band of the circle with the extension band).
+     */
+    template <int dim>
+    struct InterfacePointsResult
+    {
+      /// Maximum error of the positions of the surface quadratures of the cells.
+      number error_points = 0.;
+
+      /// Error of the sum of the weights of the surface quadratures of the cells.
+      number error_weights = 0.;
+
+      /// Length of the discrete interface (sum of the weights).
+      number length = 0.;
+
+      /// Maximum deviation of the points, their weights and their normal vectors from the initial
+      /// ones after a full rigid rotation about the center of the domain.
+      number error_rotation = 0.;
+
+      /// Maximum deviation of the distances of the advected points to the center from 0.3 / 3
+      /// after the contraction, relative deviation of the sum of their weights from one third of
+      /// the initial one (contracted area elements) and maximum number of points per cell.
+      number       error_contraction         = 0.;
+      number       error_weights_contraction = 0.;
+      unsigned int max_n_points_per_cell     = 0;
+
+      /// Statistics of the assignment: initial, after the rotation, for the level set of a larger
+      /// circle, after the contraction.
+      typename NarrowBandInterfacePoints<dim, number>::Statistics initial, rotated, larger,
+        contracted;
+    };
+
+    /**
+     * Interface points of a circle: the points seeded on the zero level set lie in the cut cells,
+     * their weights sum up to the length of the discrete interface, and the surface quadratures of
+     * the cells reproduce the positions and the weights. A full rigid rotation (100 time steps)
+     * returns the points and their weights to their initial values. For the level set of a larger
+     * circle (radius increased by 0.4 h), the points are not supported (|phi| > 0.2 h) and are
+     * removed, and new points are seeded on its zero level set. A uniform contraction of the
+     * circle by a factor of three (located in the narrow band of the circle of radius 0.1)
+     * contracts the weights (area elements) by the same factor and leads to merged points, while
+     * the sum of the weights of the advected points is preserved by the merging.
+     */
+    template <int dim>
+    InterfacePointsResult<dim>
+    test_interface_points_circle()
+    {
+      InterfacePointsResult<dim> result;
+
+      const number       radius = 0.3;
+      dealii::Point<dim> center;
+      center[0] = 0.4;
+      const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, radius);
+
+      NarrowBandFixture<dim> fixture(1, 4, 1, &sphere);
+      VectorType             level_set, level_set_band;
+      fixture.initialize_vector(fixture.dof_handler_cut, level_set);
+      fixture.initialize_vector(fixture.dof_handler_band, level_set_band);
+      dealii::VectorTools::interpolate(fixture.mapping, fixture.dof_handler_cut, sphere, level_set);
+      dealii::VectorTools::interpolate(fixture.mapping,
+                                       fixture.dof_handler_band,
+                                       sphere,
+                                       level_set_band);
+
+      const auto locate = [&](NarrowBandInterfacePoints<dim, number> &interface_points,
+                              const VectorType                       &level_set_band) {
+        const std::vector<bool> is_cut_cell =
+          NarrowBand::compute_cut_cells(fixture.dof_handler_band, level_set_band, 1);
+        return interface_points.locate(fixture.dof_handler_band, level_set_band, 2, is_cut_cell);
+      };
+
+      const dealii::ConditionalOStream       pcout(std::cout, false);
+      NarrowBandInterfacePoints<dim, number> interface_points(pcout);
+      interface_points.seed(fixture.dof_handler_cut, level_set, 2);
+      result.initial = locate(interface_points, level_set_band);
+
+      // positions and weights of the surface quadratures of the cells (Cartesian cells of size h:
+      // x = x_0 + h xi, JxW = w h^{dim-1} for unit normal vectors)
+      const auto &points = interface_points.get_points();
+      for (const auto &cell : fixture.triangulation.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned())
+            continue;
+
+          const auto   quadrature = interface_points.get_surface_quadrature(cell);
+          const number h          = cell->vertex(1)[0] - cell->vertex(0)[0];
+          for (unsigned int q = 0; q < quadrature.size(); ++q)
+            {
+              const dealii::Point<dim> point =
+                cell->vertex(0) + h * dealii::Tensor<1, dim>(quadrature.point(q));
+              result.length += quadrature.weight(q) * std::pow(h, dim - 1);
+
+              // closest seeded point
+              number distance = std::numeric_limits<number>::max();
+              for (const auto &x : points)
+                distance = std::min(distance, x.distance(point));
+              result.error_points = std::max(result.error_points, distance);
+            }
+        }
+      result.length       = dealii::Utilities::MPI::sum(result.length, MPI_COMM_WORLD);
+      result.error_points = dealii::Utilities::MPI::max(result.error_points, MPI_COMM_WORLD);
+
+      number length_seeded = 0.;
+      for (const auto weight : interface_points.get_weights())
+        length_seeded += weight;
+      result.error_weights = std::abs(result.length - length_seeded);
+
+      // full rigid rotation about the center of the domain
+      const std::vector<dealii::Point<dim>> points_initial  = points;
+      const std::vector<number>             weights_initial = interface_points.get_weights();
+      {
+        RotationVelocity<dim> velocity(2. * dealii::numbers::PI);
+        const number          time_step = 0.01;
+        for (unsigned int n = 0; n < 100; ++n)
+          interface_points.advect(velocity, n * time_step, time_step);
+      }
+      for (unsigned int k = 0; k < points.size(); ++k)
+        result.error_rotation =
+          std::max({result.error_rotation,
+                    points[k].distance(points_initial[k]),
+                    std::abs(interface_points.get_weights()[k] - weights_initial[k])});
+      result.rotated = locate(interface_points, level_set_band);
+
+      // level set of a larger circle on the band
+      {
+        const number h = 2. / 16.;
+        VectorType   level_set_larger;
+        fixture.initialize_vector(fixture.dof_handler_band, level_set_larger);
+        dealii::VectorTools::interpolate(
+          fixture.mapping,
+          fixture.dof_handler_band,
+          dealii::Functions::SignedDistance::Sphere<dim>(center, radius + 0.4 * h),
+          level_set_larger);
+        NarrowBandInterfacePoints<dim, number> interface_points_larger(pcout);
+        interface_points_larger.seed(fixture.dof_handler_cut, level_set, 2);
+        result.larger = locate(interface_points_larger, level_set_larger);
+      }
+
+      // uniform contraction by a factor of three: x(t) = c + (x_0 - c) exp(-a t), a t = ln 3
+      number weight_initial = 0.;
+      for (const auto weight : interface_points.get_weights())
+        weight_initial += weight;
+      {
+        ContractionVelocity<dim> velocity(center, std::log(3.));
+        const number             time_step = 0.05;
+        for (unsigned int n = 0; n < 20; ++n)
+          interface_points.advect(velocity, n * time_step, time_step);
+      }
+
+      // narrow band of the contracted circle
+      const dealii::Functions::SignedDistance::Sphere<dim> sphere_contracted(center, radius / 3.);
+      NarrowBandFixture<dim> fixture_contracted(1, 4, 1, &sphere_contracted);
+      VectorType             level_set_contracted;
+      fixture_contracted.initialize_vector(fixture_contracted.dof_handler_band,
+                                           level_set_contracted);
+      dealii::VectorTools::interpolate(fixture_contracted.mapping,
+                                       fixture_contracted.dof_handler_band,
+                                       sphere_contracted,
+                                       level_set_contracted);
+      {
+        std::vector<bool> is_cut_cell =
+          NarrowBand::compute_cut_cells(fixture_contracted.dof_handler_band,
+                                        level_set_contracted,
+                                        1);
+        result.contracted = interface_points.locate(fixture_contracted.dof_handler_band,
+                                                    level_set_contracted,
+                                                    2,
+                                                    is_cut_cell);
+      }
+
+      // the advected points precede the points seeded on the zero level set of the contracted
+      // level set
+      const unsigned int n_advected_points = points.size() - result.contracted.n_inserted_points;
+      number             weight_contracted = 0.;
+      for (unsigned int k = 0; k < n_advected_points; ++k)
+        {
+          weight_contracted += interface_points.get_weights()[k];
+          result.error_contraction =
+            std::max(result.error_contraction, std::abs(points[k].distance(center) - radius / 3.));
+        }
+      result.error_weights_contraction = std::abs(3. * weight_contracted / weight_initial - 1.);
+
+      for (const auto &cell : fixture_contracted.triangulation.active_cell_iterators())
+        if (cell->is_locally_owned())
+          result.max_n_points_per_cell =
+            std::max<unsigned int>(result.max_n_points_per_cell,
+                                   interface_points.get_surface_quadrature(cell).size());
+      result.max_n_points_per_cell =
+        dealii::Utilities::MPI::max(result.max_n_points_per_cell, MPI_COMM_WORLD);
+
+      return result;
+    }
+
+    /**
+     * Rotating circle (radius 0.3, center (0.4, 0), rigid rotation by a quarter turn in 25 time
+     * steps, semi-Lagrangian band, p = 1, 32^2 cells on [-1,1]^2, reinitialization in every time
+     * step) with the interface penalty term of the reinitialization at the zero level set or at
+     * the advected interface points. Returns the mean signed radial deviation int_Gamma_h (|x -
+     * c| - R) ds / |Gamma_h| of the discrete interface from the exact circle at the end.
+     */
+    template <int dim>
+    number
+    compute_rotating_circle_radial_deviation(
+      const NarrowBandReinitializationInterface reinitialization_interface)
+    {
+      const unsigned int fe_degree = 1;
+      const number       radius    = 0.3;
+      const number       omega     = 2. * dealii::numbers::PI;
+      const number       time_step = 0.01;
+
+      dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
+      dealii::GridGenerator::hyper_cube(triangulation, -1., 1.);
+      triangulation.refine_global(5);
+
+      ScratchData<dim, dim, number> scratch_data(MPI_COMM_WORLD, 0, true);
+      scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
+
+      NarrowBandData<number> narrow_band_data;
+      narrow_band_data.type                       = NarrowBandType::semi_lagrangian;
+      narrow_band_data.reinitialization_interface = reinitialization_interface;
+
+      ReinitializationData<number> reinit_data;
+      reinit_data.enable                                      = true;
+      reinit_data.modeltype                                   = ModelType::elliptic;
+      reinit_data.fe.type                                     = FiniteElementType::FE_DGQ;
+      reinit_data.fe.degree                                   = fe_degree;
+      reinit_data.elliptic.intersected_cells_only             = true;
+      reinit_data.elliptic.penalty_parameter                  = 1e4;
+      reinit_data.elliptic.nlsolve.max_nonlinear_iterations   = 1000;
+      reinit_data.elliptic.nlsolve.residual_tolerance         = 1e-6;
+      reinit_data.elliptic.nlsolve.field_correction_tolerance = 1e-6;
+      reinit_data.elliptic.nlsolve.verbosity_level            = 0;
+      reinit_data.linear_solver.solver_type                   = LinearSolverType::CG;
+      reinit_data.linear_solver.preconditioner_type           = PreconditionerType::ILU;
+      reinit_data.linear_solver.rel_tolerance                 = 1e-10;
+      reinit_data.linear_solver.abs_tolerance                 = 1e-20;
+      reinit_data.linear_solver.max_iterations                = 1000;
+
+      auto velocity = std::make_shared<RotationVelocity<dim>>(omega);
+
+      NarrowBandLevelSetOperation<dim, number> operation(
+        scratch_data, triangulation, narrow_band_data, reinit_data, fe_degree, velocity);
+
+      dealii::Point<dim> center;
+      center[0] = 0.4;
+      const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, radius);
+      operation.set_initial_condition(sphere);
+
+      const unsigned int n_time_steps = 25;
+      for (unsigned int n = 0; n < n_time_steps; ++n)
+        {
+          velocity->set_time(n * time_step);
+          operation.advance_time_step(n * time_step, time_step, n + 1);
+        }
+
+      // exact center after the rotation
+      const number       angle = omega * n_time_steps * time_step;
+      dealii::Point<dim> center_end;
+      center_end[0] = std::cos(angle) * center[0];
+      center_end[1] = std::sin(angle) * center[0];
+
+      const auto &dof_handler = operation.get_dof_handler_cut();
+      const auto &level_set   = operation.get_level_set();
+      level_set.update_ghost_values();
+      // Note: the generator keeps a pointer to the quadrature collection
+      const dealii::hp::QCollection<1> q_collection{dealii::QGauss<1>(fe_degree + 2)};
+      dealii::NonMatching::DiscreteQuadratureGenerator<dim> generator(q_collection,
+                                                                      dof_handler,
+                                                                      level_set);
+
+      number deviation = 0., length = 0.;
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        if (cell->is_locally_owned() and cell->get_fe().n_dofs_per_cell() > 0)
+          {
+            generator.generate(cell);
+            const auto  &quadrature = generator.get_surface_quadrature();
+            const number h          = cell->vertex(1)[0] - cell->vertex(0)[0];
+            for (unsigned int q = 0; q < quadrature.size(); ++q)
+              {
+                const dealii::Point<dim> point =
+                  cell->vertex(0) + h * dealii::Tensor<1, dim>(quadrature.point(q));
+                const number weight = quadrature.weight(q) * std::pow(h, dim - 1);
+                deviation += weight * (point.distance(center_end) - radius);
+                length += weight;
+              }
+          }
+
+      return dealii::Utilities::MPI::sum(deviation, MPI_COMM_WORLD) /
+             dealii::Utilities::MPI::sum(length, MPI_COMM_WORLD);
+    }
+
+    /**
      * Semi-Lagrangian advection of a planar signed distance function phi = n.x - c (|n| = 1) with
      * a constant velocity u: the back-traced level set phi(x - u dt) is reproduced exactly on all
      * candidate cells (cut cells and their vertex neighbors), since the polynomials of the cut
@@ -2050,6 +2396,59 @@ namespace MeltPoolDG::LevelSet
     // the faces, where the level set jumps
     for (unsigned int degree = 1; degree <= 3; ++degree)
       EXPECT_LT(compute_semi_lagrangian_zero_velocity_error<2>(degree), 1e-12);
+  }
+
+  TEST(NarrowBandLevelSetTest, InterfacePointsCircle2D)
+  {
+    const auto result = test_interface_points_circle<2>();
+
+    // the surface quadratures of the cells reproduce the seeded points and their weights
+    EXPECT_LT(result.error_points, 1e-12);
+    EXPECT_LT(result.error_weights, 1e-12);
+    EXPECT_NEAR(result.length, 2. * dealii::numbers::PI * 0.3, 0.03);
+
+    // seeded points: all points in cut cells, every cut cell contains points
+    EXPECT_GT(result.initial.n_points, 0U);
+    EXPECT_EQ(result.initial.n_points_outside, 0U);
+    EXPECT_EQ(result.initial.n_inserted_points, 0U);
+    EXPECT_EQ(result.initial.n_merged_points, 0U);
+    EXPECT_EQ(result.initial.n_points_in_non_cut_cells, 0U);
+    EXPECT_EQ(result.initial.n_cut_cells_without_points, 0U);
+
+    // full rigid rotation: the points return to their initial positions (RK4)
+    EXPECT_LT(result.error_rotation, 1e-6);
+    EXPECT_EQ(result.rotated.n_points, result.initial.n_points);
+    EXPECT_EQ(result.rotated.n_inserted_points, 0U);
+    EXPECT_EQ(result.rotated.n_points_in_non_cut_cells, 0U);
+
+    // larger circle: the initial points are not supported by its level set (|phi| = 0.4 h) and
+    // removed, the points are seeded anew on its zero level set
+    EXPECT_EQ(result.larger.n_unsupported_points, result.initial.n_points);
+    EXPECT_GT(result.larger.n_inserted_points, 0U);
+    EXPECT_EQ(result.larger.n_points, result.larger.n_inserted_points);
+    EXPECT_EQ(result.larger.n_points_in_non_cut_cells, 0U);
+    EXPECT_EQ(result.larger.n_cut_cells_without_points, 0U);
+
+    // contraction: merged points, at most 2 (p+1) points per cell, the weights of the advected
+    // points are contracted by the factor of three, and their sum is preserved by the merging
+    EXPECT_GT(result.contracted.n_merged_points, 0U);
+    EXPECT_EQ(result.contracted.n_points_outside, 0U);
+    EXPECT_LE(result.max_n_points_per_cell, 4U);
+    EXPECT_LT(result.error_weights_contraction, 1e-6);
+    EXPECT_LT(result.error_contraction, 0.01);
+  }
+
+  TEST(NarrowBandLevelSetTest, ReinitializationAdvectedPoints2D)
+  {
+    const number deviation_zero_level_set = compute_rotating_circle_radial_deviation<2>(
+      NarrowBandReinitializationInterface::zero_level_set);
+    const number deviation_advected_points = compute_rotating_circle_radial_deviation<2>(
+      NarrowBandReinitializationInterface::advected_points);
+
+    // p = 1: the interpolation of the advected signed distance function shrinks the circle; the
+    // advected interface points remove this drift
+    EXPECT_LT(deviation_zero_level_set, -1e-3);
+    EXPECT_LT(std::abs(deviation_advected_points), 0.2 * std::abs(deviation_zero_level_set));
   }
 
   TEST(NarrowBandLevelSetTest, LayeredBand2D)

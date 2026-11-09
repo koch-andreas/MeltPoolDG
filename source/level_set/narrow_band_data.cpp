@@ -236,6 +236,22 @@ namespace MeltPoolDG::LevelSet
         "are evaluated: all faces between two cut cells (cut_cell_faces) or only the faces "
         "between two cut cells, which are crossed by the interface (interface_faces). In the "
         "latter case, the cut cells are only coupled across the faces crossed by the interface.");
+      prm.add_parameter(
+        "reinitialization interface",
+        reinitialization_interface,
+        "Interface, at which the reinitialization on the cut cells enforces phi = 0 weakly by the "
+        "interface penalty term: the zero level set of the level set before the "
+        "reinitialization (zero_level_set) or points of the interface (advected_points), which "
+        "are seeded on the initial zero level set (Gauss points of the surface quadrature) and "
+        "advected with the velocity (classical fourth-order Runge-Kutta method, weights and "
+        "normal vectors by Nanson's formula) independently of the interpolation of the level set "
+        "(front tracking). Points outside of the band or with |phi| > 0.2 h are removed, the "
+        "quadrature points of the zero level set of the advected level set phi, whose distance to "
+        "all points exceeds h / (p+1), are added, and in cells with more than 2 (p+1)^(dim-1) "
+        "points, the closest points are merged. Points with a point of opposite orientation "
+        "closer than 2 h (under-resolved interface) are not used. The cut cells are determined "
+        "from phi; in cut cells without usable points, the zero level set of phi is used. The "
+        "factors 0.2 and 2 are set in the subsection 'advected points'.");
       prm.add_parameter("reinitialization frequency",
                         reinitialization_frequency,
                         "Reinitialize the level-set field on the cut cells every n-th time step. "
@@ -246,6 +262,26 @@ namespace MeltPoolDG::LevelSet
                         "sqrt(int (|grad phi| - 1)^2 dx / V) on the cut cells exceeds this value. "
                         "Set to 0 to disable the error-based reinitialization.",
                         dealii::Patterns::Double(0.0));
+
+      prm.enter_subsection("advected points");
+      {
+        prm.add_parameter(
+          "unresolved distance",
+          advected_points.unresolved_distance,
+          "Distance relative to the cell size, below which advected interface points of opposite "
+          "orientation are not used in the reinitialization (unresolved interface, e.g., both "
+          "sides of a thin filament); the zero level set of the advected level set is used there. "
+          "Only used for reinitialization interface = advected_points.",
+          dealii::Patterns::Double(0.0));
+        prm.add_parameter(
+          "support tolerance",
+          advected_points.support_tolerance,
+          "Advected interface points, at which the magnitude of the advected level set exceeds "
+          "this value times the cell size, are removed (parts of the interface, which the level "
+          "set has lost). Only used for reinitialization interface = advected_points.",
+          dealii::Patterns::Double(0.0));
+      }
+      prm.leave_subsection();
 
       prm.enter_subsection("continuous level set");
       {

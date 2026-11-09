@@ -367,18 +367,33 @@ namespace MeltPoolDG::LevelSet
 
   template <int dim, typename number>
   void
+  ReinitializationEllipticOperation<dim, number>::set_surface_quadrature_function(
+    const SurfaceQuadratureFunction &function)
+  {
+    AssertThrow(not function or reinit_data.elliptic.intersected_cells_only,
+                ExcMessage("A given quadrature of the interface penalty term requires the "
+                           "elliptic reinitialization on intersected cells only."));
+
+    surface_quadrature_function = function;
+  }
+
+  template <int dim, typename number>
+  void
   ReinitializationEllipticOperation<dim, number>::compute_intersected_quadrature()
   {
     level_set_old.update_ghost_values();
 
     if (reinit_data.elliptic.intersected_cells_only)
       {
+        // interface penalty term: given quadrature (if not empty) or zero level set of the initial
+        // level set
         CutUtil::compute_immersed_surface_quadrature_intersected_cells(
           mapping_info_surface,
           scratch_data.get_dof_handler(ls_dof_idx),
           level_set_old,
           scratch_data.get_matrix_free(),
-          get_level_set_degree());
+          get_level_set_degree(),
+          surface_quadrature_function);
 
         // faces crossed by the interface
         if (fixed_point_intersected_cells_operator)

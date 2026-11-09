@@ -11,6 +11,8 @@
 #include <meltpooldg/linear_algebra/newton_raphson_solver.hpp>
 #include <meltpooldg/linear_algebra/preconditioner.hpp>
 
+#include <functional>
+
 /**
  * @brief This operation solves the reinitialization problem for a CG- or DG-FEM-based discrete
  * level-set field by solving an elliptic problem.
@@ -152,6 +154,28 @@ namespace MeltPoolDG::LevelSet
     std::pair<unsigned int, unsigned int>
     get_n_interface_faces() const;
 
+    /// Surface quadrature (unit points, reference weights and reference normal vectors) of a
+    /// locally owned intersected cell.
+    using SurfaceQuadratureFunction =
+      std::function<dealii::NonMatching::ImmersedSurfaceQuadrature<dim>(
+        const typename dealii::Triangulation<dim>::cell_iterator &)>;
+
+    /**
+     * @brief Set the quadrature of the interface penalty term gamma (phi, v)_Gamma.
+     *
+     * By default (empty function), the penalty term is integrated over the zero level set of the
+     * initial level-set field of the reinitialization. If a function is given, the surface
+     * quadrature of each locally owned intersected cell is taken from this function instead,
+     * e.g., from points of the interface tracked by a Lagrangian advection; in cells, for which
+     * it returns an empty quadrature, the zero level set is used. The face mask of the SIPG terms
+     * (set_face_terms_on_interface_faces_only()) is still determined from the zero level set of
+     * the initial level-set field.
+     *
+     * @note Requires the elliptic reinitialization on intersected cells only.
+     */
+    void
+    set_surface_quadrature_function(const SurfaceQuadratureFunction &function);
+
   private:
     /**
      * @brief Compute the quadrature rules for the immersed phase boundaries.
@@ -168,6 +192,9 @@ namespace MeltPoolDG::LevelSet
 
     /// Number of faces crossed by the interface and number of faces between two intersected cells.
     std::pair<unsigned int, unsigned int> n_interface_faces = {0, 0};
+
+    /// Quadrature of the interface penalty term (empty: zero level set of the initial level set)
+    SurfaceQuadratureFunction surface_quadrature_function;
 
     /**
      * @brief Create the elliptic reinitialization operator.

@@ -82,6 +82,14 @@ namespace MeltPoolDG::LevelSet
               // interface
               interface_faces)
 
+  BETTER_ENUM(NarrowBandReinitializationInterface,
+              char,
+              // zero level set of the level set before the reinitialization
+              zero_level_set,
+              // points of the interface, which are seeded on the initial zero level set and
+              // advected with the velocity (front tracking, see NarrowBandInterfacePoints)
+              advected_points)
+
   BETTER_ENUM(NarrowBandGhostPenaltyFaces,
               char,
               // all interior faces of the narrow band with at least one adjacent neighbor cell,
@@ -255,6 +263,16 @@ namespace MeltPoolDG::LevelSet
     NarrowBandReinitializationFaces reinitialization_faces =
       NarrowBandReinitializationFaces::cut_cell_faces;
 
+    /// Interface, at which the reinitialization on the cut cells enforces phi = 0 weakly
+    /// (interface penalty term): the zero level set of the level set before the reinitialization
+    /// or points of the interface, which are seeded on the initial zero level set and advected
+    /// with the velocity independently of the level set (front tracking with local seeding in
+    /// the gaps of the point set and merging in cells with too many points, see
+    /// NarrowBandInterfacePoints). In the latter case, the zero level set is used in the cut
+    /// cells without usable points.
+    NarrowBandReinitializationInterface reinitialization_interface =
+      NarrowBandReinitializationInterface::zero_level_set;
+
     /// Reinitialize the level-set field on the cut cells every n-th time step. A value of zero
     /// disables the frequency-based reinitialization.
     unsigned int reinitialization_frequency = 1;
@@ -263,6 +281,21 @@ namespace MeltPoolDG::LevelSet
     /// sqrt(int_cut (|grad phi| - 1)^2 dx / |cut cells|) exceeds this value. A value of zero
     /// disables the error-based reinitialization.
     number reinitialization_eikonal_threshold = 0.0;
+
+    /// Parameters of the advected interface points (reinitialization interface =
+    /// advected_points, see NarrowBandInterfacePoints).
+    struct AdvectedPoints
+    {
+      /// Distance relative to the cell size, below which points of opposite orientation are not
+      /// used (unresolved interface, e.g., both sides of a thin filament). Smaller values use the
+      /// points down to thinner features; in the remaining regions, the zero level set of the
+      /// advected level set is used.
+      number unresolved_distance = 2.0;
+
+      /// Points, at which the magnitude of the advected level set exceeds this value times the
+      /// cell size, are removed (parts of the interface, which the level set has lost).
+      number support_tolerance = 0.2;
+    } advected_points;
 
     /// Continuous level-set field on the cut cells, which is computed after each time step by the
     /// constrained L2-projection of the DG level set, and the normal vector and the curvature

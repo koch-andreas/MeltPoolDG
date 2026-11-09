@@ -17,7 +17,9 @@
 #include <deal.II/non_matching/mesh_classifier.h>
 #include <deal.II/non_matching/quadrature_generator.h>
 
+#include <functional>
 #include <optional>
+#include <utility>
 
 namespace MeltPoolDG::CutUtil
 {
@@ -594,7 +596,9 @@ namespace MeltPoolDG::CutUtil
     const dealii::DoFHandler<dim>                                          &level_set_dof_handler,
     const VectorType                                                       &level_set,
     const dealii::MatrixFree<dim, number, dealii::VectorizedArray<number>> &matrix_free,
-    const int                                                               fe_degree)
+    const int                                                               fe_degree,
+    const std::function<dealii::NonMatching::ImmersedSurfaceQuadrature<dim>(
+      const typename dealii::Triangulation<dim>::cell_iterator &)>         &surface_quadrature)
   {
     AssertThrow(level_set_dof_handler.has_hp_capabilities() and
                   level_set_dof_handler.get_fe_collection().size() > CellCategory::intersected,
@@ -637,6 +641,17 @@ namespace MeltPoolDG::CutUtil
             {
               quad_vec_surface.emplace_back();
               continue;
+            }
+
+          // given quadrature, if it is not empty
+          if (surface_quadrature)
+            {
+              auto quadrature = surface_quadrature(cell);
+              if (quadrature.size() > 0)
+                {
+                  quad_vec_surface.push_back(std::move(quadrature));
+                  continue;
+                }
             }
 
           quadrature_generator.generate(cell);
@@ -718,19 +733,25 @@ namespace MeltPoolDG::CutUtil
     const dealii::DoFHandler<1> &,
     const dealii::LinearAlgebra::distributed::Vector<double> &,
     const dealii::MatrixFree<1, double, dealii::VectorizedArray<double>> &,
-    const int);
+    const int,
+    const std::function<dealii::NonMatching::ImmersedSurfaceQuadrature<1>(
+      const typename dealii::Triangulation<1>::cell_iterator &)> &);
   template void
   compute_immersed_surface_quadrature_intersected_cells(
     dealii::NonMatching::MappingInfo<2, 2, dealii::VectorizedArray<double>> &,
     const dealii::DoFHandler<2> &,
     const dealii::LinearAlgebra::distributed::Vector<double> &,
     const dealii::MatrixFree<2, double, dealii::VectorizedArray<double>> &,
-    const int);
+    const int,
+    const std::function<dealii::NonMatching::ImmersedSurfaceQuadrature<2>(
+      const typename dealii::Triangulation<2>::cell_iterator &)> &);
   template void
   compute_immersed_surface_quadrature_intersected_cells(
     dealii::NonMatching::MappingInfo<3, 3, dealii::VectorizedArray<double>> &,
     const dealii::DoFHandler<3> &,
     const dealii::LinearAlgebra::distributed::Vector<double> &,
     const dealii::MatrixFree<3, double, dealii::VectorizedArray<double>> &,
-    const int);
+    const int,
+    const std::function<dealii::NonMatching::ImmersedSurfaceQuadrature<3>(
+      const typename dealii::Triangulation<3>::cell_iterator &)> &);
 } // namespace MeltPoolDG::CutUtil

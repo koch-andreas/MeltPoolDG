@@ -20,6 +20,7 @@
 #include <meltpooldg/level_set/narrow_band_continuous_level_set.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
+#include <meltpooldg/level_set/narrow_band_interface_points.hpp>
 #include <meltpooldg/level_set/narrow_band_semi_lagrangian_advection.hpp>
 #include <meltpooldg/level_set/normal_vector_data.hpp>
 #include <meltpooldg/level_set/reinitialization_data.hpp>
@@ -264,6 +265,9 @@ namespace MeltPoolDG::LevelSet
 
     /**
      * @brief Elliptic reinitialization of the level-set field on the cut cells (S5).
+     *
+     * For NarrowBandReinitializationInterface::advected_points, the interface penalty term is
+     * evaluated at the advected interface points (if they are assigned to the cells).
      */
     void
     reinitialize();
@@ -380,6 +384,10 @@ namespace MeltPoolDG::LevelSet
 
     /// Semi-Lagrangian advection (NarrowBandType::semi_lagrangian).
     const NarrowBandSemiLagrangianAdvection<dim, number> semi_lagrangian_advection;
+
+    /// Advected interface points for the interface penalty term of the reinitialization
+    /// (NarrowBandReinitializationInterface::advected_points).
+    std::unique_ptr<NarrowBandInterfacePoints<dim, number>> interface_points;
 
     /// Semi-Lagrangian band: signs (+1, -1) of the level set on the locally owned and ghost cells,
     /// which are not cut, indexed by the active cell index (0: unknown). The sign of a cell only
