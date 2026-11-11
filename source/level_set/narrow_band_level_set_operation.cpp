@@ -89,6 +89,8 @@ namespace MeltPoolDG::LevelSet
                                    "reinitialization on intersected cells only."));
 
     advection_operator.set_velocity_function(velocity_function);
+    advection_operator.set_extension_velocity(narrow_band_data.advection_velocity ==
+                                              NarrowBandAdvectionVelocity::extension);
 
     time_integrator.reset(TimeIntegration::explicit_time_integrator_factory<number>(
       [this](const number time,
@@ -393,6 +395,9 @@ namespace MeltPoolDG::LevelSet
 
       level_set_band.zero_out_ghost_values();
 
+      // stage output: level set at the beginning of the time step (extended band)
+      output_stage(0, time, time_step, level_set_band);
+
       // semi-Lagrangian band: evaluation of the back-traced level set of the cut cells on the
       // candidate cells
       if (is_semi_lagrangian())
@@ -431,26 +436,35 @@ namespace MeltPoolDG::LevelSet
 
       if (is_semi_lagrangian())
         {
-          // no DG advection
+          // no DG advection; stage output: semi-Lagrangian advection
+          output_stage(1, time, time_step, level_set_band);
         }
-      else if (narrow_band_data.advection_limiter.cells == NarrowBandLimiterCells::none)
-        time_integrator->perform_time_step(time, time_step, solution_history_band);
       else
         {
-          // bounds from the level set at the beginning of the time step; limiting after each
-          // stage of the SSP Runge-Kutta scheme
-          const unsigned int n_bounded_cells = advection_limiter.compute_bounds(
-            dof_handler_band, level_set_band, *velocity_function, time, time_step);
+          // bound-preserving limiter: bounds from the level set at the beginning of the time
+          // step; limiting after each stage of the SSP Runge-Kutta scheme
+          const bool use_limiter =
+            narrow_band_data.advection_limiter.cells != NarrowBandLimiterCells::none;
+          const unsigned int n_bounded_cells =
+            use_limiter ? advection_limiter.compute_bounds(
+                            dof_handler_band, level_set_band, *velocity_function, time, time_step) :
+                          0;
 
+          // stage post-processing: limiter and stage output
           typename NarrowBandBoundPreservingLimiter<dim, number>::Statistics statistics;
+          unsigned int                                                       stage = 0;
+          std::function<void(number, number, VectorType &, const VectorType &)>
+            stage_post_processing;
+          if (use_limiter or stage_output_function)
+            stage_post_processing =
+              [&](const number, const number, VectorType &stage_solution, const VectorType &) {
+                if (use_limiter)
+                  statistics += advection_limiter.limit(dof_handler_band, stage_solution);
+                output_stage(++stage, time, time_step, stage_solution);
+              };
+
           time_integrator->perform_time_step(
-            time,
-            time_step,
-            solution_history_band,
-            {},
-            [&](const number, const number, VectorType &stage_solution, const VectorType &) {
-              statistics += advection_limiter.limit(dof_handler_band, stage_solution);
-            });
+            time, time_step, solution_history_band, {}, stage_post_processing);
 
           if (statistics.n_limited_cells + statistics.n_mean_violations > 0)
             Journal::print_line(scratch_data.get_pcout(1),
@@ -832,6 +846,49 @@ namespace MeltPoolDG::LevelSet
   {
     if (continuous_level_set)
       continuous_level_set->compute(level_set);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::set_stage_output_function(
+    const StageOutputFunction &function)
+  {
+    stage_output_function = function;
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::output_stage(const unsigned int stage,
+                                                         const number       time,
+                                                         const number       time_step,
+                                                         const VectorType  &level_set_band_stage)
+  {
+    if (not stage_output_function)
+      return;
+
+    // level set of the cut cells: at the beginning of the time step the level set of the cut
+    // cells, otherwise the restriction of the stage to the cut cells
+    if (stage > 0)
+      {
+        level_set_stage.reinit(level_set);
+        NarrowBand::copy_cut_cell_values(dof_handler_band,
+                                         level_set_band_stage,
+                                         dof_handler_cut,
+                                         level_set_stage);
+      }
+    const VectorType &level_set_cut = stage > 0 ? level_set_stage : level_set;
+
+    const bool level_set_cut_has_ghosts  = level_set_cut.has_ghost_elements();
+    const bool level_set_band_has_ghosts = level_set_band_stage.has_ghost_elements();
+    level_set_cut.update_ghost_values();
+    level_set_band_stage.update_ghost_values();
+
+    stage_output_function(stage, time, time_step, level_set_cut, level_set_band_stage);
+
+    if (not level_set_cut_has_ghosts)
+      level_set_cut.zero_out_ghost_values();
+    if (not level_set_band_has_ghosts)
+      level_set_band_stage.zero_out_ghost_values();
   }
 
   template <int dim, typename number>

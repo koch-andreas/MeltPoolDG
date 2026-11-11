@@ -379,6 +379,15 @@
               },
               "additionalProperties": false
             },
+            "velocity": {
+              "type": "string",
+              "enum": [
+                "bulk",
+                "extension"
+              ],
+              "description": "Velocity of the DG advection on the narrow band: the given velocity u (bulk) or the extension velocity u(y(x)) (extension), i.e., the given velocity at the closest point y(x) = x - phi grad phi / |grad phi|^2 on the zero level set, evaluated with the current level set at each stage of the time integration (on faces with the averages of the traces; |grad phi| is bounded from below by 0.5). The extension velocity is constant along the normals of the interface and keeps the level set of the band a signed distance, while the interface moves with u. Not available for the semi-Lagrangian band.",
+              "default": "bulk"
+            },
             "artificial viscosity": {
               "type": "object",
               "properties": {
@@ -1425,6 +1434,27 @@
               "type": "string",
               "description": "Sets the base name for particle output files.",
               "default": "particle"
+            }
+          },
+          "additionalProperties": false
+        },
+        "stages": {
+          "type": "object",
+          "properties": {
+            "enable": {
+              "type": "boolean",
+              "description": "Write the level set on the cut cells (level_set) and on the band (level_set_band) at the beginning of each time step (stage 0: band after the extension or the redistancing, which is the initial value of the advection) and after each stage of the explicit Runge-Kutta scheme of the advection (stages 1, ..., S; the last stage is the advected level set before the update of the band, the reinitialization and the extension). The files <paraview filename>_stages_<time step>_<stage>.vtu are written to the output directory, where <time step> is the number of the time step, whose regular output is <paraview filename>_<time step>. In <paraview filename>_stages.pvd, stage s of the time step from t^n to t^n + dt is assigned the time t^n + s / (s + 1) dt, such that the stages are ordered between the regular outputs.",
+              "default": false
+            },
+            "start time": {
+              "type": "number",
+              "description": "Only the time steps, which start at t^n >= start time, are written.",
+              "default": -1.79769e+308
+            },
+            "end time": {
+              "type": "number",
+              "description": "Only the time steps, which start at t^n <= end time, are written.",
+              "default": 1.79769e+308
             }
           },
           "additionalProperties": false

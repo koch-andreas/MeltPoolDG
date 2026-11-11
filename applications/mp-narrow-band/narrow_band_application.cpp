@@ -1,12 +1,18 @@
 #include "narrow_band_application.hpp"
 
+#include <deal.II/base/data_out_base.h>
 #include <deal.II/base/mpi.h>
+#include <deal.II/base/utilities.h>
+
+#include <deal.II/numerics/data_out.h>
 
 #include <meltpooldg/post_processing/generic_data_out.hpp>
 #include <meltpooldg/utilities/fe_util.hpp>
 #include <meltpooldg/utilities/journal.hpp>
 #include <meltpooldg/utilities/scoped_name.hpp>
 
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 
@@ -42,6 +48,30 @@ namespace MeltPoolDG::LevelSet
             str << "Warning: CFL number " << std::scientific << std::setprecision(4) << cfl_number
                 << " > 1. The interface might leave the narrow band.";
             Journal::print_line(scratch_data->get_pcout(0), str.str(), "narrow_band");
+          }
+
+        // output of the stages of the advection of the time steps, which start in the time window
+        if (param.stage_output.enable)
+          {
+            const unsigned int time_step_number = time_iterator->get_current_time_step_number();
+            const number       tolerance        = 1e-10 * time_step;
+            if (time >= param.stage_output.start_time - tolerance and
+                time <= param.stage_output.end_time + tolerance)
+              narrow_band_operation->set_stage_output_function(
+                [this, time_step_number](const unsigned int stage,
+                                         const number       stage_time,
+                                         const number       stage_time_step,
+                                         const auto        &level_set,
+                                         const auto        &level_set_band) {
+                  output_stage(time_step_number,
+                               stage,
+                               stage_time,
+                               stage_time_step,
+                               level_set,
+                               level_set_band);
+                });
+            else
+              narrow_band_operation->set_stage_output_function({});
           }
 
         narrow_band_operation->advance_time_step(time,
@@ -132,6 +162,54 @@ namespace MeltPoolDG::LevelSet
       simulation_case->do_postprocessing(generic_data_out);
 
     post_processor->process(time_step, generic_data_out, time);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandApplication<dim, number>::output_stage(
+    const unsigned int                                                   time_step_number,
+    const unsigned int                                                   stage,
+    const number                                                         time,
+    const number                                                         time_step,
+    const typename NarrowBandLevelSetOperation<dim, number>::VectorType &level_set,
+    const typename NarrowBandLevelSetOperation<dim, number>::VectorType &level_set_band)
+  {
+    namespace fs         = std::filesystem;
+    const auto &paraview = param.output.paraview;
+
+    dealii::DataOut<dim> data_out;
+    data_out.add_data_vector(narrow_band_operation->get_dof_handler_cut(), level_set, "level_set");
+    data_out.add_data_vector(narrow_band_operation->get_dof_handler_band(),
+                             level_set_band,
+                             "level_set_band");
+
+    dealii::DataOutBase::VtkFlags flags;
+    if (dim > 1)
+      flags.write_higher_order_cells = paraview.write_higher_order_cells;
+    data_out.set_flags(flags);
+
+    data_out.build_patches(scratch_data->get_mapping(),
+                           paraview.n_patches > 0 ? paraview.n_patches : param.base.fe.degree);
+
+    const std::string filename =
+      paraview.filename + "_stages_" +
+      dealii::Utilities::int_to_string(time_step_number, paraview.n_digits_timestep) + "_" +
+      std::to_string(stage) + ".vtu";
+    data_out.write_vtu_in_parallel((fs::path(param.output.directory) / filename).string(),
+                                   scratch_data->get_mpi_comm());
+
+    // pvd record: stage s of the time step from t^n to t^n + dt at t^n + s / (s + 1) dt
+    stage_times_and_names.emplace_back(time + time_step * stage / (stage + 1.), filename);
+    if (dealii::Utilities::MPI::this_mpi_process(scratch_data->get_mpi_comm()) == 0)
+      {
+        std::ofstream pvd_output(fs::path(param.output.directory) /
+                                 (paraview.filename + "_stages.pvd"));
+        dealii::DataOutBase::write_pvd_record(pvd_output, stage_times_and_names);
+      }
+
+    Journal::print_line(scratch_data->get_pcout(2),
+                        "write stage output " + filename,
+                        "narrow_band");
   }
 
   template class NarrowBandApplication<1, double>;

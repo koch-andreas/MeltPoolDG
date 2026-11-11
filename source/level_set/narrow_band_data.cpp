@@ -124,6 +124,17 @@ namespace MeltPoolDG::LevelSet
       {
         time_integrator.add_parameters(prm);
 
+        prm.add_parameter(
+          "velocity",
+          advection_velocity,
+          "Velocity of the DG advection on the narrow band: the given velocity u (bulk) or the "
+          "extension velocity u(y(x)) (extension), i.e., the given velocity at the closest point "
+          "y(x) = x - phi grad phi / |grad phi|^2 on the zero level set, evaluated with the current "
+          "level set at each stage of the time integration (on faces with the averages of the "
+          "traces; |grad phi| is bounded from below by 0.5). The extension velocity is constant "
+          "along the normals of the interface and keeps the level set of the band a signed "
+          "distance, while the interface moves with u. Not available for the semi-Lagrangian band.");
+
         prm.enter_subsection("artificial viscosity");
         {
           prm.add_parameter(
@@ -332,6 +343,11 @@ namespace MeltPoolDG::LevelSet
                     dealii::ExcMessage("The downstream neighbor activation is not supported by "
                                        "the advected band."));
       }
+
+    AssertThrow(advection_velocity == NarrowBandAdvectionVelocity::bulk or
+                  type != NarrowBandType::semi_lagrangian,
+                dealii::ExcMessage("The extension velocity is only available for the DG "
+                                   "advection of the narrow band."));
 
     if (type == NarrowBandType::semi_lagrangian)
       {

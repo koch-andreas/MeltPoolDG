@@ -14,12 +14,12 @@
   "case specific": {
     "center point": "0.5, 0.75",
     "radius": 0.15,
-    "T": 4.0
+    "T": 2.0
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 4.0,
-    "time step size": 0.01
+    "end time": 2.0,
+    "time step size": 0.001
   },
   "output": {
     "directory": "output_vortex_bubble_semi_lagrangian",
@@ -31,11 +31,12 @@
   },
   "narrow band": {
     "type": "semi_lagrangian",
-    "reinitialization interface": "advected_points",
+    "reinitialization interface": "zero_level_set",
+    "reinitialization faces": "interface_faces",
     "continuous level set": {
       "enable": true
     },
-    "reinitialization frequency": 1
+    "reinitialization frequency": 2
   },
   "reinitialization": {
     "type": "elliptic",

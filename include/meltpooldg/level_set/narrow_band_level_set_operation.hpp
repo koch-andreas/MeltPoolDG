@@ -119,6 +119,16 @@ namespace MeltPoolDG::LevelSet
       std::function<number(const dealii::CellAccessor<dim, dim> &, const dealii::Point<dim> &)>;
 
     /**
+     * Function for the output of the intermediate states of the advection of a time step from
+     * $t^n$ to $t^{n+1} = t^n + \Delta t$ (see set_stage_output_function()). Arguments: stage
+     * $s$, time $t^n$, time-step size $\Delta t$, level-set field on the cut cells (cut
+     * DoFHandler) and level-set field on the band (band DoFHandler). The ghost values of both
+     * vectors are updated.
+     */
+    using StageOutputFunction = std::function<
+      void(const unsigned int, const number, const number, const VectorType &, const VectorType &)>;
+
+    /**
      * @brief Constructor.
      *
      * @param scratch_data Scratch data, to which the DoFHandlers and the quadrature rule are
@@ -179,6 +189,27 @@ namespace MeltPoolDG::LevelSet
     advance_time_step(const number       time,
                       const number       time_step,
                       const unsigned int time_step_number);
+
+    /**
+     * @brief Set a function, which is called during advance_time_step() with the intermediate
+     * states of the advection (e.g., for the output for debugging; an empty function disables the
+     * calls):
+     * - stage $s = 0$: the level set at the beginning of the time step, i.e., the band after the
+     *   extension (NarrowBandType::extension) or the redistancing of the layers of the previous
+     *   time step (for the first time step: the initial extended band), which is the initial value
+     *   of the advection,
+     * - stages $s = 1, \dots, S$: the level set on the band after each stage of the explicit
+     *   Runge-Kutta scheme (after the bound-preserving limiter, if enabled), i.e., the vector
+     *   passed to the stage post-processing of the time integrator (for the SSP Runge-Kutta
+     *   schemes: the stage solutions $\phi^{(s)}$ with $\phi^{(S)} = \phi^{n+1}$). The level set of
+     *   the cut cells is the restriction of the stage to the cut cells at the beginning of the
+     *   time step. For NarrowBandType::semi_lagrangian, stage 1 is the semi-Lagrangian advection.
+     *
+     * The last stage is the advected level set before the update of the band, the
+     * reinitialization and the extension (S1, S5, S2).
+     */
+    void
+    set_stage_output_function(const StageOutputFunction &function);
 
     /**
      * @brief Level-set field on the cut cells (cut DoFHandler).
@@ -332,6 +363,17 @@ namespace MeltPoolDG::LevelSet
     void
     update_continuous_level_set();
 
+    /**
+     * @brief Call the stage output function (if set) with the stage @p stage of the advection
+     * from @p time to @p time + @p time_step. The ghost values of @p level_set_band_stage are
+     * updated for the call and are restored afterwards.
+     */
+    void
+    output_stage(const unsigned int stage,
+                 const number       time,
+                 const number       time_step,
+                 const VectorType  &level_set_band_stage);
+
     /// Scratch data.
     ScratchData<dim, dim, number> &scratch_data;
 
@@ -412,5 +454,11 @@ namespace MeltPoolDG::LevelSet
 
     /// Continuous level set, normal vector and curvature on the cut cells (optional).
     std::unique_ptr<NarrowBandContinuousLevelSet<dim, number>> continuous_level_set;
+
+    /// Output of the intermediate states of the advection (optional).
+    StageOutputFunction stage_output_function;
+
+    /// Level-set field on the cut cells of a stage of the advection (stage output).
+    VectorType level_set_stage;
   };
 } // namespace MeltPoolDG::LevelSet

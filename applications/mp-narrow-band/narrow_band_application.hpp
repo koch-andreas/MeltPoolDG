@@ -7,6 +7,9 @@
 #include <meltpooldg/utilities/profiling_monitor.hpp>
 
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "narrow_band_case.hpp"
 
@@ -38,6 +41,19 @@ namespace MeltPoolDG::LevelSet
     void
     output_results(const unsigned int time_step, const number time, const bool force_output);
 
+    /**
+     * @brief Write the level set at a stage of the advection of the time step @p time_step_number
+     * (see NarrowBandStageOutputData).
+     */
+    void
+    output_stage(
+      const unsigned int                                                   time_step_number,
+      const unsigned int                                                   stage,
+      const number                                                         time,
+      const number                                                         time_step,
+      const typename NarrowBandLevelSetOperation<dim, number>::VectorType &level_set,
+      const typename NarrowBandLevelSetOperation<dim, number>::VectorType &level_set_band);
+
     std::unique_ptr<CaseType>                                 simulation_case;
     const NarrowBandCaseParameters<number>                   &param;
     std::shared_ptr<ScratchData<dim, dim, number>>            scratch_data;
@@ -45,5 +61,8 @@ namespace MeltPoolDG::LevelSet
     std::unique_ptr<TimeIntegration::TimeIterator<number>>    time_iterator;
     std::unique_ptr<Postprocessor<dim, number>>               post_processor;
     std::unique_ptr<Profiling::ProfilingMonitor<number>>      profiling_monitor;
+
+    /// Times and filenames of the written stages of the advection (pvd record).
+    std::vector<std::pair<double, std::string>> stage_times_and_names;
   };
 } // namespace MeltPoolDG::LevelSet

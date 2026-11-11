@@ -23,6 +23,15 @@ namespace MeltPoolDG::LevelSet
               // their vertex neighbors (candidate cells), without extension
               semi_lagrangian)
 
+  BETTER_ENUM(NarrowBandAdvectionVelocity,
+              char,
+              // the given (bulk) velocity u
+              bulk,
+              // extension velocity u(y): the given velocity at the closest point y = x - phi grad
+              // phi / |grad phi|^2 on the zero level set, which is constant along the normals and
+              // keeps the level set of the band a signed distance
+              extension)
+
   BETTER_ENUM(NarrowBandLimiterCells,
               char,
               // no limiter
@@ -186,6 +195,15 @@ namespace MeltPoolDG::LevelSet
     /// Time integrator for the advection on the narrow band.
     TimeIntegration::TimeIntegratorData<number> time_integrator{
       TimeIntegration::TimeIntegratorSchemes::SSP_RK_stage_3_order_3};
+
+    /// Velocity of the DG advection on the band: the given (bulk) velocity or the extension
+    /// velocity u(y(x)), i.e., the given velocity at the closest point y(x) = x - phi grad phi /
+    /// |grad phi|^2 of x on the zero level set, evaluated with the current level set at each stage
+    /// of the time integration. The extension velocity is constant along the normals of the
+    /// interface; thus, the advection keeps the level set of the band a signed distance (it does
+    /// not compress or stretch the level set in the band), while the interface moves with the given
+    /// velocity.
+    NarrowBandAdvectionVelocity advection_velocity = NarrowBandAdvectionVelocity::bulk;
 
     /// Bound-preserving limiter of the advection: after each stage of the SSP Runge-Kutta scheme,
     /// the level set of each limited cell is scaled around its cell mean, such that its values at

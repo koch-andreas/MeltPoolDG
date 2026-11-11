@@ -15,10 +15,59 @@
 #include <meltpooldg/time_integration/time_stepping_data.hpp>
 #include <meltpooldg/utilities/profiling_data.hpp>
 
+#include <limits>
 #include <string>
 
 namespace MeltPoolDG::LevelSet
 {
+  /**
+   * @brief Output of the intermediate states of the advection (subsection output/stages), see
+   * NarrowBandLevelSetOperation::set_stage_output_function().
+   */
+  template <typename number>
+  struct NarrowBandStageOutputData
+  {
+    /// Write the level set at the stages of the advection.
+    bool enable = false;
+
+    /// Only the time steps, which start in [start time, end time], are written.
+    number start_time = std::numeric_limits<number>::lowest();
+    number end_time   = std::numeric_limits<number>::max();
+
+    void
+    add_parameters(dealii::ParameterHandler &prm)
+    {
+      prm.enter_subsection("output");
+      {
+        prm.enter_subsection("stages");
+        {
+          prm.add_parameter(
+            "enable",
+            enable,
+            "Write the level set on the cut cells (level_set) and on the band (level_set_band) "
+            "at the beginning of each time step (stage 0: band after the extension or the "
+            "redistancing, which is the initial value of the advection) and after each stage of "
+            "the explicit Runge-Kutta scheme of the advection (stages 1, ..., S; the last stage is "
+            "the advected level set before the update of the band, the reinitialization and the "
+            "extension). The files <paraview filename>_stages_<time step>_<stage>.vtu are written "
+            "to the output directory, where <time step> is the number of the time step, whose "
+            "regular output is <paraview filename>_<time step>. In "
+            "<paraview filename>_stages.pvd, stage s of the time step from t^n to t^n + dt is "
+            "assigned the time t^n + s / (s + 1) dt, such that the stages are ordered between "
+            "the regular outputs.");
+          prm.add_parameter("start time",
+                            start_time,
+                            "Only the time steps, which start at t^n >= start time, are written.");
+          prm.add_parameter("end time",
+                            end_time,
+                            "Only the time steps, which start at t^n <= end time, are written.");
+        }
+        prm.leave_subsection();
+      }
+      prm.leave_subsection();
+    }
+  };
+
   /**
    * @brief Parameters of the narrow-band DG level-set application.
    */
@@ -47,6 +96,7 @@ namespace MeltPoolDG::LevelSet
       normal_vector.add_parameters(prm);
       curvature.add_parameters(prm);
       output.add_parameters(prm);
+      stage_output.add_parameters(prm);
       profiling.add_parameters(prm);
     }
 
@@ -79,10 +129,11 @@ namespace MeltPoolDG::LevelSet
     ReinitializationData<number>              reinit;
     /// Normal vector and curvature of the continuous level set on the cut cells (only the filter
     /// parameters, the linear solvers, the verbosity levels and 'curvature/enable' are used).
-    NormalVectorData<number>         normal_vector;
-    CurvatureData<number>            curvature;
-    OutputData<number>               output;
-    Profiling::ProfilingData<number> profiling;
+    NormalVectorData<number>          normal_vector;
+    CurvatureData<number>             curvature;
+    OutputData<number>                output;
+    NarrowBandStageOutputData<number> stage_output;
+    Profiling::ProfilingData<number>  profiling;
   };
 
   /**

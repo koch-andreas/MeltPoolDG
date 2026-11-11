@@ -33,6 +33,47 @@ namespace MeltPoolDG::LevelSet
   }
 
   template <int dim, typename number>
+  void
+  NarrowBandAdvectionDGOperator<dim, number>::set_extension_velocity(const bool flag)
+  {
+    use_extension_velocity = flag;
+  }
+
+  template <int dim, typename number>
+  dealii::Tensor<1, dim, typename NarrowBandAdvectionDGOperator<dim, number>::VectorizedArrayType>
+  NarrowBandAdvectionDGOperator<dim, number>::evaluate_velocity(
+    const dealii::Point<dim, VectorizedArrayType>     &point,
+    const VectorizedArrayType                         &value,
+    const dealii::Tensor<1, dim, VectorizedArrayType> &gradient) const
+  {
+    if (not use_extension_velocity)
+      return MeltPoolDG::VectorTools::evaluate_function_at_vectorized_points<dim, number>(
+        *velocity_function, point);
+
+    // closest point y = x - d n on the zero level set with the normal n = grad phi / |grad phi|
+    // and the distance d = phi / max(|grad phi|, 0.5)
+    dealii::Tensor<1, dim, VectorizedArrayType> velocity;
+    for (unsigned int v = 0; v < VectorizedArrayType::size(); ++v)
+      {
+        dealii::Point<dim>     y;
+        dealii::Tensor<1, dim> grad;
+        for (unsigned int d = 0; d < dim; ++d)
+          {
+            y[d]    = point[d][v];
+            grad[d] = gradient[d][v];
+          }
+
+        if (const number norm = grad.norm(); norm > 1e-12)
+          y -= (value[v] / std::max<number>(norm, 0.5)) * (grad / norm);
+
+        for (unsigned int d = 0; d < dim; ++d)
+          velocity[d][v] = velocity_function->value(y, d);
+      }
+
+    return velocity;
+  }
+
+  template <int dim, typename number>
   bool
   NarrowBandAdvectionDGOperator<dim, number>::is_band_fe_index(const unsigned int active_fe_index)
   {
@@ -63,7 +104,10 @@ namespace MeltPoolDG::LevelSet
     for (unsigned int cell = cell_range.first; cell < cell_range.second; ++cell)
       {
         phi.reinit(cell);
-        phi.gather_evaluate(src, dealii::EvaluationFlags::gradients);
+        phi.gather_evaluate(src,
+                            use_extension_velocity ?
+                              dealii::EvaluationFlags::values | dealii::EvaluationFlags::gradients :
+                              dealii::EvaluationFlags::gradients);
 
         // cell-wise constant viscosity
         VectorizedArrayType epsilon_cell = 0.;
@@ -76,11 +120,13 @@ namespace MeltPoolDG::LevelSet
 
         for (const unsigned int q : phi.quadrature_point_indices())
           {
+            const auto gradient = phi.get_gradient(q);
             const auto velocity =
-              MeltPoolDG::VectorTools::evaluate_function_at_vectorized_points<dim, number>(
-                *velocity_function, phi.quadrature_point(q));
+              evaluate_velocity(phi.quadrature_point(q),
+                                use_extension_velocity ? phi.get_value(q) : VectorizedArrayType(),
+                                gradient);
 
-            phi.submit_value(-(velocity * phi.get_gradient(q)), q);
+            phi.submit_value(-(velocity * gradient), q);
 
             // - (epsilon grad phi, grad v)
             if (has_viscosity)
@@ -116,6 +162,9 @@ namespace MeltPoolDG::LevelSet
     const auto flags         = has_viscosity ?
                                  dealii::EvaluationFlags::values | dealii::EvaluationFlags::gradients :
                                  dealii::EvaluationFlags::values;
+    // the extension velocity needs the gradients of the traces
+    const auto evaluation_flags =
+      use_extension_velocity ? flags | dealii::EvaluationFlags::gradients : flags;
 
     // interior penalty factor (p+1)(p+2) / h_min of the viscous term
     const number fe_degree = phi_m.get_shape_info().data[0].fe_degree;
@@ -126,8 +175,8 @@ namespace MeltPoolDG::LevelSet
       {
         phi_m.reinit(face);
         phi_p.reinit(face);
-        phi_m.gather_evaluate(src, flags);
-        phi_p.gather_evaluate(src, flags);
+        phi_m.gather_evaluate(src, evaluation_flags);
+        phi_p.gather_evaluate(src, evaluation_flags);
 
         if (has_viscosity)
           {
@@ -139,9 +188,13 @@ namespace MeltPoolDG::LevelSet
 
         for (const unsigned int q : phi_m.quadrature_point_indices())
           {
+            // extension velocity: from the averages of the traces
             const auto velocity =
-              MeltPoolDG::VectorTools::evaluate_function_at_vectorized_points<dim, number>(
-                *velocity_function, phi_m.quadrature_point(q));
+              use_extension_velocity ?
+                evaluate_velocity(phi_m.quadrature_point(q),
+                                  0.5 * (phi_m.get_value(q) + phi_p.get_value(q)),
+                                  0.5 * (phi_m.get_gradient(q) + phi_p.get_gradient(q))) :
+                evaluate_velocity(phi_m.quadrature_point(q), {}, {});
 
             // normal velocity with respect to the outer normal of the interior (minus) cell
             const VectorizedArrayType normal_velocity = velocity * phi_m.normal_vector(q);
@@ -231,7 +284,8 @@ namespace MeltPoolDG::LevelSet
                      artificial_viscosity != nullptr ?
                        dealii::MatrixFree<dim, number>::DataAccessOnFaces::gradients :
                        dealii::MatrixFree<dim, number>::DataAccessOnFaces::values,
-                     artificial_viscosity != nullptr ?
+                     // the extension velocity needs the gradients of the traces
+                     artificial_viscosity != nullptr or use_extension_velocity ?
                        dealii::MatrixFree<dim, number>::DataAccessOnFaces::gradients :
                        dealii::MatrixFree<dim, number>::DataAccessOnFaces::values);
 

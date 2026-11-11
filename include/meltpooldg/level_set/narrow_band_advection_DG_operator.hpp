@@ -81,6 +81,22 @@ namespace MeltPoolDG::LevelSet
     set_velocity_function(const std::shared_ptr<dealii::Function<dim>> &velocity_function);
 
     /**
+     * @brief Advect the level set with the extension velocity u(y(x)), i.e., the velocity function
+     * at the closest point y(x) = x - phi(x) grad phi(x) / |grad phi(x)|^2 on the zero level set
+     * (exact for a signed distance function), instead of u(x).
+     *
+     * The closest point is computed from the level set to which the operator is applied, i.e.,
+     * from the current stage of the time integration, and the operator becomes nonlinear. On the
+     * faces, the averages of the traces of phi and grad phi are used, such that the upwind flux
+     * sees a single velocity. |grad phi| is bounded from below by 0.5 in the distance estimate
+     * phi / |grad phi| (e.g., at the ridge of a thin filament), and y = x for grad phi = 0. The
+     * extension velocity is constant along the normals of the interface: the level set of the band
+     * remains a signed distance, while the interface moves with the velocity function.
+     */
+    void
+    set_extension_velocity(const bool flag);
+
+    /**
      * @brief Evaluate the right-hand side $M^{-1} r(\phi_h)$ of the semi-discrete system.
      *
      * The signature is compatible with the explicit time integrators of MeltPoolDG.
@@ -197,6 +213,19 @@ namespace MeltPoolDG::LevelSet
 
     /// Advection velocity.
     std::shared_ptr<dealii::Function<dim>> velocity_function;
+
+    /// Use the extension velocity u(y(x)) (see set_extension_velocity()).
+    bool use_extension_velocity = false;
+
+    /**
+     * @brief Velocity at the points @p point: the velocity function at @p point or, for the
+     * extension velocity, at the closest point computed from the level set @p value and its
+     * gradient @p gradient.
+     */
+    dealii::Tensor<1, dim, VectorizedArrayType>
+    evaluate_velocity(const dealii::Point<dim, VectorizedArrayType>     &point,
+                      const VectorizedArrayType                         &value,
+                      const dealii::Tensor<1, dim, VectorizedArrayType> &gradient) const;
 
     /// Artificial viscosity field (constant per cell); nullptr if disabled.
     const VectorType *artificial_viscosity = nullptr;
