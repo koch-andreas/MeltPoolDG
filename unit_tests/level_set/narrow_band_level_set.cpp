@@ -1542,6 +1542,140 @@ namespace MeltPoolDG::LevelSet
     }
 
     /**
+     * Signed distance function of a strip y_0 - w/2 < x_1 < y_0 + w/2 (positive inside).
+     */
+    template <int dim>
+    class StripLevelSet : public dealii::Function<dim>
+    {
+    public:
+      StripLevelSet(const number center, const number width)
+        : center(center)
+        , width(width)
+      {}
+
+      double
+      value(const dealii::Point<dim> &p, const unsigned int /*component*/ = 0) const override
+      {
+        return 0.5 * width - std::abs(p[1] - center);
+      }
+
+    private:
+      const number center;
+      const number width;
+    };
+
+    struct SubcellDistanceResult
+    {
+      /// Maximum distance of the zeros of the level set on the vertical lines through the cell
+      /// centers from the exact zeros, and minimum number of zeros per cell: interpolated level
+      /// set and projected subcell distance (of a reinitialized level set, which has lost the
+      /// strip).
+      number       error_zeros_interpolated = 0.;
+      number       error_zeros_projected    = 0.;
+      unsigned int min_n_zeros_interpolated = std::numeric_limits<unsigned int>::max();
+      unsigned int min_n_zeros_projected    = std::numeric_limits<unsigned int>::max();
+
+      /// Maximum error of the signed distance to the points in the middle of the strip and at a
+      /// distance of 0.7 h from it.
+      number error_distance = 0.;
+
+      typename NarrowBandInterfacePoints<2, number>::ProjectionStatistics statistics;
+    };
+
+    /**
+     * Subcell distance of a thin strip of width 0.4 h (p = 2, 8^2 cells on [-1,1]^2, the strip in
+     * the middle of a row of cells): the points are seeded on the exact zero level set
+     * (interpolated on 64^2 cells), and both sides of the strip are unresolved. The reinitialized
+     * level set of the cut cells is replaced by -0.1 (strip lost), and the projection of the
+     * subcell distance restores both zeros in each cut cell.
+     */
+    SubcellDistanceResult
+    test_subcell_distance_strip()
+    {
+      constexpr int            dim = 2;
+      const number             h = 0.25, width = 0.4 * h, center = 0.5 * h;
+      const StripLevelSet<dim> strip(center, width);
+
+      SubcellDistanceResult result;
+
+      // points on the exact zero level set: the kink of the strip lies on a face of the fine mesh
+      const dealii::ConditionalOStream       pcout(std::cout, false);
+      NarrowBandInterfacePoints<dim, number> interface_points(pcout);
+      {
+        NarrowBandFixture<dim> fine(2, 6, 2, &strip);
+        VectorType             level_set_fine;
+        fine.initialize_vector(fine.dof_handler_cut, level_set_fine);
+        dealii::VectorTools::interpolate(fine.mapping, fine.dof_handler_cut, strip, level_set_fine);
+        interface_points.seed(fine.dof_handler_cut, level_set_fine, 3);
+      }
+
+      NarrowBandFixture<dim> coarse(2, 3, 2, &strip);
+      VectorType             level_set, level_set_advected, level_set_band;
+      coarse.initialize_vector(coarse.dof_handler_cut, level_set);
+      coarse.initialize_vector(coarse.dof_handler_band, level_set_band);
+      dealii::VectorTools::interpolate(coarse.mapping, coarse.dof_handler_cut, strip, level_set);
+      dealii::VectorTools::interpolate(coarse.mapping,
+                                       coarse.dof_handler_band,
+                                       strip,
+                                       level_set_band);
+      const std::vector<bool> is_cut_cell =
+        NarrowBand::compute_cut_cells(coarse.dof_handler_band, level_set_band, 2);
+      interface_points.locate(coarse.dof_handler_band, level_set_band, 3, is_cut_cell);
+
+      // zeros on the vertical lines through the cell centers
+      const auto check_zeros = [&](const VectorType &vector, number &error, unsigned int &n_min) {
+        dealii::Vector<number> values;
+        for (const auto &cell : coarse.dof_handler_cut.active_cell_iterators())
+          {
+            if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+              continue;
+            values.reinit(cell->get_fe().n_dofs_per_cell());
+            cell->get_dof_values(vector, values);
+
+            const unsigned int n_samples = 2000;
+            unsigned int       n_zeros   = 0;
+            number             previous  = 0.;
+            for (unsigned int k = 0; k <= n_samples; ++k)
+              {
+                const dealii::Point<dim> unit_point(0.5, static_cast<number>(k) / n_samples);
+                number                   value = 0.;
+                for (unsigned int i = 0; i < values.size(); ++i)
+                  value += values[i] * cell->get_fe().shape_value(i, unit_point);
+                if (k > 0 and value * previous < 0.)
+                  {
+                    const number y = cell->vertex(0)[1] + h * (k - 0.5) / n_samples;
+                    error          = std::max(error,
+                                     std::min(std::abs(y - center + 0.5 * width),
+                                              std::abs(y - center - 0.5 * width)));
+                    ++n_zeros;
+                  }
+                previous = value;
+              }
+            n_min = std::min(n_min, n_zeros);
+          }
+        error = dealii::Utilities::MPI::max(error, MPI_COMM_WORLD);
+        n_min = dealii::Utilities::MPI::min(n_min, MPI_COMM_WORLD);
+      };
+
+      check_zeros(level_set, result.error_zeros_interpolated, result.min_n_zeros_interpolated);
+
+      // reinitialized level set, which has lost the strip
+      level_set_advected = level_set;
+      level_set          = -0.1;
+      result.statistics  = interface_points.project_signed_distance(
+        coarse.mapping, coarse.dof_handler_cut, level_set_advected, level_set, 1., 4);
+      check_zeros(level_set, result.error_zeros_projected, result.min_n_zeros_projected);
+
+      result.error_distance =
+        std::max(std::abs(interface_points.signed_distance(dealii::Point<dim>(0.3, center), h) -
+                          0.5 * width),
+                 std::abs(interface_points.signed_distance(
+                            dealii::Point<dim>(0.3, center + 0.5 * width + 0.7 * h), h) +
+                          0.7 * h));
+      return result;
+    }
+
+    /**
      * Rotating circle (radius 0.3, center (0.4, 0), rigid rotation by a quarter turn in 25 time
      * steps, semi-Lagrangian band, p = 1, 32^2 cells on [-1,1]^2, reinitialization in every time
      * step) with the interface penalty term of the reinitialization at the zero level set or at
@@ -2449,6 +2583,24 @@ namespace MeltPoolDG::LevelSet
     // advected interface points remove this drift
     EXPECT_LT(deviation_zero_level_set, -1e-3);
     EXPECT_LT(std::abs(deviation_advected_points), 0.2 * std::abs(deviation_zero_level_set));
+  }
+
+  TEST(NarrowBandLevelSetTest, SubcellDistanceStrip2D)
+  {
+    const auto result = test_subcell_distance_strip();
+
+    // the cut cells of the strip (one row of eight cells) are unresolved and projected
+    EXPECT_EQ(result.statistics.n_cells, 8U);
+    EXPECT_EQ(result.statistics.n_rejected_cells, 0U);
+
+    // exact signed distance to the flat patches of the points
+    EXPECT_LT(result.error_distance, 1e-3);
+
+    // the projection restores both zeros in every cut cell (L2-projection of the distance with
+    // the kink on the medial axis onto Q2: zeros within 0.05 h)
+    EXPECT_EQ(result.min_n_zeros_interpolated, 2U);
+    EXPECT_EQ(result.min_n_zeros_projected, 2U);
+    EXPECT_LT(result.error_zeros_projected, 0.05 * 0.25);
   }
 
   TEST(NarrowBandLevelSetTest, LayeredBand2D)

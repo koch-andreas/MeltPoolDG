@@ -8,6 +8,8 @@
 
 #include <deal.II/dofs/dof_handler.h>
 
+#include <deal.II/fe/mapping.h>
+
 #include <deal.II/grid/tria.h>
 
 #include <deal.II/lac/la_parallel_vector.h>
@@ -62,6 +64,10 @@ namespace MeltPoolDG::LevelSet
    * filament or a sharp tip). In cut cells without usable points, the reinitialization uses the
    * zero level set of the advected level set as before. The points are kept and used again, once
    * they are separated by the flow. Only points with the same orientation are merged.
+   * Alternatively, the level set of the cut cells around unresolved points is replaced after the
+   * reinitialization by the L2-projection of the signed distance to all points evaluated at the
+   * subcell scale (project_signed_distance()), i.e., by an exact redistancing, which resolves the
+   * medial axis of a thin filament, and its best approximation by the polynomials of the cells.
    *
    * The points of all processes are gathered on all processes (as the cut cells in the
    * semi-Lagrangian advection), and every process advects all points. A point on the common
@@ -177,6 +183,68 @@ namespace MeltPoolDG::LevelSet
      */
     dealii::NonMatching::ImmersedSurfaceQuadrature<dim>
     get_surface_quadrature(const typename dealii::Triangulation<dim>::cell_iterator &cell) const;
+
+    /**
+     * @brief Statistics of the projection of the subcell distance (summed over all processes).
+     */
+    struct ProjectionStatistics
+    {
+      /// Number of cells, whose level set is replaced by the projection.
+      unsigned int n_cells = 0;
+
+      /// Number of unresolved cells, which keep their level set, since the projection would change
+      /// the sign of the advected level set away from the points.
+      unsigned int n_rejected_cells = 0;
+    };
+
+    /**
+     * @brief Subcell redistancing of the unresolved cells: replace the level set of the locally
+     * owned cells with DoFs, which are closer than @p buffer times the cell size to a point with a
+     * point of opposite orientation closer than the unresolved distance (e.g., both sides of a
+     * thin filament), by the L2-projection of the signed distance to the points (see
+     * signed_distance()).
+     *
+     * The signed distance is evaluated at the points of the iterated Gauss quadrature with
+     * $p + 1$ points and @p n_subdivisions subdivisions per direction, which resolves the kink of
+     * the distance on the medial axis of a thin filament. Thus, the conflict of the
+     * reinitialization in these cells (the penalty term enforces two close zeros, while the
+     * polynomial of the cell cannot represent a distance function with a ridge between them)
+     * is replaced by the exact redistancing at the subcell scale and the best approximation by
+     * the polynomials of the cell. A filament is kept, as long as the polynomials of the cells can
+     * represent its two zeros (for $p = 2$, down to a width of about $0.2h$).
+     *
+     * The points only correct the position of the interface: beyond the edges of the patches
+     * (e.g., beyond the open end of a chain of points at the tip of a filament, whose cap has
+     * been removed), the signed distance takes the sign of @p level_set_advected, and a cell keeps
+     * its level set, if the signed distance has a different sign than @p level_set_advected at a
+     * quadrature point, which is farther than a quarter of the cell size from the points (e.g.,
+     * one side of a part of a filament, which the level set has lost).
+     *
+     * @param mapping Mapping.
+     * @param dof_handler DoFHandler of the level set (FE_DGQ on the cut cells).
+     * @param level_set_advected Advected level set before the reinitialization (sign check).
+     * @param level_set Reinitialized level set, which is modified on the projected cells.
+     * @param buffer Distance relative to the cell size, within which the cells around unresolved
+     * points are projected.
+     * @param n_subdivisions Number of subdivisions per direction of the quadrature.
+     */
+    ProjectionStatistics
+    project_signed_distance(const dealii::Mapping<dim>    &mapping,
+                            const dealii::DoFHandler<dim> &dof_handler,
+                            const VectorType              &level_set_advected,
+                            VectorType                    &level_set,
+                            const double                   buffer,
+                            const unsigned int             n_subdivisions) const;
+
+    /**
+     * @brief Signed distance of @p x to the interface represented by the points: each point is a
+     * flat patch (a segment of the length of its weight in 2D, a disk of the area of its weight
+     * in 3D, at most of radius @p max_radius) orthogonal to its normal vector. The distance is the
+     * minimum distance to the patches of the eight nearest points, its sign is the side of the
+     * closest patch (positive in the direction of the normal vector).
+     */
+    number
+    signed_distance(const dealii::Point<dim> &x, const double max_radius) const;
 
     /**
      * @brief Return the points (all processes).

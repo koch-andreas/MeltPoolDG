@@ -281,8 +281,8 @@ namespace MeltPoolDG::LevelSet
           advected_points.unresolved_distance,
           "Distance relative to the cell size, below which advected interface points of opposite "
           "orientation are not used in the reinitialization (unresolved interface, e.g., both "
-          "sides of a thin filament); the zero level set of the advected level set is used there. "
-          "Only used for reinitialization interface = advected_points.",
+          "sides of a thin filament); the treatment of the cells around them is set by "
+          "'unresolved cells'. Only used for reinitialization interface = advected_points.",
           dealii::Patterns::Double(0.0));
         prm.add_parameter(
           "support tolerance",
@@ -291,6 +291,35 @@ namespace MeltPoolDG::LevelSet
           "this value times the cell size, are removed (parts of the interface, which the level "
           "set has lost). Only used for reinitialization interface = advected_points.",
           dealii::Patterns::Double(0.0));
+        prm.add_parameter(
+          "unresolved cells",
+          advected_points.unresolved_cells,
+          "Treatment of the cut cells, which contain unresolved points or are closer than "
+          "'subcell buffer' times the cell size to an unresolved point. zero_level_set: the "
+          "reinitialization uses the zero level set of the advected level set in the cut cells "
+          "without usable points (and only the usable points in the other cut cells). "
+          "subcell_distance: after the reinitialization, the level set of these cells is replaced "
+          "by the L2-projection of the signed distance to the advected points (all points, "
+          "evaluated at the points of an iterated Gauss quadrature with 'subcell subdivisions' "
+          "subdivisions per direction; each point represents a flat patch of its weight with its "
+          "normal vector), i.e., the reinitialization of these cells is replaced by an exact "
+          "redistancing at the subcell scale, whose result is projected onto the polynomials of "
+          "the cells. Beyond the edges of the patches (e.g., the open end of a chain of points), "
+          "the signed distance takes the sign of the advected level set, and a cell keeps the "
+          "reinitialized level set, if the signed distance has a different sign than the "
+          "advected level set at a quadrature point farther than a quarter of the cell size from "
+          "the points (the points do not create new parts of the interface). Only used for "
+          "reinitialization interface = advected_points.");
+        prm.add_parameter("subcell buffer",
+                          advected_points.subcell_buffer,
+                          "Distance relative to the cell size, within which the cut cells around "
+                          "unresolved points are treated as unresolved cells.",
+                          dealii::Patterns::Double(0.0));
+        prm.add_parameter("subcell subdivisions",
+                          advected_points.subcell_subdivisions,
+                          "Number of subdivisions per direction of the iterated Gauss quadrature "
+                          "of the L2-projection of the subcell distance.",
+                          dealii::Patterns::Integer(1));
       }
       prm.leave_subsection();
 

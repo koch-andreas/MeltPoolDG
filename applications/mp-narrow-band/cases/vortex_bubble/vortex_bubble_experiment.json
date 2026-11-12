@@ -1,5 +1,4 @@
 {
-  "$schema": "../../parameters.schema.json",
   "base": {
     "case name": "vortex_bubble",
     "dimension": 2,
@@ -14,29 +13,33 @@
   "case specific": {
     "center point": "0.5, 0.75",
     "radius": 0.15,
-    "T": 2.0
+    "T": 4
   },
   "time stepping": {
-    "start time": 0.0,
-    "end time": 2.0,
-    "time step size": 0.001
+    "start time": 0,
+    "end time": 4,
+    "time step size": 0.01
   },
   "output": {
-    "directory": "output_vortex_bubble_semi_lagrangian",
+    "directory": "out_sub_r6",
     "do user defined postprocessing": true,
-    "write frequency": 100,
+    "write frequency": 10,
     "paraview": {
-      "enable": true
+      "enable": true,
+      "filename": "solution",
+      "n patches": 6
     }
   },
   "narrow band": {
     "type": "semi_lagrangian",
-    "reinitialization interface": "zero_level_set",
-    "reinitialization faces": "interface_faces",
+    "reinitialization frequency": 2,
     "continuous level set": {
       "enable": true
     },
-    "reinitialization frequency": 2
+    "reinitialization interface": "advected_points",
+    "advected points": {
+      "unresolved cells": "subcell_distance"
+    }
   },
   "reinitialization": {
     "type": "elliptic",
@@ -44,17 +47,17 @@
       "solver type": "CG",
       "preconditioner type": "ILU",
       "max iterations": 1000,
-      "rel tolerance": 1e-08,
+      "rel tolerance": 1e-8,
       "abs tolerance": 1e-20,
       "do matrix free": true
     },
     "elliptic": {
       "intersected cells only": true,
-      "penalty parameter": 10000.0,
+      "penalty parameter": 10000,
       "nlsolve": {
         "max nonlinear iterations": 1000,
-        "residual tolerance": 1e-05,
-        "field correction tolerance": 1e-05,
+        "residual tolerance": 0.00001,
+        "field correction tolerance": 0.00001,
         "verbosity level": 0
       }
     }

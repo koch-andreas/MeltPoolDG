@@ -99,6 +99,16 @@ namespace MeltPoolDG::LevelSet
               // advected with the velocity (front tracking, see NarrowBandInterfacePoints)
               advected_points)
 
+  BETTER_ENUM(NarrowBandUnresolvedCells,
+              char,
+              // reinitialization with the zero level set of the advected level set in the penalty
+              // term (cut cells without usable points)
+              zero_level_set,
+              // after the reinitialization: L2-projection of the signed distance to the advected
+              // points evaluated at sub-cell quadrature points (see
+              // NarrowBandInterfacePoints::project_signed_distance())
+              subcell_distance)
+
   BETTER_ENUM(NarrowBandGhostPenaltyFaces,
               char,
               // all interior faces of the narrow band with at least one adjacent neighbor cell,
@@ -313,6 +323,18 @@ namespace MeltPoolDG::LevelSet
       /// Points, at which the magnitude of the advected level set exceeds this value times the
       /// cell size, are removed (parts of the interface, which the level set has lost).
       number support_tolerance = 0.2;
+
+      /// Treatment of the cut cells with unresolved points (points of opposite orientation closer
+      /// than the unresolved distance) and of the cut cells within the buffer around them.
+      NarrowBandUnresolvedCells unresolved_cells = NarrowBandUnresolvedCells::zero_level_set;
+
+      /// Subcell distance: distance relative to the cell size, within which the cells around
+      /// unresolved points are projected (buffer).
+      number subcell_buffer = 1.0;
+
+      /// Subcell distance: number of subdivisions per direction of the iterated Gauss quadrature
+      /// of the L2-projection.
+      unsigned int subcell_subdivisions = 4;
     } advected_points;
 
     /// Continuous level-set field on the cut cells, which is computed after each time step by the

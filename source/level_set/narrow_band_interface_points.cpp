@@ -1,12 +1,17 @@
 #include <deal.II/base/bounding_box.h>
 #include <deal.II/base/exceptions.h>
 #include <deal.II/base/mpi.h>
+#include <deal.II/base/numbers.h>
 #include <deal.II/base/quadrature_lib.h>
+#include <deal.II/base/utilities.h>
+
+#include <deal.II/fe/fe_values.h>
 
 #include <deal.II/grid/cell_id.h>
 
 #include <deal.II/hp/q_collection.h>
 
+#include <deal.II/lac/full_matrix.h>
 #include <deal.II/lac/vector.h>
 
 #include <deal.II/non_matching/quadrature_generator.h>
@@ -21,6 +26,7 @@
 #include <cmath>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -29,6 +35,58 @@
 namespace MeltPoolDG::LevelSet
 {
   using NarrowBand::internal::AffineCellMap;
+
+  namespace
+  {
+    /**
+     * Signed distance of @p x to the flat patches of the points (see
+     * NarrowBandInterfacePoints::signed_distance()), using the eight nearest points of @p tree. If
+     * the closest point of the closest patch lies on its edge, i.e., @p x does not lie in front of
+     * the patch (e.g., beyond the open end of a chain of points, whose cap has been removed), the
+     * side of the patch is not defined, and the sign is @p fallback_sign (if not zero).
+     */
+    template <int dim, typename number, typename TreeType>
+    number
+    signed_distance_to_patches(const dealii::Point<dim>                  &x,
+                               const double                               max_radius,
+                               const TreeType                            &tree,
+                               const std::vector<dealii::Tensor<1, dim>> &normals,
+                               const std::vector<number>                 &weights,
+                               const double                               fallback_sign = 0.)
+    {
+      std::vector<std::pair<dealii::Point<dim>, unsigned int>> nearest;
+      tree.query(boost::geometry::index::nearest(x, 8), std::back_inserter(nearest));
+
+      double min_distance = std::numeric_limits<double>::max();
+      double sign         = 0.;
+      for (const auto &[point, k] : nearest)
+        {
+          // radius of the patch: half the length (2D) or radius of the disk of the area (3D)
+          double radius = 0.;
+          if constexpr (dim == 2)
+            radius = 0.5 * weights[k];
+          else if constexpr (dim == 3)
+            radius = std::sqrt(weights[k] / dealii::numbers::PI);
+          radius = std::min(radius, max_radius);
+
+          const dealii::Tensor<1, dim> d                = x - point;
+          const double                 normal_distance  = normals[k] * d;
+          const double                 tangent_distance = (d - normal_distance * normals[k]).norm();
+          const double                 distance =
+            std::sqrt(normal_distance * normal_distance +
+                      dealii::Utilities::fixed_power<2>(std::max(0., tangent_distance - radius)));
+          if (distance < min_distance)
+            {
+              min_distance = distance;
+              sign         = normal_distance > 0. ? 1. : (normal_distance < 0. ? -1. : 0.);
+              if (tangent_distance > radius and fallback_sign != 0.)
+                sign = fallback_sign;
+            }
+        }
+
+      return nearest.empty() ? 0. : sign * min_distance;
+    }
+  } // namespace
 
   template <int dim, typename number>
   NarrowBandInterfacePoints<dim, number>::NarrowBandInterfacePoints(
@@ -591,6 +649,171 @@ namespace MeltPoolDG::LevelSet
       }
 
     return quadrature;
+  }
+
+  template <int dim, typename number>
+  number
+  NarrowBandInterfacePoints<dim, number>::signed_distance(const dealii::Point<dim> &x,
+                                                          const double max_radius) const
+  {
+    std::vector<std::pair<dealii::Point<dim>, unsigned int>> indexed_points;
+    indexed_points.reserve(points.size());
+    for (unsigned int k = 0; k < points.size(); ++k)
+      indexed_points.emplace_back(points[k], k);
+    const auto point_tree = dealii::pack_rtree(indexed_points);
+
+    return signed_distance_to_patches<dim, number>(x, max_radius, point_tree, normals, weights);
+  }
+
+  template <int dim, typename number>
+  typename NarrowBandInterfacePoints<dim, number>::ProjectionStatistics
+  NarrowBandInterfacePoints<dim, number>::project_signed_distance(
+    const dealii::Mapping<dim>    &mapping,
+    const dealii::DoFHandler<dim> &dof_handler,
+    const VectorType              &level_set_advected,
+    VectorType                    &level_set,
+    const double                   buffer,
+    const unsigned int             n_subdivisions) const
+  {
+    Assert(located, dealii::ExcMessage("The points are not assigned to the cells."));
+
+    // distance relative to the cell size, beyond which the signed distance must have the sign of
+    // the advected level set
+    constexpr double sign_check_distance = 0.25;
+
+    ProjectionStatistics statistics;
+    const MPI_Comm       mpi_comm = dof_handler.get_mpi_communicator();
+
+    if (points.empty())
+      return statistics;
+
+    std::vector<std::pair<dealii::Point<dim>, unsigned int>> indexed_points;
+    indexed_points.reserve(points.size());
+    for (unsigned int k = 0; k < points.size(); ++k)
+      indexed_points.emplace_back(points[k], k);
+    const auto point_tree = dealii::pack_rtree(indexed_points);
+
+    // unresolved points (a point of opposite orientation closer than the unresolved distance),
+    // evaluated on demand with the cell size of the querying cell (-1: unknown)
+    std::vector<signed char>                                 unresolved(points.size(), -1);
+    std::vector<std::pair<dealii::Point<dim>, unsigned int>> candidates, neighbors;
+    const auto is_unresolved_point = [&](const unsigned int k, const double h) {
+      if (unresolved[k] < 0)
+        {
+          const double       distance = unresolved_distance * h;
+          dealii::Point<dim> lower = points[k], upper = points[k];
+          for (unsigned int d = 0; d < dim; ++d)
+            {
+              lower[d] -= distance;
+              upper[d] += distance;
+            }
+          neighbors.clear();
+          point_tree.query(boost::geometry::index::intersects(
+                             dealii::BoundingBox<dim>(std::make_pair(lower, upper))),
+                           std::back_inserter(neighbors));
+          unresolved[k] = 0;
+          for (const auto &[point, j] : neighbors)
+            if (point.distance(points[k]) < distance and normals[j] * normals[k] < 0.)
+              {
+                unresolved[k] = 1;
+                break;
+              }
+        }
+      return unresolved[k] == 1;
+    };
+
+    std::unique_ptr<dealii::FEValues<dim>> fe_values;
+    dealii::FullMatrix<double>             mass_matrix;
+    dealii::Vector<double>                 rhs, values_advected, values_new;
+    std::vector<double>                    distances;
+
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+          continue;
+
+        // cells closer than buffer h to an unresolved point
+        const double h          = cell->minimum_vertex_distance();
+        auto         box        = cell->bounding_box();
+        bool         unresolved = false;
+        box.extend(buffer * h);
+        candidates.clear();
+        point_tree.query(boost::geometry::index::intersects(box), std::back_inserter(candidates));
+        for (const auto &[point, k] : candidates)
+          if (is_unresolved_point(k, h))
+            {
+              unresolved = true;
+              break;
+            }
+        if (not unresolved)
+          continue;
+
+        const auto        &fe     = cell->get_fe();
+        const unsigned int n_dofs = fe.n_dofs_per_cell();
+        if (not fe_values or fe_values->get_fe().n_dofs_per_cell() != n_dofs)
+          fe_values = std::make_unique<dealii::FEValues<dim>>(
+            mapping,
+            fe,
+            dealii::QIterated<dim>(dealii::QGauss<1>(fe.degree + 1), n_subdivisions),
+            dealii::update_values | dealii::update_quadrature_points | dealii::update_JxW_values);
+        fe_values->reinit(cell);
+        const unsigned int n_q_points = fe_values->n_quadrature_points;
+
+        values_advected.reinit(n_dofs);
+        cell->get_dof_values(level_set_advected, values_advected);
+
+        // signed distance at the quadrature points (sign of the advected level set beyond the
+        // edges of the patches); sign check against the advected level set away from the points
+        distances.resize(n_q_points);
+        bool consistent = true;
+        for (unsigned int q = 0; q < n_q_points; ++q)
+          {
+            double advected = 0.;
+            for (unsigned int i = 0; i < n_dofs; ++i)
+              advected += values_advected[i] * fe_values->shape_value(i, q);
+
+            distances[q] =
+              signed_distance_to_patches<dim, number>(fe_values->quadrature_point(q),
+                                                      h,
+                                                      point_tree,
+                                                      normals,
+                                                      weights,
+                                                      advected > 0. ? 1. :
+                                                                      (advected < 0. ? -1. : 0.));
+
+            if (std::abs(distances[q]) > sign_check_distance * h and advected * distances[q] < 0.)
+              consistent = false;
+          }
+
+        if (not consistent)
+          {
+            ++statistics.n_rejected_cells;
+            continue;
+          }
+
+        // L2-projection onto the polynomials of the cell
+        mass_matrix.reinit(n_dofs, n_dofs);
+        rhs.reinit(n_dofs);
+        for (unsigned int q = 0; q < n_q_points; ++q)
+          for (unsigned int i = 0; i < n_dofs; ++i)
+            {
+              const double value_i = fe_values->shape_value(i, q) * fe_values->JxW(q);
+              rhs[i] += value_i * distances[q];
+              for (unsigned int j = 0; j < n_dofs; ++j)
+                mass_matrix(i, j) += value_i * fe_values->shape_value(j, q);
+            }
+        mass_matrix.gauss_jordan();
+        values_new.reinit(n_dofs);
+        mass_matrix.vmult(values_new, rhs);
+        cell->set_dof_values(values_new, level_set);
+
+        ++statistics.n_cells;
+      }
+
+    statistics.n_cells = dealii::Utilities::MPI::sum(statistics.n_cells, mpi_comm);
+    statistics.n_rejected_cells =
+      dealii::Utilities::MPI::sum(statistics.n_rejected_cells, mpi_comm);
+    return statistics;
   }
 
   template <int dim, typename number>

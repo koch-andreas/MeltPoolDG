@@ -679,11 +679,41 @@ namespace MeltPoolDG::LevelSet
     else
       reinit_operation->set_surface_quadrature_function({});
 
+    // subcell distance in the unresolved cells: advected level set for the sign check
+    const bool use_subcell_distance = interface_points and interface_points->is_located() and
+                                      narrow_band_data.advected_points.unresolved_cells ==
+                                        NarrowBandUnresolvedCells::subcell_distance;
+    std::optional<VectorType> level_set_advected;
+    if (use_subcell_distance)
+      {
+        level_set_advected.emplace(level_set);
+        level_set_advected->zero_out_ghost_values();
+      }
+
     reinit_operation->set_initial_condition(level_set);
     reinit_operation->solve();
 
     level_set.zero_out_ghost_values();
     level_set.copy_locally_owned_data_from(reinit_operation->get_level_set());
+
+    // unresolved cells: L2-projection of the signed distance to the points at the subcell scale
+    if (use_subcell_distance)
+      {
+        const auto statistics = interface_points->project_signed_distance(
+          scratch_data.get_mapping(),
+          dof_handler_cut,
+          *level_set_advected,
+          level_set,
+          narrow_band_data.advected_points.subcell_buffer,
+          narrow_band_data.advected_points.subcell_subdivisions);
+        if (statistics.n_cells + statistics.n_rejected_cells > 0)
+          Journal::print_line(scratch_data.get_pcout(1),
+                              "subcell distance: " + std::to_string(statistics.n_cells) +
+                                " unresolved cells projected, " +
+                                std::to_string(statistics.n_rejected_cells) +
+                                " rejected (sign check)",
+                              "narrow_band");
+      }
   }
 
   template <int dim, typename number>
