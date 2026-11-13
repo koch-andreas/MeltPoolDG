@@ -27,10 +27,18 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
    * Colella and Glaz 1989):
    *
    * $\boldsymbol{u}(\boldsymbol{x}, t) = \cos(\pi t / T) \left(\sin(2\pi y) \sin^2(\pi x),
-   * -\sin(2\pi x) \sin^2(\pi y)\right)$.
+   * -\sin(2\pi x) \sin^2(\pi y)\right)$,
    *
-   * The flow stretches a circle into a spiral up to t = T/2 and reverses afterwards such that the
-   * circle returns to its initial shape at t = T.
+   * and its three-dimensional counterpart on the unit cube (deformation field of LeVeque 1996,
+   * also used by Enright, Fedkiw, Ferziger and Mitchell 2002):
+   *
+   * $\boldsymbol{u}(\boldsymbol{x}, t) = \cos(\pi t / T) \left(2 \sin^2(\pi x) \sin(2\pi y)
+   * \sin(2\pi z), -\sin(2\pi x) \sin^2(\pi y) \sin(2\pi z), -\sin(2\pi x) \sin(2\pi y)
+   * \sin^2(\pi z)\right)$.
+   *
+   * Both fields are divergence-free and vanish on the boundary. The flow stretches a circle into a
+   * spiral (a sphere into a thin sheet) up to t = T/2 and reverses afterwards such that the
+   * interface returns to its initial shape at t = T.
    */
   template <int dim>
   class SingleVortex : public dealii::Function<dim>
@@ -51,6 +59,18 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
       const double     sin_2_pi_x = std::sin(2. * pi * p[0]);
       const double     sin_2_pi_y = std::sin(2. * pi * p[1]);
 
+      if constexpr (dim == 3)
+        {
+          const double sin_pi_z   = std::sin(pi * p[2]);
+          const double sin_2_pi_z = std::sin(2. * pi * p[2]);
+
+          if (component == 0)
+            return 2. * reversion * sin_pi_x * sin_pi_x * sin_2_pi_y * sin_2_pi_z;
+          if (component == 1)
+            return -reversion * sin_2_pi_x * sin_pi_y * sin_pi_y * sin_2_pi_z;
+          return -reversion * sin_2_pi_x * sin_2_pi_y * sin_pi_z * sin_pi_z;
+        }
+
       if (component == 0)
         return reversion * sin_2_pi_y * sin_pi_x * sin_pi_x;
       if (component == 1)
@@ -63,7 +83,7 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
   };
 
   /**
-   * @brief Signed distance function of a circle, positive inside.
+   * @brief Signed distance function of a circle (sphere in 3D), positive inside.
    */
   template <int dim>
   class Circle : public dealii::Function<dim>
@@ -87,7 +107,9 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
   };
 
   /**
-   * @brief Vortex bubble: a circle in the time-reversed single-vortex flow on the unit square.
+   * @brief Vortex bubble: a circle in the time-reversed single-vortex flow on the unit square, or
+   * a sphere in the time-reversed deformation flow on the unit cube (dim = 3, e.g., radius 0.15,
+   * center (0.35, 0.35, 0.35), T = 3).
    *
    * The initial level-set field is the signed distance function of the circle (positive inside).
    * If user-defined postprocessing is enabled, the size of the narrow band and the geometric
@@ -107,7 +129,8 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
     void
     create_spatial_discretization() override
     {
-      AssertThrow(dim == 2, dealii::ExcMessage("The case vortex_bubble requires dim = 2."));
+      AssertThrow(dim == 2 or dim == 3,
+                  dealii::ExcMessage("The case vortex_bubble requires dim = 2 or dim = 3."));
 
       this->triangulation =
         std::make_shared<dealii::parallel::distributed::Triangulation<dim>>(this->mpi_communicator);
@@ -139,16 +162,16 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
     {
       prm.add_parameter("center point",
                         center_point,
-                        "Initial center point of the circle. Specify comma-separated values for "
-                        "the x- and y-coordinate.");
+                        "Initial center point of the circle (sphere in 3D). Specify "
+                        "comma-separated values for the x-, y- (and z-) coordinates.");
       prm.add_parameter("radius",
                         radius,
-                        "Radius of the circle.",
+                        "Radius of the circle (sphere in 3D).",
                         dealii::Patterns::Double(0., std::numeric_limits<number>::max()));
       prm.add_parameter("T",
                         period,
                         "Period of the vortex flow. The flow reverses at T/2 and the circle "
-                        "returns to its initial shape at T.");
+                        "(sphere) returns to its initial shape at T.");
 
       return this->parameters.base.do_print_parameters;
     }
@@ -183,10 +206,13 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
       if (std::abs(n_periods - std::round(n_periods)) < 1e-10)
         {
           const Circle<dim> exact_solution(to_point(center_point), radius);
+          const number      exact_interface_measure = dim == 2 ?
+                                                        2. * dealii::numbers::PI * radius :
+                                                        4. * dealii::numbers::PI * radius * radius;
           LevelSet::print_narrow_band_errors<dim, number>(generic_data_out,
                                                           "level_set",
                                                           exact_solution,
-                                                          2. * dealii::numbers::PI * radius,
+                                                          exact_interface_measure,
                                                           this->mpi_communicator,
                                                           "vortex_bubble");
         }
@@ -205,10 +231,10 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
       return point;
     }
 
-    /// Initial center point of the circle
+    /// Initial center point of the circle (sphere)
     std::vector<number> center_point{0.5, 0.75};
 
-    /// Radius of the circle
+    /// Radius of the circle (sphere)
     number radius = 0.15;
 
     /// Period of the vortex flow

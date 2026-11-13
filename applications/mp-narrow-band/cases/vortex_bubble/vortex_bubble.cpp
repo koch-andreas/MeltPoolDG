@@ -9,4 +9,9 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
                            "vortex_bubble",
                            2,
                            double);
+  MELTPOOLDG_REGISTER_CASE(LevelSet::NarrowBandCase,
+                           SimulationVortexBubble,
+                           "vortex_bubble",
+                           3,
+                           double);
 } // namespace MeltPoolDG::Simulation::NarrowBandVortexBubble

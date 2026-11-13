@@ -1,0 +1,72 @@
+{
+  "$schema": "../../parameters.schema.json",
+  "base": {
+    "case name": "vortex_bubble",
+    "dimension": 3,
+    "global refinements": 6,
+    "do print parameters": false,
+    "fe": {
+      "degree": 2,
+      "type": "FE_DGQ"
+    },
+    "verbosity level": 1
+  },
+  "case specific": {
+    "center point": "0.35, 0.35, 0.35",
+    "radius": 0.15,
+    "T": 3.0
+  },
+  "time stepping": {
+    "start time": 0.0,
+    "end time": 3.0,
+    "time step size": 0.005
+  },
+  "output": {
+    "directory": "output_vortex_bubble_3d",
+    "do user defined postprocessing": true,
+    "write frequency": 10,
+    "paraview": {
+      "enable": true,
+      "filename": "solution",
+      "n patches": 1
+    }
+  },
+  "narrow band": {
+    "type": "semi_lagrangian",
+    "reinitialization frequency": 2,
+    "reinitialization interface": "advected_points",
+    "advected points": {
+      "unresolved cells": "subcell_distance"
+    },
+    "continuous level set": {
+      "enable": false,
+      "sign constraints": true,
+      "linear solver": {
+        "rel tolerance": 1e-10,
+        "abs tolerance": 1e-13,
+        "max iterations": 5000
+      }
+    }
+  },
+  "reinitialization": {
+    "type": "elliptic",
+    "linear solver": {
+      "solver type": "CG",
+      "preconditioner type": "Diagonal",
+      "max iterations": 1000,
+      "rel tolerance": 1e-08,
+      "abs tolerance": 1e-20,
+      "do matrix free": true
+    },
+    "elliptic": {
+      "intersected cells only": true,
+      "penalty parameter": 10000.0,
+      "nlsolve": {
+        "max nonlinear iterations": 1000,
+        "residual tolerance": 1e-05,
+        "field correction tolerance": 1e-05,
+        "verbosity level": 0
+      }
+    }
+  }
+}
