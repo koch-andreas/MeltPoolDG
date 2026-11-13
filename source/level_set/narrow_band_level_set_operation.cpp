@@ -12,6 +12,7 @@
 
 #include <deal.II/numerics/vector_tools_interpolate.h>
 
+#include <meltpooldg/core/exceptions.hpp>
 #include <meltpooldg/level_set/narrow_band_level_set_operation.hpp>
 #include <meltpooldg/level_set/narrow_band_utilities.hpp>
 #include <meltpooldg/time_integration/time_integrator_util.hpp>
@@ -691,10 +692,34 @@ namespace MeltPoolDG::LevelSet
       }
 
     reinit_operation->set_initial_condition(level_set);
-    reinit_operation->solve();
+
+    // Subcell distance: if most of the interface is unresolved, the penalty and the gradient terms
+    // of the reinitialization conflict in many cells, and the fixed-point iteration may not
+    // converge. These cells are replaced by the projection of the subcell distance anyway; outside
+    // of them, the advected level set is kept in this case.
+    bool converged = true;
+    if (use_subcell_distance)
+      {
+        try
+          {
+            reinit_operation->solve();
+          }
+        catch (const ExcFixedPointDidNotConverge &)
+          {
+            converged = false;
+          }
+      }
+    else
+      reinit_operation->solve();
 
     level_set.zero_out_ghost_values();
-    level_set.copy_locally_owned_data_from(reinit_operation->get_level_set());
+    if (converged)
+      level_set.copy_locally_owned_data_from(reinit_operation->get_level_set());
+    else
+      Journal::print_line(scratch_data.get_pcout(0),
+                          "Warning: the reinitialization did not converge; the advected level set "
+                          "is kept outside of the cells of the subcell distance.",
+                          "narrow_band");
 
     // unresolved cells: L2-projection of the signed distance to the points at the subcell scale
     if (use_subcell_distance)

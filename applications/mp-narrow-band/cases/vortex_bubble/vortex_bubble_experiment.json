@@ -5,7 +5,7 @@
     "global refinements": 6,
     "do print parameters": false,
     "fe": {
-      "degree": 2,
+      "degree": 1,
       "type": "FE_DGQ"
     },
     "verbosity level": 1
@@ -18,10 +18,10 @@
   "time stepping": {
     "start time": 0,
     "end time": 4,
-    "time step size": 0.01
+    "time step size": 0.005
   },
   "output": {
-    "directory": "out_sub_r6",
+    "directory": "out_nb_T6_r6",
     "do user defined postprocessing": true,
     "write frequency": 10,
     "paraview": {
@@ -34,7 +34,15 @@
     "type": "semi_lagrangian",
     "reinitialization frequency": 2,
     "continuous level set": {
-      "enable": true
+      "enable": true,
+      "linear solver": {
+        "solver type": "CG",
+        "preconditioner type": "ILU",
+        "max iterations": 1000,
+        "rel tolerance": 1e-8,
+        "abs tolerance": 1e-9,
+        "do matrix free": true
+      }
     },
     "reinitialization interface": "advected_points",
     "advected points": {
@@ -45,7 +53,7 @@
     "type": "elliptic",
     "linear solver": {
       "solver type": "CG",
-      "preconditioner type": "ILU",
+      "preconditioner type": "Diagonal",
       "max iterations": 1000,
       "rel tolerance": 1e-8,
       "abs tolerance": 1e-20,

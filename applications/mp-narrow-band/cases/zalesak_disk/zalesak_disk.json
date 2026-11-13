@@ -1,0 +1,69 @@
+{
+  "$schema": "../../parameters.schema.json",
+  "base": {
+    "case name": "zalesak_disk",
+    "dimension": 2,
+    "global refinements": 6,
+    "do print parameters": false,
+    "fe": {
+      "degree": 2,
+      "type": "FE_DGQ"
+    },
+    "verbosity level": 1
+  },
+  "case specific": {
+    "center point": "0., 0.5",
+    "radius": 0.3,
+    "notch width": 0.1,
+    "notch height": 0.5,
+    "rotation center": "0., 0.",
+    "angular velocity": -4.0
+  },
+  "time stepping": {
+    "start time": 0.0,
+    "end time": 1.5707963267948966,
+    "time step size": 0.004908738521234052
+  },
+  "output": {
+    "directory": "output_zalesak_disk",
+    "do user defined postprocessing": true,
+    "write frequency": 80,
+    "paraview": {
+      "enable": true,
+      "filename": "solution",
+      "n patches": 6
+    }
+  },
+  "narrow band": {
+    "type": "semi_lagrangian",
+    "reinitialization frequency": 2,
+    "continuous level set": {
+      "enable": true
+    },
+    "reinitialization interface": "advected_points",
+    "advected points": {
+      "unresolved cells": "subcell_distance"
+    }
+  },
+  "reinitialization": {
+    "type": "elliptic",
+    "linear solver": {
+      "solver type": "CG",
+      "preconditioner type": "ILU",
+      "max iterations": 1000,
+      "rel tolerance": 1e-08,
+      "abs tolerance": 1e-20,
+      "do matrix free": true
+    },
+    "elliptic": {
+      "intersected cells only": true,
+      "penalty parameter": 10000.0,
+      "nlsolve": {
+        "max nonlinear iterations": 1000,
+        "residual tolerance": 1e-05,
+        "field correction tolerance": 1e-05,
+        "verbosity level": 0
+      }
+    }
+  }
+}
