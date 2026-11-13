@@ -47,6 +47,12 @@ namespace MeltPoolDG::LevelSet
    * NarrowBand::ActiveFEIndex::cut) and FE_Nothing elements (non-dominating) on all other cells,
    * i.e., the field is continuous across the faces between two cut cells. For a block vector, the
    * operator is applied to each block, e.g., to the components of a vector field.
+   *
+   * Optionally, a set of DoFs is constrained (set_constrained_dofs()): the operator then acts as
+   * $\begin{pmatrix} A_{II} & 0 \\ 0 & I \end{pmatrix}$, i.e., as the operator on the free DoFs
+   * $I$ and as the identity on the constrained DoFs, which remains symmetric and positive definite.
+   * The values of the constrained DoFs are prescribed by the right-hand side (elimination of
+   * inhomogeneous Dirichlet conditions without rebuilding the matrix-free data structures).
    */
   template <int dim, typename number>
   class NarrowBandContinuousMassOperator : public OperatorMatrixFree<dim, number>
@@ -118,6 +124,18 @@ namespace MeltPoolDG::LevelSet
     compute_inverse_diagonal_from_matrixfree(BlockVectorType &diagonal) const final;
 
     /**
+     * @brief Constrain the DoFs with nonzero entries in @p mask (locally owned entries): the
+     * operator acts as the identity on these DoFs and ignores their values on the free DoFs. The
+     * system matrix of matrix-based preconditioners is computed with @p matrix_constraints, which
+     * have to contain the constrained DoFs (locally relevant) as homogeneous constraints. Both
+     * pointers have to remain valid while the DoFs are constrained; call with nullptr to remove
+     * the constraints.
+     */
+    void
+    set_constrained_dofs(const VectorType                        *mask,
+                         const dealii::AffineConstraints<number> *matrix_constraints);
+
+    /**
      * @brief Return true, if the range of cell batches belongs to the cut cells.
      */
     bool
@@ -130,6 +148,12 @@ namespace MeltPoolDG::LevelSet
     create_cell_integrator() const;
 
   private:
+    /**
+     * @brief Apply the operator without the constrained DoFs.
+     */
+    void
+    vmult_unconstrained(VectorType &dst, const VectorType &src) const;
+
     /**
      * @brief Apply the cell contribution to the DoF values of @p phi (input: source values,
      * output: integrated values).
@@ -169,6 +193,13 @@ namespace MeltPoolDG::LevelSet
     /// Damping eta_K and interface penalty gamma_K per cell batch.
     dealii::AlignedVector<VectorizedArrayType> damping;
     dealii::AlignedVector<VectorizedArrayType> penalty;
+
+    /// Optional constrained DoFs (nonzero entries) and the constraints of the system matrix.
+    const VectorType                        *constrained_dof_mask = nullptr;
+    const dealii::AffineConstraints<number> *matrix_constraints   = nullptr;
+
+    /// Source vector with zero values on the constrained DoFs.
+    mutable VectorType src_free;
   };
 
   /**
@@ -208,6 +239,27 @@ namespace MeltPoolDG::LevelSet
    *   \boldsymbol{n}$ (positive for a circle with positive level-set values inside, as in
    *   MeltPoolDG). Since $\boldsymbol{n}_h$ is continuous, the volume integral is the weak
    *   divergence.
+   *
+   * Since $\psi_h$ is only defined on the cut cells, its zero level set is closed only if it does
+   * not leave $\Omega_\Gamma$. Where the DG level set jumps near a vertex of the boundary of
+   * $\Omega_\Gamma$, the projection may take the wrong sign at the nodes shared with a cell, which
+   * is not cut, so that the zero level set of $\psi_h$ cuts the corner of this cell. With the sign
+   * constraints (NarrowBandData::ContinuousLevelSet::sign_constraints), $\psi_h$ is required to
+   * have the sign $s_{K'}$ of each cell $K'$, which is not cut, on the closure of $K'$ (the signs
+   * of the semi-Lagrangian band, see compute()). After the projection, the regions of the cut
+   * cells shared with such cells (vertices, edges and faces) are checked for nodal values with
+   * $s_{K'} \psi_j \le 0$ and for sign changes between the nodes (on a lattice of $4p + 1$ points
+   * per direction). In a region with a violation, all nodal values are constrained (frozen), such
+   * that the next projection cannot change the region: to $\psi_j = s_{K'} \max(s_{K'} \psi_j, c
+   * h_K)$ (sign constraint offset $c$), and, if the sign still changes between the nodes, the
+   * nodal values in the interior of the region are raised to the smallest value $s_{K'} M$, $M =
+   * c h_K 2^k$, which removes the sign change, but at most to the maximum of the vertex values (for
+   * $p = 2$, this guarantees the sign by the nonnegative Bernstein coefficients). Then, the
+   * projection is solved again with these constraints (elimination in
+   * NarrowBandContinuousMassOperator). The check and the constrained projection are repeated at
+   * most five times. The constraints only change $\psi_h$ locally at the boundary of
+   * $\Omega_\Gamma$; the numbers of constrained nodal values, of constrained projections and of
+   * remaining violations are reported (verbosity level 1).
    *
    * The boundary of $\Omega_\Gamma$ (faces to cells, which are not cut) is a natural boundary in
    * all three problems. The curvature statistics (mean, minimum and maximum) at the quadrature
@@ -259,10 +311,18 @@ namespace MeltPoolDG::LevelSet
       number min_curvature  = 0.;
       number max_curvature  = 0.;
 
-      /// Number of iterations of the linear solvers.
+      /// Number of iterations of the linear solvers (projection: sum over the constrained
+      /// projections).
       unsigned int n_iterations_projection = 0;
       unsigned int n_iterations_normal     = 0;
       unsigned int n_iterations_curvature  = 0;
+
+      /// Sign constraints: number of constrained nodal values, number of projections with
+      /// constraints and number of remaining violations (nodal values or faces with the wrong
+      /// sign).
+      unsigned int n_sign_constrained_dofs  = 0;
+      unsigned int n_sign_constraint_solves = 0;
+      unsigned int n_sign_violations        = 0;
     };
 
     /**
@@ -306,9 +366,12 @@ namespace MeltPoolDG::LevelSet
      * level-set field on the cut cells.
      *
      * @param level_set_dg DG level-set field on the cut DoFHandler.
+     * @param cell_signs Signs (+1, -1, 0: unknown) of the cells, which are not cut, indexed by
+     * the active cell index (at least on the locally owned and ghost cells); required for the sign
+     * constraints.
      */
     void
-    compute(const VectorType &level_set_dg);
+    compute(const VectorType &level_set_dg, const std::vector<int> *cell_signs = nullptr);
 
     /**
      * @brief Continuous level-set field.
@@ -359,6 +422,28 @@ namespace MeltPoolDG::LevelSet
      */
     void
     project(const VectorType &level_set_dg);
+
+    /**
+     * @brief Sign constraints: set up the regions, in which the continuous level set has to have
+     * the sign of a cell, which is not cut, check the projection and repeat it with constraints.
+     */
+    void
+    enforce_sign_constraints(const std::vector<int> &cell_signs);
+
+    /**
+     * @brief Sign constraints: check the continuous level set in the regions and compute the
+     * required nodal values (maximum over all regions and processes) in @p required_positive and
+     * @p required_negative (magnitudes). Returns the number of violations (summed over all
+     * processes).
+     */
+    unsigned int
+    check_sign_constraints(VectorType &required_positive, VectorType &required_negative) const;
+
+    /**
+     * @brief Sign constraints: projection with the constrained nodal values.
+     */
+    void
+    project_with_sign_constraints();
 
     /**
      * @brief Maximum interface shift at the quadrature points of the DG interface.
@@ -443,6 +528,37 @@ namespace MeltPoolDG::LevelSet
 
     /// Diagnostics.
     Statistics statistics;
+
+    /// Sign constraints: region of a locally owned cut cell (vertex, edge or face), which is
+    /// shared with a cell, which is not cut, with the sign of this cell, the cell-local indices of
+    /// the nodes and the indices of the sample points in the region.
+    struct SignRegion
+    {
+      int                       sign = 0;
+      std::vector<unsigned int> dofs;
+      std::vector<unsigned int> samples;
+    };
+
+    /// Sign constraints: locally owned cut cell with its regions.
+    struct SignCell
+    {
+      std::vector<dealii::types::global_dof_index> dof_indices;
+      number                                       offset = 0.;
+      std::vector<SignRegion>                      regions;
+    };
+
+    /// Sign constraints: cut cells with regions, the sample points on the boundary of the unit
+    /// cell and the values of the shape functions at the sample points.
+    std::vector<SignCell>            sign_cells;
+    std::vector<dealii::Point<dim>>  sign_sample_points;
+    std::vector<std::vector<number>> sign_sample_shape_values;
+
+    /// Sign constraints: constrained DoFs (nonzero entries), prescribed values, right-hand side
+    /// of the constrained projection and constraints of the system matrix.
+    VectorType                        sign_mask;
+    VectorType                        sign_values;
+    VectorType                        rhs_constrained;
+    dealii::AffineConstraints<number> sign_matrix_constraints;
 
     /// DoFHandler and vector of the vector-valued output of the normal vector.
     mutable dealii::DoFHandler<dim> dof_handler_vector;

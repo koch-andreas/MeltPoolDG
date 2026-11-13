@@ -350,6 +350,15 @@ namespace MeltPoolDG::LevelSet
       /// level set. A value of zero results in the plain L2-projection.
       number interface_penalty = 100.0;
 
+      /// Enforce the signs of the cells, which are not cut, on the continuous level set, i.e., its
+      /// zero level set does not leave the cut cells (requires NarrowBandType::semi_lagrangian, see
+      /// NarrowBandContinuousLevelSet).
+      bool sign_constraints = false;
+
+      /// Magnitude c of the constrained nodal values s c h_K (s: sign of the adjacent cell, which
+      /// is not cut) relative to the cell size.
+      number sign_constraint_offset = 0.01;
+
       /// Linear solver of the projection.
       LinearSolverData<number> linear_solver;
     } continuous_level_set;

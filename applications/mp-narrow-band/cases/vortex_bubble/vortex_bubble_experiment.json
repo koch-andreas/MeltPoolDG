@@ -18,7 +18,7 @@
   "time stepping": {
     "start time": 0,
     "end time": 4,
-    "time step size": 0.005
+    "time step size": 0.01
   },
   "output": {
     "directory": "out_nb_T6_r6",

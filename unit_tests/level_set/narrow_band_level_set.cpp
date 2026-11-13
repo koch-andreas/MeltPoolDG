@@ -12,6 +12,8 @@
 #include <deal.II/dofs/dof_tools.h>
 
 #include <deal.II/fe/fe_dgq.h>
+#include <deal.II/fe/fe_q.h>
+#include <deal.II/fe/fe_values.h>
 #include <deal.II/fe/mapping_q.h>
 
 #include <deal.II/grid/grid_generator.h>
@@ -46,6 +48,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <tuple>
 #include <vector>
@@ -2717,6 +2720,145 @@ namespace MeltPoolDG::LevelSet
         .first.max_relative_interface_shift;
     };
     EXPECT_LT(shift(100.), 0.5 * shift(0.));
+  }
+
+  TEST(NarrowBandLevelSetTest, ContinuousLevelSetSignConstraints2D)
+  {
+    // Horizontal interface y = y_0 in the row of cut cells below the grid line y = 0 (h = 1/8). In
+    // the cut cell [0,h] x [-h,0], the DG level set is perturbed by a bilinear bump with the
+    // maximum 0.8h at the vertex V = (0,0), such that its zero level set reaches the face y = 0 to
+    // the cell above, which is not cut (negative). Without the sign constraints, the continuous
+    // level set is positive on a part of this face, i.e., its zero level set leaves the cut cells.
+    // With the sign constraints, it is negative on the faces to the cells above and positive on
+    // the faces to the cells below, and the continuous level set only changes near V.
+    constexpr unsigned int dim = 2;
+    const double           h   = 2. / 16.;
+    const double           y_0 = -0.3 * h;
+
+    const dealii::ScalarFunctionFromFunctionObject<dim> level_set_function(
+      [&](const dealii::Point<dim> &p) { return y_0 - p[1]; });
+    const auto cellwise_function = [&](const dealii::CellAccessor<dim, dim> &cell,
+                                       const dealii::Point<dim>             &p) {
+      const auto center = cell.center();
+      double     value  = y_0 - p[1];
+      if (center[0] > 0. and center[0] < h and center[1] > -h and center[1] < 0.)
+        value += 0.8 * h * (1. - p[0] / h) * (1. + p[1] / h);
+      return value;
+    };
+
+    struct Result
+    {
+      NarrowBandContinuousLevelSet<dim, number>::Statistics statistics;
+      unsigned int                                          n_violations = 0;
+      std::map<unsigned int, double>                        center_values;
+    };
+
+    const auto run = [&](const bool sign_constraints) {
+      dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
+      dealii::GridGenerator::hyper_cube(triangulation, -1., 1.);
+      triangulation.refine_global(4);
+
+      ScratchData<dim, dim, number> scratch_data(MPI_COMM_WORLD, 0, true);
+      scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
+
+      NarrowBandData<number> narrow_band_data;
+      narrow_band_data.type                                   = NarrowBandType::semi_lagrangian;
+      narrow_band_data.continuous_level_set.enable            = true;
+      narrow_band_data.continuous_level_set.sign_constraints  = sign_constraints;
+      narrow_band_data.continuous_level_set.interface_penalty = 100.;
+      narrow_band_data.continuous_level_set.linear_solver.rel_tolerance = 1e-13;
+      narrow_band_data.check_input_parameters(2);
+
+      ReinitializationData<number> reinit_data;
+      reinit_data.modeltype                       = ModelType::elliptic;
+      reinit_data.fe.type                         = FiniteElementType::FE_DGQ;
+      reinit_data.fe.degree                       = 2;
+      reinit_data.elliptic.intersected_cells_only = true;
+
+      NormalVectorData<number> normal_vector_data;
+      normal_vector_data.filter_parameter = 0.;
+      CurvatureData<number> curvature_data;
+      curvature_data.filter_parameter = 0.;
+
+      NarrowBandLevelSetOperation<dim, number> operation(
+        scratch_data,
+        triangulation,
+        narrow_band_data,
+        reinit_data,
+        2,
+        std::make_shared<dealii::Functions::ZeroFunction<dim>>(dim),
+        &normal_vector_data,
+        &curvature_data);
+      operation.set_initial_condition(level_set_function, false, cellwise_function);
+
+      const auto *continuous_level_set = operation.get_continuous_level_set();
+      const auto &dof_handler          = continuous_level_set->get_dof_handler();
+      const auto &level_set            = continuous_level_set->get_level_set();
+      level_set.update_ghost_values();
+
+      Result result;
+      result.statistics = continuous_level_set->get_statistics();
+
+      // sign of the continuous level set on the faces to the cells, which are not cut
+      const dealii::FE_Q<dim>   fe(2);
+      dealii::FEFaceValues<dim> fe_face_values(scratch_data.get_mapping(),
+                                               fe,
+                                               dealii::QIterated<dim - 1>(dealii::QTrapezoid<1>(),
+                                                                          16),
+                                               dealii::update_values);
+      dealii::FEValues<dim>     fe_values(scratch_data.get_mapping(),
+                                      fe,
+                                      dealii::QMidpoint<dim>(),
+                                      dealii::update_values);
+      std::vector<double>       values(fe_face_values.n_quadrature_points);
+      std::vector<double>       center_value(1);
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+            continue;
+
+          for (const unsigned int face : cell->face_indices())
+            {
+              if (cell->at_boundary(face) or cell->neighbor(face)->get_fe().n_dofs_per_cell() > 0)
+                continue;
+
+              const double sign =
+                level_set_function.value(cell->neighbor(face)->center()) > 0. ? 1. : -1.;
+              fe_face_values.reinit(cell, face);
+              fe_face_values.get_function_values(level_set, values);
+              for (const double value : values)
+                if (sign * value < 0.)
+                  ++result.n_violations;
+            }
+
+          fe_values.reinit(cell);
+          fe_values.get_function_values(level_set, center_value);
+          if (cell->center().distance(dealii::Point<dim>()) > 3. * h)
+            result.center_values[cell->active_cell_index()] = center_value[0];
+        }
+      result.n_violations = dealii::Utilities::MPI::sum(result.n_violations, MPI_COMM_WORLD);
+      return result;
+    };
+
+    const Result without_constraints = run(false);
+    const Result with_constraints    = run(true);
+
+    EXPECT_GT(without_constraints.n_violations, 0U);
+    EXPECT_EQ(without_constraints.statistics.n_sign_constrained_dofs, 0U);
+
+    EXPECT_EQ(with_constraints.n_violations, 0U);
+    EXPECT_EQ(with_constraints.statistics.n_sign_violations, 0U);
+    EXPECT_GT(with_constraints.statistics.n_sign_constrained_dofs, 0U);
+    EXPECT_LE(with_constraints.statistics.n_sign_constrained_dofs, 6U);
+    EXPECT_GE(with_constraints.statistics.n_sign_constraint_solves, 1U);
+
+    // local change: cut cells farther than 3h from V
+    double max_change = 0.;
+    for (const auto &[index, value] : with_constraints.center_values)
+      max_change =
+        std::max(max_change, std::abs(value - without_constraints.center_values.at(index)));
+    max_change = dealii::Utilities::MPI::max(max_change, MPI_COMM_WORLD);
+    EXPECT_LT(max_change, 1e-3 * h);
   }
 
   TEST(NarrowBandLevelSetTest, BoundPreservingLimiter2D)

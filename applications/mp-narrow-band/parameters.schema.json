@@ -569,6 +569,17 @@
               "description": "Dimensionless factor c of the interface penalty gamma_K = c h_K (h_K: cell size), which pins the zero level set of the continuous level set to the zero level set of the DG level set in a least-squares sense. Since the DG level set is discontinuous, the interface may still move; the maximum shift is printed for verbosity level 1. Set to 0 for the plain L2-projection.",
               "default": 100.0
             },
+            "sign constraints": {
+              "type": "boolean",
+              "description": "Enforce the signs of the cells, which are not cut, on the continuous level set, such that its zero level set does not leave the cut cells (it may otherwise cut the corner of a neighboring cell, where the continuous level set is not defined, if the DG level set jumps near a vertex of the band boundary). If the continuous level set has the wrong sign (or zero) at a node or between the nodes (checked at 4p+1 points per direction) of a face, edge or vertex shared with a cell, which is not cut, all nodal values of this face, edge or vertex are constrained to their values with the sign s of this cell and at least the magnitude c h (c: 'sign constraint offset'; the interior nodal values are raised further, if the sign still changes between the nodes), and the projection is repeated (at most five times). The numbers of constrained nodal values and of projections are printed for verbosity level 1. Requires narrow band/type = semi_lagrangian.",
+              "default": false
+            },
+            "sign constraint offset": {
+              "type": "number",
+              "minimum": 0.0,
+              "description": "Magnitude c of the constrained nodal values s c h of the sign constraints relative to the cell size h.",
+              "default": 0.01
+            },
             "linear solver": {
               "type": "object",
               "properties": {

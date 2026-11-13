@@ -1,4 +1,5 @@
 #include <deal.II/base/exceptions.h>
+#include <deal.II/base/geometry_info.h>
 #include <deal.II/base/mpi.h>
 #include <deal.II/base/quadrature_lib.h>
 
@@ -25,6 +26,7 @@
 #include <meltpooldg/utilities/scoped_name.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iomanip>
 #include <limits>
@@ -128,6 +130,11 @@ namespace MeltPoolDG::LevelSet
       fe_point = std::make_unique<FE_Q<dim>>(fe.degree);
     n_dofs_per_cell = fe.n_dofs_per_cell();
 
+    // the constrained DoFs refer to the previous DoF layout
+    constrained_dof_mask = nullptr;
+    matrix_constraints   = nullptr;
+    scratch_data.initialize_dof_vector(src_free, this->dof_idx);
+
     // damping eta_K = c_eta h_K^2 (as in NormalVectorOperator and CurvatureOperator) and interface
     // penalty gamma_K = c_gamma h_K per cell batch
     const auto        &matrix_free    = scratch_data.get_matrix_free();
@@ -140,6 +147,19 @@ namespace MeltPoolDG::LevelSet
           scratch_data, this->dof_idx, cell, damping_factor);
         penalty[cell] = penalty_factor * scratch_data.get_cell_sizes()[cell];
       }
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandContinuousMassOperator<dim, number>::set_constrained_dofs(
+    const VectorType                        *mask,
+    const dealii::AffineConstraints<number> *matrix_constraints_in)
+  {
+    AssertThrow((mask == nullptr) == (matrix_constraints_in == nullptr),
+                ExcMessage("The mask of the constrained DoFs and the constraints of the system "
+                           "matrix have to be given together."));
+    constrained_dof_mask = mask;
+    matrix_constraints   = matrix_constraints_in;
   }
 
   template <int dim, typename number>
@@ -243,6 +263,33 @@ namespace MeltPoolDG::LevelSet
   void
   NarrowBandContinuousMassOperator<dim, number>::vmult(VectorType &dst, const VectorType &src) const
   {
+    if (constrained_dof_mask == nullptr)
+      {
+        vmult_unconstrained(dst, src);
+        return;
+      }
+
+    AssertDimension(constrained_dof_mask->locally_owned_size(), src.locally_owned_size());
+
+    // operator on the free DoFs (the constrained DoFs do not contribute) and identity on the
+    // constrained DoFs
+    src_free.copy_locally_owned_data_from(src);
+    for (unsigned int i = 0; i < src_free.locally_owned_size(); ++i)
+      if (constrained_dof_mask->local_element(i) != 0.)
+        src_free.local_element(i) = 0.;
+
+    vmult_unconstrained(dst, src_free);
+
+    for (unsigned int i = 0; i < dst.locally_owned_size(); ++i)
+      if (constrained_dof_mask->local_element(i) != 0.)
+        dst.local_element(i) = src.local_element(i);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandContinuousMassOperator<dim, number>::vmult_unconstrained(VectorType       &dst,
+                                                                     const VectorType &src) const
+  {
     scratch_data.get_matrix_free().template cell_loop<VectorType, VectorType>(
       [&](const auto &, auto &dst, const auto &src, const auto cell_range) {
         if (not is_cut_cell_range(cell_range))
@@ -286,9 +333,11 @@ namespace MeltPoolDG::LevelSet
     dealii::AlignedVector<VectorizedArrayType> penalty_buffer(n_dofs_per_cell);
 
     // Note: cells with FE_Nothing are skipped by MatrixFreeTools.
+    // With constrained DoFs, their rows and columns are eliminated (diagonal entries only).
     MatrixFreeTools::template compute_matrix<dim, -1, 0, 1, number, VectorizedArrayType>(
       scratch_data.get_matrix_free(),
-      scratch_data.get_constraint(this->dof_idx),
+      matrix_constraints != nullptr ? *matrix_constraints :
+                                      scratch_data.get_constraint(this->dof_idx),
       system_matrix,
       [&](FECellIntegrator<dim, 1, number> &phi) {
         cell_operation(phi, point_eval.get(), penalty_buffer);
@@ -296,6 +345,19 @@ namespace MeltPoolDG::LevelSet
       this->dof_idx,
       quad_idx,
       0 /*first selected component*/);
+
+    // identity on the constrained DoFs (as in vmult())
+    if (constrained_dof_mask != nullptr)
+      {
+        const auto &locally_owned_dofs = scratch_data.get_locally_owned_dofs(this->dof_idx);
+        for (unsigned int i = 0; i < constrained_dof_mask->locally_owned_size(); ++i)
+          if (constrained_dof_mask->local_element(i) != 0.)
+            {
+              const auto dof = locally_owned_dofs.nth_index_in_set(i);
+              system_matrix.set(dof, dof, 1.0);
+            }
+        system_matrix.compress(VectorOperation::insert);
+      }
   }
 
   template <int dim, typename number>
@@ -322,6 +384,12 @@ namespace MeltPoolDG::LevelSet
     const number linfty_norm = std::max<number>(1.0, diagonal.linfty_norm());
     for (auto &entry : diagonal)
       entry = (std::abs(entry) > 1.0e-14 * linfty_norm) ? (1.0 / entry) : 1.0;
+
+    // identity on the constrained DoFs
+    if (constrained_dof_mask != nullptr)
+      for (unsigned int i = 0; i < diagonal.locally_owned_size(); ++i)
+        if (constrained_dof_mask->local_element(i) != 0.)
+          diagonal.local_element(i) = 1.0;
   }
 
   template <int dim, typename number>
@@ -393,6 +461,42 @@ namespace MeltPoolDG::LevelSet
                              "narrow band are only implemented matrix-free. Set 'do matrix free' "
                              "to true."));
 
+    // sign constraints: sample points on the boundary of the unit cell (lattice with 4p
+    // subdivisions per direction, which contains the support points) and shape values
+    if (data.sign_constraints)
+      {
+        const unsigned int n_subdivisions = 4 * fe_degree;
+        const unsigned int n_points_1d    = n_subdivisions + 1;
+        unsigned int       n_points       = 1;
+        for (unsigned int d = 0; d < dim; ++d)
+          n_points *= n_points_1d;
+
+        for (unsigned int index = 0; index < n_points; ++index)
+          {
+            Point<dim>   point;
+            bool         on_boundary = false;
+            unsigned int rest        = index;
+            for (unsigned int d = 0; d < dim; ++d)
+              {
+                const unsigned int i = rest % n_points_1d;
+                rest /= n_points_1d;
+                point[d] = static_cast<double>(i) / n_subdivisions;
+                if (i == 0 or i == n_subdivisions)
+                  on_boundary = true;
+              }
+            if (on_boundary)
+              sign_sample_points.push_back(point);
+          }
+
+        sign_sample_shape_values.resize(sign_sample_points.size());
+        for (unsigned int q = 0; q < sign_sample_points.size(); ++q)
+          {
+            sign_sample_shape_values[q].resize(fe_point.n_dofs_per_cell());
+            for (unsigned int i = 0; i < fe_point.n_dofs_per_cell(); ++i)
+              sign_sample_shape_values[q][i] = fe_point.shape_value(i, sign_sample_points[q]);
+          }
+      }
+
     projection_preconditioner =
       make_preconditioner<dim, number, NarrowBandContinuousMassOperator<dim, number>, VectorType>(
         data.linear_solver.preconditioner_type,
@@ -450,6 +554,12 @@ namespace MeltPoolDG::LevelSet
     scratch_data.initialize_dof_vector(curvature, dof_idx);
     scratch_data.initialize_dof_vector(normal_vector, dof_idx);
     scratch_data.initialize_dof_vector(rhs_normal, dof_idx);
+    if (data.sign_constraints)
+      {
+        scratch_data.initialize_dof_vector(sign_mask, dof_idx);
+        scratch_data.initialize_dof_vector(sign_values, dof_idx);
+        scratch_data.initialize_dof_vector(rhs_constrained, dof_idx);
+      }
 
     projection_operator.reinit();
     normal_operator.reinit();
@@ -466,7 +576,8 @@ namespace MeltPoolDG::LevelSet
 
   template <int dim, typename number>
   void
-  NarrowBandContinuousLevelSet<dim, number>::compute(const VectorType &level_set_dg)
+  NarrowBandContinuousLevelSet<dim, number>::compute(const VectorType       &level_set_dg,
+                                                     const std::vector<int> *cell_signs)
   {
     ScopedName         sc("narrow_band::continuous_level_set");
     TimerOutput::Scope scope(scratch_data.get_timer(), sc);
@@ -474,6 +585,15 @@ namespace MeltPoolDG::LevelSet
     statistics = Statistics();
 
     project(level_set_dg);
+
+    if (data.sign_constraints)
+      {
+        AssertThrow(cell_signs != nullptr,
+                    ExcMessage("The sign constraints of the continuous level set require the "
+                               "signs of the cells, which are not cut."));
+        enforce_sign_constraints(*cell_signs);
+      }
+
     compute_interface_shift(level_set_dg);
 
     compute_normal_vector();
@@ -542,6 +662,311 @@ namespace MeltPoolDG::LevelSet
                                                                          "narrow_band_projection");
     constraints.distribute(level_set);
     level_set.update_ghost_values();
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandContinuousLevelSet<dim, number>::enforce_sign_constraints(
+    const std::vector<int> &cell_signs)
+  {
+    const auto &triangulation = dof_handler.get_triangulation();
+    AssertThrow(cell_signs.size() == triangulation.n_active_cells(),
+                ExcMessage("The cell signs have to be given for all active cells."));
+
+    // 1) regions: vertices, edges and faces of the locally owned cut cells, which are shared with
+    // a cell, which is not cut and has a known sign
+    std::vector<std::vector<typename DoFHandler<dim>::active_cell_iterator>> vertex_to_cells(
+      triangulation.n_vertices());
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      if (not cell->is_artificial())
+        for (const unsigned int v : cell->vertex_indices())
+          vertex_to_cells[cell->vertex_index(v)].push_back(cell);
+
+    const auto &unit_support_points = fe_point.get_unit_support_points();
+    const auto  is_in_region = [](const Point<dim> &point, const std::array<int, dim> &fixed) {
+      for (unsigned int d = 0; d < dim; ++d)
+        if (fixed[d] >= 0 and std::abs(point[d] - fixed[d]) > 1e-12)
+          return false;
+      return true;
+    };
+
+    sign_cells.clear();
+    std::vector<typename DoFHandler<dim>::active_cell_iterator> neighbors;
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or
+            cell->active_fe_index() != CutUtil::CellCategory::intersected)
+          continue;
+
+        neighbors.clear();
+        for (const unsigned int v : cell->vertex_indices())
+          for (const auto &other : vertex_to_cells[cell->vertex_index(v)])
+            if (other->active_fe_index() != CutUtil::CellCategory::intersected and
+                cell_signs[other->active_cell_index()] != 0 and
+                std::find(neighbors.begin(), neighbors.end(), other) == neighbors.end())
+              neighbors.push_back(other);
+
+        if (neighbors.empty())
+          continue;
+
+        SignCell sign_cell;
+        sign_cell.dof_indices.resize(fe_point.n_dofs_per_cell());
+        cell->get_dof_indices(sign_cell.dof_indices);
+        sign_cell.offset =
+          data.sign_constraint_offset * cell->diameter() / std::sqrt(static_cast<number>(dim));
+
+        for (const auto &neighbor : neighbors)
+          {
+            // shared region: the coordinates, in which all shared vertices agree, are fixed
+            std::array<int, dim> fixed;
+            fixed.fill(-2);
+            for (const unsigned int v : cell->vertex_indices())
+              {
+                bool is_shared = false;
+                for (const unsigned int w : neighbor->vertex_indices())
+                  if (neighbor->vertex_index(w) == cell->vertex_index(v))
+                    is_shared = true;
+                if (not is_shared)
+                  continue;
+
+                const Point<dim> vertex = GeometryInfo<dim>::unit_cell_vertex(v);
+                for (unsigned int d = 0; d < dim; ++d)
+                  {
+                    const int coordinate = static_cast<int>(std::round(vertex[d]));
+                    if (fixed[d] == -2)
+                      fixed[d] = coordinate;
+                    else if (fixed[d] != coordinate)
+                      fixed[d] = -1; // free coordinate
+                  }
+              }
+
+            SignRegion region;
+            region.sign = cell_signs[neighbor->active_cell_index()];
+            for (unsigned int i = 0; i < unit_support_points.size(); ++i)
+              if (is_in_region(unit_support_points[i], fixed))
+                region.dofs.push_back(i);
+            for (unsigned int q = 0; q < sign_sample_points.size(); ++q)
+              if (is_in_region(sign_sample_points[q], fixed))
+                region.samples.push_back(q);
+
+            if (not region.dofs.empty())
+              sign_cell.regions.push_back(std::move(region));
+          }
+
+        sign_cells.push_back(std::move(sign_cell));
+      }
+
+    // 2) check, constrain and project again
+    constexpr unsigned int max_iterations = 5;
+
+    VectorType required_positive, required_negative;
+    scratch_data.initialize_dof_vector(required_positive, dof_idx);
+    scratch_data.initialize_dof_vector(required_negative, dof_idx);
+
+    sign_mask           = 0.;
+    sign_values         = 0.;
+    const MPI_Comm comm = scratch_data.get_mpi_comm();
+    for (unsigned int iteration = 0;; ++iteration)
+      {
+        statistics.n_sign_violations = check_sign_constraints(required_positive, required_negative);
+        if (statistics.n_sign_violations == 0 or iteration == max_iterations)
+          break;
+
+        // new or raised constraints; conflicting signs (a vertex shared with cells of both signs)
+        // are constrained to zero
+        unsigned int n_changed = 0;
+        for (unsigned int i = 0; i < sign_mask.locally_owned_size(); ++i)
+          {
+            const number positive = required_positive.local_element(i);
+            const number negative = required_negative.local_element(i);
+            if (positive == 0. and negative == 0.)
+              continue;
+
+            const number value     = (positive > 0. and negative > 0.) ? 0. :
+                                     (positive > 0.)                   ? positive :
+                                                                         -negative;
+            number      &old_value = sign_values.local_element(i);
+            if (sign_mask.local_element(i) == 0.)
+              {
+                sign_mask.local_element(i) = 1.;
+                old_value                  = value;
+                ++n_changed;
+              }
+            else if (old_value * value < 0.)
+              {
+                old_value = 0.;
+                ++n_changed;
+              }
+            else if (std::abs(value) > std::abs(old_value) and old_value != 0.)
+              {
+                old_value = value;
+                ++n_changed;
+              }
+          }
+
+        if (Utilities::MPI::sum(n_changed, comm) == 0)
+          break;
+
+        project_with_sign_constraints();
+        ++statistics.n_sign_constraint_solves;
+      }
+
+    unsigned int n_constrained = 0;
+    for (unsigned int i = 0; i < sign_mask.locally_owned_size(); ++i)
+      if (sign_mask.local_element(i) != 0.)
+        ++n_constrained;
+    statistics.n_sign_constrained_dofs = Utilities::MPI::sum(n_constrained, comm);
+  }
+
+  template <int dim, typename number>
+  unsigned int
+  NarrowBandContinuousLevelSet<dim, number>::check_sign_constraints(
+    VectorType &required_positive,
+    VectorType &required_negative) const
+  {
+    required_positive = 0.;
+    required_negative = 0.;
+
+    const bool update_ghosts = not level_set.has_ghost_elements();
+    if (update_ghosts)
+      level_set.update_ghost_values();
+    sign_mask.update_ghost_values();
+
+    const unsigned int n_vertex_dofs =
+      GeometryInfo<dim>::vertices_per_cell * fe_point.n_dofs_per_vertex();
+
+    const auto require =
+      [&](const dealii::types::global_dof_index dof, const int sign, const number magnitude) {
+        number &entry = sign > 0 ? required_positive(dof) : required_negative(dof);
+        entry         = std::max(entry, magnitude);
+      };
+
+    std::vector<number> values(fe_point.n_dofs_per_cell());
+    std::vector<number> modified_values(fe_point.n_dofs_per_cell());
+    const auto evaluate = [&](const std::vector<number> &dof_values, const unsigned int q) {
+      number value = 0.;
+      for (unsigned int i = 0; i < dof_values.size(); ++i)
+        value += dof_values[i] * sign_sample_shape_values[q][i];
+      return value;
+    };
+
+    unsigned int n_violations = 0;
+    for (const auto &sign_cell : sign_cells)
+      {
+        for (unsigned int i = 0; i < values.size(); ++i)
+          values[i] = level_set(sign_cell.dof_indices[i]);
+
+        for (const auto &region : sign_cell.regions)
+          {
+            const int  s               = region.sign;
+            const auto has_sign_change = [&](const std::vector<number> &dof_values) {
+              for (const unsigned int q : region.samples)
+                if (s * evaluate(dof_values, q) < 0.)
+                  return true;
+              return false;
+            };
+
+            // violation: nodal values with the wrong sign (or zero), which are not constrained,
+            // or sign changes between the nodes of the region
+            bool has_violation = false;
+            for (const unsigned int i : region.dofs)
+              if (s * values[i] <= 0. and sign_mask(sign_cell.dof_indices[i]) == 0.)
+                has_violation = true;
+            if (not has_violation)
+              has_violation = has_sign_change(values);
+            if (not has_violation)
+              continue;
+            ++n_violations;
+
+            // all nodal values of the region are constrained (frozen), such that the next
+            // projection cannot change the region: nodal values with s psi_j < c h are set to
+            // s c h; if the sign still changes between the nodes, the nodal values in the interior
+            // of the region are raised to the smallest s M with M = c h 2^k, which removes the
+            // sign change, but at most to the maximum vertex value
+            modified_values = values;
+            for (const unsigned int i : region.dofs)
+              modified_values[i] = s * std::max(s * values[i], sign_cell.offset);
+
+            if (has_sign_change(modified_values))
+              {
+                number max_vertex_value = sign_cell.offset;
+                for (const unsigned int i : region.dofs)
+                  if (i < n_vertex_dofs)
+                    max_vertex_value = std::max(max_vertex_value, s * modified_values[i]);
+
+                const std::vector<number> nodal_values = modified_values;
+                for (number magnitude = 2. * sign_cell.offset;; magnitude *= 2.)
+                  {
+                    magnitude = std::min(magnitude, max_vertex_value);
+                    for (const unsigned int i : region.dofs)
+                      if (i >= n_vertex_dofs)
+                        modified_values[i] = s * std::max(s * nodal_values[i], magnitude);
+                    if (not has_sign_change(modified_values) or magnitude >= max_vertex_value)
+                      break;
+                  }
+              }
+
+            for (const unsigned int i : region.dofs)
+              require(sign_cell.dof_indices[i], s, s * modified_values[i]);
+          }
+      }
+
+    if (update_ghosts)
+      level_set.zero_out_ghost_values();
+    sign_mask.zero_out_ghost_values();
+
+    required_positive.compress(VectorOperation::max);
+    required_negative.compress(VectorOperation::max);
+
+    return Utilities::MPI::sum(n_violations, scratch_data.get_mpi_comm());
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandContinuousLevelSet<dim, number>::project_with_sign_constraints()
+  {
+    // homogeneous constraints of the constrained DoFs for the system matrix of the preconditioner
+    // (the DoFs of the locally owned cut cells: locally owned and ghost entries of the vector)
+    sign_mask.update_ghost_values();
+    sign_matrix_constraints.clear();
+    sign_matrix_constraints.reinit(dof_handler.locally_owned_dofs(),
+                                   DoFTools::extract_locally_relevant_dofs(dof_handler));
+    DoFTools::make_hanging_node_constraints(dof_handler, sign_matrix_constraints);
+    for (const IndexSet &dofs :
+         {sign_mask.locally_owned_elements(), sign_mask.get_partitioner()->ghost_indices()})
+      for (const auto dof : dofs)
+        if (sign_mask(dof) != 0. and not sign_matrix_constraints.is_constrained(dof))
+          sign_matrix_constraints.constrain_dof_to_zero(dof);
+    sign_matrix_constraints.close();
+    sign_mask.zero_out_ghost_values();
+
+    // right-hand side: b - A g on the free DoFs and the prescribed values g on the constrained
+    // DoFs, where rhs still contains b of project()
+    projection_operator.set_constrained_dofs(nullptr, nullptr);
+    sign_values.zero_out_ghost_values();
+    projection_operator.vmult(rhs_constrained, sign_values);
+    rhs_constrained.sadd(-1., 1., rhs);
+    for (unsigned int i = 0; i < rhs_constrained.locally_owned_size(); ++i)
+      if (sign_mask.local_element(i) != 0.)
+        rhs_constrained.local_element(i) = sign_values.local_element(i);
+
+    projection_operator.set_constrained_dofs(&sign_mask, &sign_matrix_constraints);
+    projection_preconditioner.set_do_update_preconditioner(true);
+    projection_preconditioner.update();
+
+    level_set.zero_out_ghost_values();
+    level_set = 0.;
+    statistics.n_iterations_projection +=
+      LinearSolver::solve<VectorType>(projection_operator,
+                                      level_set,
+                                      rhs_constrained,
+                                      data.linear_solver,
+                                      projection_preconditioner,
+                                      "narrow_band_projection_sign_constraints");
+    constraints.distribute(level_set);
+    level_set.update_ghost_values();
+
+    projection_operator.set_constrained_dofs(nullptr, nullptr);
   }
 
   template <int dim, typename number>
@@ -786,6 +1211,20 @@ namespace MeltPoolDG::LevelSet
         str << "/" << statistics.n_iterations_curvature;
       Journal::print_line(pcout, str.str(), "narrow_band");
     }
+
+    if (data.sign_constraints)
+      {
+        std::ostringstream str;
+        str << "sign constraints: " << statistics.n_sign_constrained_dofs << " nodal values, "
+            << statistics.n_sign_constraint_solves << " projections";
+        Journal::print_line(pcout, str.str(), "narrow_band");
+      }
+
+    if (data.sign_constraints and statistics.n_sign_violations > 0)
+      Journal::print_line(pcout,
+                          "Warning: " + std::to_string(statistics.n_sign_violations) +
+                            " sign violations of the continuous level set remain.",
+                          "narrow_band");
 
     if (curvature_data.enable)
       {

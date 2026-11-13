@@ -900,7 +900,7 @@ namespace MeltPoolDG::LevelSet
   NarrowBandLevelSetOperation<dim, number>::update_continuous_level_set()
   {
     if (continuous_level_set)
-      continuous_level_set->compute(level_set);
+      continuous_level_set->compute(level_set, is_semi_lagrangian() ? &cell_signs : nullptr);
   }
 
   template <int dim, typename number>

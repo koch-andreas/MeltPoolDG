@@ -348,6 +348,27 @@ namespace MeltPoolDG::LevelSet
           "interface may still move; the maximum shift is printed for verbosity level 1. Set to "
           "0 for the plain L2-projection.",
           dealii::Patterns::Double(0.0));
+        prm.add_parameter(
+          "sign constraints",
+          continuous_level_set.sign_constraints,
+          "Enforce the signs of the cells, which are not cut, on the continuous level set, such "
+          "that its zero level set does not leave the cut cells (it may otherwise cut the corner "
+          "of a neighboring cell, where the continuous level set is not defined, if the DG level "
+          "set jumps near a vertex of the band boundary). If the continuous level set has the "
+          "wrong sign (or zero) at a node or between the nodes (checked at 4p+1 points per "
+          "direction) of a face, edge or vertex shared with a cell, which is not cut, all nodal "
+          "values of this face, edge or vertex are constrained to their values with the sign s of "
+          "this cell and at least the magnitude c h (c: 'sign constraint offset'; the interior "
+          "nodal values are raised further, if the sign still changes between the nodes), and the "
+          "projection is repeated (at most five times). The numbers of constrained nodal values "
+          "and of projections are printed for verbosity level 1. Requires narrow band/type = "
+          "semi_lagrangian.");
+        prm.add_parameter(
+          "sign constraint offset",
+          continuous_level_set.sign_constraint_offset,
+          "Magnitude c of the constrained nodal values s c h of the sign constraints relative to "
+          "the cell size h.",
+          dealii::Patterns::Double(0.0));
         continuous_level_set.linear_solver.add_parameters(prm);
       }
       prm.leave_subsection();
@@ -433,6 +454,15 @@ namespace MeltPoolDG::LevelSet
                   continuous_level_set.linear_solver.do_matrix_free,
                 dealii::ExcMessage("The continuous level set of the narrow band is only "
                                    "implemented matrix-free. Set 'do matrix free' to true."));
+    AssertThrow(not continuous_level_set.enable or not continuous_level_set.sign_constraints or
+                  type == NarrowBandType::semi_lagrangian,
+                dealii::ExcMessage("The sign constraints of the continuous level set require the "
+                                   "signs of the cells, which are not cut, i.e., the "
+                                   "semi-Lagrangian narrow band (narrow band/type = "
+                                   "semi_lagrangian)."));
+    AssertThrow(not continuous_level_set.sign_constraints or
+                  continuous_level_set.sign_constraint_offset > 0.,
+                dealii::ExcMessage("The sign constraint offset must be positive."));
 
     AssertThrow(advection_limiter.cells == NarrowBandLimiterCells::none or
                   time_integrator.integrator_type ==
