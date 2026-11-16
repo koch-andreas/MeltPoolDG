@@ -24,18 +24,24 @@
   },
   "time stepping": {
     "start time": 0.0,
-    "end time": 3.0,
+    "end time": 1000.0,
     "time step size": 1.0
   },
   "output": {
     "do user defined postprocessing": true,
     "write frequency": 1,
     "paraview": {
-      "enable": false
+      "enable": true
     }
   },
   "narrow band": {
     "type": "semi_lagrangian",
+    "advected points": {
+      "unresolved cells": "subcell_distance",
+      "subcell subdivisions": 3,
+      "subcell buffer": 1.0,
+      "subcell coupling": "excluded"
+    },
     "reinitialization frequency": 1,
     "reinitialization faces": "interface_faces",
     "continuous level set": {

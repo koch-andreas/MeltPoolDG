@@ -3,6 +3,8 @@
 #include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/vectorization.h>
 
+#include <deal.II/dofs/dof_tools.h>
+
 #include <deal.II/fe/fe_nothing.h>
 #include <deal.II/fe/fe_values.h>
 
@@ -14,6 +16,7 @@
 #include <meltpooldg/level_set/reinitialization_elliptic_operator_fixed_point_intersected_cells.hpp>
 
 #include <algorithm>
+#include <array>
 
 namespace MeltPoolDG::LevelSet
 {
@@ -75,6 +78,83 @@ namespace MeltPoolDG::LevelSet
     const number p   = std::max<number>(1., fe_degree);
     interior_penalty = reinit_data.elliptic.interior_penalty_scaling_factor * p * p /
                        (scratch_data.get_min_cell_size() / p);
+
+    // the prescribed DoFs refer to the previous DoF layout
+    prescribed_mask = nullptr;
+    scratch_data.initialize_dof_vector(src_free, this->dof_idx);
+    scratch_data.initialize_dof_vector(prescribed_contribution, this->dof_idx);
+  }
+
+  template <int dim, typename number>
+  void
+  ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>::set_prescribed_dofs(
+    const VectorType *mask,
+    const VectorType *values,
+    const bool        couple)
+  {
+    prescribed_mask = mask;
+    prescribed_face_mask.clear();
+    if (mask == nullptr)
+      return;
+
+    AssertThrow(values != nullptr, ExcMessage("The values of the prescribed DoFs are missing."));
+    AssertDimension(mask->locally_owned_size(), values->locally_owned_size());
+
+    // values on the prescribed DoFs, zero on the other DoFs
+    scratch_data.initialize_dof_vector(prescribed_values, this->dof_idx);
+    for (unsigned int i = 0; i < prescribed_values.locally_owned_size(); ++i)
+      if (mask->local_element(i) != 0.)
+        prescribed_values.local_element(i) = values->local_element(i);
+
+    // homogeneous constraints of the prescribed DoFs for the system matrix: all locally relevant
+    // DoFs, since the face integrals with ghost cells couple all DoFs of these cells (the vectors
+    // of the matrix-free loops might only import the DoFs on the faces)
+    const auto    &dof_handler           = scratch_data.get_dof_handler(this->dof_idx);
+    const IndexSet locally_relevant_dofs = DoFTools::extract_locally_relevant_dofs(dof_handler);
+    VectorType     mask_relevant(dof_handler.locally_owned_dofs(),
+                             locally_relevant_dofs,
+                             dof_handler.get_mpi_communicator());
+    mask_relevant.copy_locally_owned_data_from(*mask);
+    mask_relevant.update_ghost_values();
+
+    prescribed_constraints.clear();
+    prescribed_constraints.reinit(dof_handler.locally_owned_dofs(), locally_relevant_dofs);
+    for (const auto dof : locally_relevant_dofs)
+      if (mask_relevant(dof) != 0.)
+        prescribed_constraints.constrain_dof_to_zero(dof);
+    prescribed_constraints.close();
+
+    // decoupled prescribed cells: no face terms between prescribed and other cells, i.e., natural
+    // boundary condition for the other cells at these faces
+    if (not couple)
+      {
+        const auto                                  &matrix_free = scratch_data.get_matrix_free();
+        std::vector<dealii::types::global_dof_index> dof_indices;
+        prescribed_face_mask.resize_fast(matrix_free.n_inner_face_batches());
+        for (unsigned int face = 0; face < matrix_free.n_inner_face_batches(); ++face)
+          {
+            prescribed_face_mask[face] = VectorizedArrayType(1.0);
+            if (not is_intersected_face_range(std::make_pair(face, face + 1)))
+              continue;
+
+            for (unsigned int lane = 0; lane < matrix_free.n_active_entries_per_face_batch(face);
+                 ++lane)
+              {
+                std::array<bool, 2> is_prescribed = {{false, false}};
+                for (const bool is_interior : {true, false})
+                  {
+                    const auto cell =
+                      matrix_free.get_face_iterator(face, lane, is_interior, this->dof_idx).first;
+                    dof_indices.resize(cell->get_fe().n_dofs_per_cell());
+                    cell->get_dof_indices(dof_indices);
+                    is_prescribed[is_interior ? 0 : 1] =
+                      not dof_indices.empty() and mask_relevant(dof_indices[0]) != 0.;
+                  }
+                if (is_prescribed[0] != is_prescribed[1])
+                  prescribed_face_mask[face][lane] = 0.0;
+              }
+          }
+      }
   }
 
   template <int dim, typename number>
@@ -189,11 +269,21 @@ namespace MeltPoolDG::LevelSet
   ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>::get_face_mask(
     const unsigned int face_batch) const
   {
-    if (not face_terms_on_interface_faces_only)
-      return VectorizedArrayType(1.0);
+    VectorizedArrayType mask(1.0);
+    if (face_terms_on_interface_faces_only)
+      {
+        AssertIndexRange(face_batch, face_mask.size());
+        mask = face_mask[face_batch];
+      }
 
-    AssertIndexRange(face_batch, face_mask.size());
-    return face_mask[face_batch];
+    // faces between prescribed and other cells (if the prescribed cells are decoupled)
+    if (prescribed_mask != nullptr and not prescribed_face_mask.empty())
+      {
+        AssertIndexRange(face_batch, prescribed_face_mask.size());
+        mask *= prescribed_face_mask[face_batch];
+      }
+
+    return mask;
   }
 
   template <int dim, typename number>
@@ -367,6 +457,33 @@ namespace MeltPoolDG::LevelSet
     VectorType       &dst,
     const VectorType &src) const
   {
+    if (prescribed_mask == nullptr)
+      {
+        vmult_unconstrained(dst, src);
+        return;
+      }
+
+    // operator on the other DoFs (the prescribed DoFs do not contribute) and identity on the
+    // prescribed DoFs
+    src_free.zero_out_ghost_values();
+    src_free.copy_locally_owned_data_from(src);
+    for (unsigned int i = 0; i < src_free.locally_owned_size(); ++i)
+      if (prescribed_mask->local_element(i) != 0.)
+        src_free.local_element(i) = 0.;
+
+    vmult_unconstrained(dst, src_free);
+
+    for (unsigned int i = 0; i < dst.locally_owned_size(); ++i)
+      if (prescribed_mask->local_element(i) != 0.)
+        dst.local_element(i) = src.local_element(i);
+  }
+
+  template <int dim, typename number>
+  void
+  ReinitializationEllipticOperatorFixedPointIntersectedCells<dim, number>::vmult_unconstrained(
+    VectorType       &dst,
+    const VectorType &src) const
+  {
     scratch_data.get_matrix_free().template loop<VectorType, VectorType>(
       [&](const auto &, auto &dst, const auto &src, const auto cell_range) {
         if (not is_intersected_cell_range(cell_range))
@@ -492,6 +609,18 @@ namespace MeltPoolDG::LevelSet
       dst,
       level_set_old,
       true /*zero dst vector*/);
+
+    // prescribed DoFs: their contribution to the other DoFs (SIPG face terms) is moved to the
+    // right-hand side, and their values are returned on the prescribed DoFs
+    if (prescribed_mask != nullptr)
+      {
+        prescribed_values.zero_out_ghost_values();
+        vmult_unconstrained(prescribed_contribution, prescribed_values);
+        dst -= prescribed_contribution;
+        for (unsigned int i = 0; i < dst.locally_owned_size(); ++i)
+          if (prescribed_mask->local_element(i) != 0.)
+            dst.local_element(i) = prescribed_values.local_element(i);
+      }
   }
 
   template <int dim, typename number>
@@ -501,7 +630,8 @@ namespace MeltPoolDG::LevelSet
   {
     system_matrix = 0.0;
 
-    // no constraints for the DG discretization
+    // no constraints for the DG discretization (except for the prescribed DoFs, whose rows and
+    // columns are eliminated)
     AffineConstraints<number> empty_constraints;
     empty_constraints.close();
 
@@ -511,7 +641,7 @@ namespace MeltPoolDG::LevelSet
     // Note: cells and faces of cells with FE_Nothing are skipped by MatrixFreeTools.
     MatrixFreeTools::template compute_matrix<dim, -1, 0, 1, number, VectorizedArrayType>(
       scratch_data.get_matrix_free(),
-      empty_constraints,
+      prescribed_mask != nullptr ? prescribed_constraints : empty_constraints,
       system_matrix,
       [&](FECellIntegrator<dim, 1, number> &phi) {
         lhs_cell_operation(phi, point_eval, penalty_buffer);
@@ -529,6 +659,19 @@ namespace MeltPoolDG::LevelSet
       this->dof_idx,
       reinit_quad_idx,
       0 /* first selected component */);
+
+    // identity on the prescribed DoFs (as in vmult())
+    if (prescribed_mask != nullptr)
+      {
+        const auto &locally_owned_dofs = scratch_data.get_locally_owned_dofs(this->dof_idx);
+        for (unsigned int i = 0; i < prescribed_mask->locally_owned_size(); ++i)
+          if (prescribed_mask->local_element(i) != 0.)
+            {
+              const auto dof = locally_owned_dofs.nth_index_in_set(i);
+              system_matrix.set(dof, dof, 1.0);
+            }
+        system_matrix.compress(VectorOperation::insert);
+      }
   }
 
   template <int dim, typename number>
@@ -566,6 +709,12 @@ namespace MeltPoolDG::LevelSet
     const number linfty_norm = std::max<number>(1.0, diagonal.linfty_norm());
     for (auto &entry : diagonal)
       entry = (std::abs(entry) > 1.0e-14 * linfty_norm) ? (1.0 / entry) : 1.0;
+
+    // identity on the prescribed DoFs
+    if (prescribed_mask != nullptr)
+      for (unsigned int i = 0; i < diagonal.locally_owned_size(); ++i)
+        if (prescribed_mask->local_element(i) != 0.)
+          diagonal.local_element(i) = 1.0;
   }
 
   template class ReinitializationEllipticOperatorFixedPointIntersectedCells<1, double>;

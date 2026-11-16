@@ -176,6 +176,21 @@ namespace MeltPoolDG::LevelSet
     void
     set_surface_quadrature_function(const SurfaceQuadratureFunction &function);
 
+    /**
+     * @brief Prescribe the values of the DoFs with nonzero entries in @p mask by @p values (see
+     * ReinitializationEllipticOperatorFixedPointIntersectedCells::set_prescribed_dofs()): the
+     * fixed-point iteration keeps these values, and the adjacent cells are coupled to them by the
+     * SIPG face terms (or, if @p couple is false, reinitialized with the natural boundary
+     * condition at the faces to the prescribed cells). The initial condition
+     * (set_initial_condition()) has to contain the prescribed values. Call with nullptr to remove
+     * the prescription.
+     *
+     * @note Requires the elliptic reinitialization on intersected cells only. Has to be called
+     * after reinit() and before set_initial_condition(), which updates the preconditioner.
+     */
+    void
+    set_prescribed_dofs(const VectorType *mask, const VectorType *values, const bool couple = true);
+
   private:
     /**
      * @brief Compute the quadrature rules for the immersed phase boundaries.

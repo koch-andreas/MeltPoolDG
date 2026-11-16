@@ -34,6 +34,7 @@
 #include <meltpooldg/level_set/narrow_band_advection_DG_operator.hpp>
 #include <meltpooldg/level_set/narrow_band_bound_preserving_limiter.hpp>
 #include <meltpooldg/level_set/narrow_band_closest_point_extension.hpp>
+#include <meltpooldg/level_set/narrow_band_continuous_reinitialization.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_interface_points.hpp>
@@ -832,6 +833,281 @@ namespace MeltPoolDG::LevelSet
     }
 
     /**
+     * Reinitialization of a scaled signed distance of a circle (radius 0.5, p = 2, cut cells of
+     * 16^2 cells on [-1,1]^2, penalty term at the zero level set) in the continuous level set space
+     * (NarrowBandContinuousReinitialization). Returns the maximum nodal error with respect to the
+     * signed distance on the cut cells, the maximum jump of the result between adjacent cut cells
+     * (continuity of the discontinuous storage) and the number of fixed-point iterations.
+     */
+    std::tuple<number, number, unsigned int>
+    test_continuous_reinitialization()
+    {
+      constexpr int      dim       = 2;
+      const unsigned int fe_degree = 2;
+
+      dealii::Point<dim> center;
+      center[0] = 0.031;
+      center[1] = -0.027;
+      const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, 0.5);
+      const dealii::ScalarFunctionFromFunctionObject<dim>  signed_distance(
+        [&](const dealii::Point<dim> &p) { return -sphere.value(p); });
+      const dealii::ScalarFunctionFromFunctionObject<dim> scaled_level_set(
+        [&](const dealii::Point<dim> &p) {
+          return (1. + 0.4 * p[0] + 0.2 * p[1]) * signed_distance.value(p);
+        });
+
+      NarrowBandFixture<dim> fixture(fe_degree, 4, fe_degree, &signed_distance);
+
+      ReinitializationData<number> reinit_data;
+      reinit_data.elliptic.penalty_parameter                  = 1e4;
+      reinit_data.elliptic.nlsolve.max_nonlinear_iterations   = 1000;
+      reinit_data.elliptic.nlsolve.residual_tolerance         = 1e-8;
+      reinit_data.elliptic.nlsolve.field_correction_tolerance = 1e-8;
+
+      VectorType level_set, level_set_exact;
+      fixture.initialize_vector(fixture.dof_handler_cut, level_set);
+      fixture.initialize_vector(fixture.dof_handler_cut, level_set_exact);
+      dealii::VectorTools::interpolate(fixture.mapping,
+                                       fixture.dof_handler_cut,
+                                       scaled_level_set,
+                                       level_set);
+      dealii::VectorTools::interpolate(fixture.mapping,
+                                       fixture.dof_handler_cut,
+                                       signed_distance,
+                                       level_set_exact);
+
+      const dealii::ConditionalOStream                  pcout(std::cout, false);
+      NarrowBandContinuousReinitialization<dim, number> continuous_reinitialization(
+        fixture.mapping,
+        fixture.triangulation,
+        reinit_data,
+        fe_degree,
+        fixture.fe_collection_cut,
+        pcout);
+      continuous_reinitialization.distribute_dofs(fixture.dof_handler_cut);
+      continuous_reinitialization.interpolate_from_discontinuous(fixture.dof_handler_cut,
+                                                                 level_set);
+      const auto statistics = continuous_reinitialization.reinitialize({}, false);
+      continuous_reinitialization.interpolate_to_discontinuous(fixture.dof_handler_cut, level_set);
+
+      number error = 0.;
+      for (unsigned int i = 0; i < level_set.locally_owned_size(); ++i)
+        error =
+          std::max<number>(error,
+                           std::abs(level_set.local_element(i) - level_set_exact.local_element(i)));
+      error = dealii::Utilities::MPI::max(error, MPI_COMM_WORLD);
+
+      // jump at the midpoints of the faces between locally owned cut cells
+      level_set.update_ghost_values();
+      number                 jump = 0.;
+      dealii::Vector<number> values, values_neighbor;
+      for (const auto &cell : fixture.dof_handler_cut.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+            continue;
+          values.reinit(cell->get_fe().n_dofs_per_cell());
+          cell->get_dof_values(level_set, values);
+          for (const unsigned int f : cell->face_indices())
+            {
+              if (cell->at_boundary(f))
+                continue;
+              const auto neighbor = cell->neighbor(f);
+              if (not neighbor->is_locally_owned() or neighbor->get_fe().n_dofs_per_cell() == 0)
+                continue;
+              values_neighbor.reinit(neighbor->get_fe().n_dofs_per_cell());
+              neighbor->get_dof_values(level_set, values_neighbor);
+              const dealii::Point<dim> x = cell->face(f)->center();
+              const auto p_cell          = fixture.mapping.transform_real_to_unit_cell(cell, x);
+              const auto p_neighbor      = fixture.mapping.transform_real_to_unit_cell(neighbor, x);
+              number     value = 0., value_neighbor = 0.;
+              for (unsigned int i = 0; i < values.size(); ++i)
+                {
+                  value += values[i] * cell->get_fe().shape_value(i, p_cell);
+                  value_neighbor +=
+                    values_neighbor[i] * neighbor->get_fe().shape_value(i, p_neighbor);
+                }
+              jump = std::max<number>(jump, std::abs(value - value_neighbor));
+            }
+        }
+      jump = dealii::Utilities::MPI::max(jump, MPI_COMM_WORLD);
+
+      return {error, jump, statistics.n_iterations};
+    }
+
+    /**
+     * Elliptic reinitialization on the cut cells of a circle with prescribed DoFs: the DoFs of
+     * the cut cells right of the center (x_0 > 0) are prescribed by the signed distance function,
+     * while the other cut cells start from the scaled signed distance function (same zero level
+     * set, |grad phi| != 1). The prescribed cells are coupled to the other cells by the SIPG face
+     * terms or decoupled (@p couple). Returns the maximum change of the prescribed DoFs, the
+     * maximum nodal error of the other DoFs with respect to the signed distance function with and
+     * without the prescription, and the maximum jump of the level set across the faces between
+     * prescribed and free cells (at the Gauss-Lobatto points).
+     */
+    template <int dim>
+    std::array<number, 4>
+    test_reinitialization_prescribed_dofs(const unsigned int fe_degree,
+                                          const unsigned int n_refinements,
+                                          const bool         couple)
+    {
+      dealii::Point<dim> center;
+      center[0] = 0.031;
+      center[1] = -0.027;
+      const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, 0.5);
+      const dealii::ScalarFunctionFromFunctionObject<dim>  signed_distance(
+        [&](const dealii::Point<dim> &p) { return -sphere.value(p); });
+      const dealii::ScalarFunctionFromFunctionObject<dim> scaled_level_set(
+        [&](const dealii::Point<dim> &p) {
+          return (1. + 0.4 * p[0] + 0.2 * p[1]) * signed_distance.value(p);
+        });
+
+      NarrowBandFixture<dim> fixture(fe_degree, n_refinements, fe_degree, &signed_distance);
+      MatrixFreeFixture<dim> matrix_free_fixture(fixture);
+      auto                  &scratch_data = matrix_free_fixture.scratch_data;
+      const unsigned int     cut_dof_idx  = matrix_free_fixture.band_dof_idx + 1;
+
+      ReinitializationData<number> reinit_data;
+      reinit_data.modeltype                                   = ModelType::elliptic;
+      reinit_data.fe.type                                     = FiniteElementType::FE_DGQ;
+      reinit_data.fe.degree                                   = fe_degree;
+      reinit_data.elliptic.intersected_cells_only             = true;
+      reinit_data.elliptic.penalty_parameter                  = 1e4;
+      reinit_data.elliptic.nlsolve.max_nonlinear_iterations   = 1000;
+      reinit_data.elliptic.nlsolve.residual_tolerance         = 1e-8;
+      reinit_data.elliptic.nlsolve.field_correction_tolerance = 1e-8;
+      reinit_data.elliptic.nlsolve.verbosity_level            = 0;
+      reinit_data.linear_solver.solver_type                   = LinearSolverType::CG;
+      reinit_data.linear_solver.preconditioner_type           = PreconditionerType::ILU;
+      reinit_data.linear_solver.do_matrix_free                = true;
+      reinit_data.linear_solver.rel_tolerance                 = 1e-12;
+      reinit_data.linear_solver.abs_tolerance                 = 1e-20;
+      reinit_data.linear_solver.max_iterations                = 1000;
+
+      ReinitializationEllipticOperation<dim, number> reinit_operation(
+        scratch_data, reinit_data, cut_dof_idx, matrix_free_fixture.quad_idx, cut_dof_idx);
+      reinit_operation.reinit();
+
+      VectorType level_set, level_set_exact, mask;
+      scratch_data.initialize_dof_vector(level_set, cut_dof_idx);
+      scratch_data.initialize_dof_vector(level_set_exact, cut_dof_idx);
+      scratch_data.initialize_dof_vector(mask, cut_dof_idx);
+      dealii::VectorTools::interpolate(scratch_data.get_mapping(),
+                                       fixture.dof_handler_cut,
+                                       scaled_level_set,
+                                       level_set);
+      dealii::VectorTools::interpolate(scratch_data.get_mapping(),
+                                       fixture.dof_handler_cut,
+                                       signed_distance,
+                                       level_set_exact);
+
+      // without prescribed DoFs
+      reinit_operation.set_initial_condition(level_set);
+      reinit_operation.solve();
+      VectorType error_reference = reinit_operation.get_level_set();
+      error_reference -= level_set_exact;
+
+      // prescribed DoFs: cut cells right of the center
+      dealii::Vector<number> ones;
+      for (const auto &cell : fixture.dof_handler_cut.active_cell_iterators())
+        if (cell->is_locally_owned() and cell->get_fe().n_dofs_per_cell() > 0 and
+            cell->center()[0] > center[0])
+          {
+            ones.reinit(cell->get_fe().n_dofs_per_cell());
+            ones = 1.;
+            cell->set_dof_values(ones, mask);
+          }
+      for (unsigned int i = 0; i < level_set.locally_owned_size(); ++i)
+        if (mask.local_element(i) != 0.)
+          level_set.local_element(i) = level_set_exact.local_element(i);
+
+      reinit_operation.set_prescribed_dofs(&mask, &level_set, couple);
+      reinit_operation.set_initial_condition(level_set);
+      reinit_operation.solve();
+      reinit_operation.set_prescribed_dofs(nullptr, nullptr);
+
+      const VectorType &result            = reinit_operation.get_level_set();
+      number            change_prescribed = 0., error_free = 0., error_free_reference = 0.;
+      for (unsigned int i = 0; i < result.locally_owned_size(); ++i)
+        if (mask.local_element(i) != 0.)
+          change_prescribed =
+            std::max<number>(change_prescribed,
+                             std::abs(result.local_element(i) - level_set_exact.local_element(i)));
+        else
+          {
+            error_free = std::max<number>(error_free,
+                                          std::abs(result.local_element(i) -
+                                                   level_set_exact.local_element(i)));
+            error_free_reference =
+              std::max<number>(error_free_reference, std::abs(error_reference.local_element(i)));
+          }
+
+      // jump across the faces between prescribed and free cells (vectors with all locally
+      // relevant DoFs)
+      const dealii::IndexSet locally_relevant_dofs =
+        dealii::DoFTools::extract_locally_relevant_dofs(fixture.dof_handler_cut);
+      VectorType result_relevant(fixture.dof_handler_cut.locally_owned_dofs(),
+                                 locally_relevant_dofs,
+                                 MPI_COMM_WORLD);
+      VectorType mask_relevant(result_relevant);
+      result_relevant.copy_locally_owned_data_from(result);
+      mask_relevant.copy_locally_owned_data_from(mask);
+      result_relevant.update_ghost_values();
+      mask_relevant.update_ghost_values();
+      const dealii::FE_DGQ<dim>            fe(fe_degree);
+      const dealii::QGaussLobatto<dim - 1> face_quadrature(fe_degree + 2);
+      dealii::FEFaceValues<dim>            fe_face_values(scratch_data.get_mapping(),
+                                               fe,
+                                               face_quadrature,
+                                               dealii::update_values |
+                                                 dealii::update_quadrature_points);
+      dealii::FEFaceValues<dim>            fe_face_values_neighbor(scratch_data.get_mapping(),
+                                                        fe,
+                                                        face_quadrature,
+                                                        dealii::update_values |
+                                                          dealii::update_quadrature_points);
+      std::vector<number>                  values(face_quadrature.size()), values_neighbor(values);
+      dealii::Vector<number>               mask_values;
+      number                               max_jump = 0.;
+      for (const auto &cell : fixture.dof_handler_cut.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+            continue;
+          mask_values.reinit(cell->get_fe().n_dofs_per_cell());
+          cell->get_dof_values(mask_relevant, mask_values);
+          if (mask_values[0] == 0.)
+            continue;
+
+          for (const unsigned int face : cell->face_indices())
+            {
+              if (cell->at_boundary(face))
+                continue;
+              const auto neighbor = cell->neighbor(face);
+              if (neighbor->get_fe().n_dofs_per_cell() == 0)
+                continue;
+              mask_values.reinit(neighbor->get_fe().n_dofs_per_cell());
+              neighbor->get_dof_values(mask_relevant, mask_values);
+              if (mask_values[0] != 0.)
+                continue;
+
+              fe_face_values.reinit(cell, face);
+              fe_face_values_neighbor.reinit(neighbor, cell->neighbor_of_neighbor(face));
+              fe_face_values.get_function_values(result_relevant, values);
+              fe_face_values_neighbor.get_function_values(result_relevant, values_neighbor);
+              for (unsigned int q = 0; q < values.size(); ++q)
+                for (unsigned int r = 0; r < values.size(); ++r)
+                  if (fe_face_values.quadrature_point(q).distance(
+                        fe_face_values_neighbor.quadrature_point(r)) < 1e-12)
+                    max_jump = std::max<number>(max_jump, std::abs(values[q] - values_neighbor[r]));
+            }
+        }
+
+      return {{dealii::Utilities::MPI::max(change_prescribed, MPI_COMM_WORLD),
+               dealii::Utilities::MPI::max(error_free, MPI_COMM_WORLD),
+               dealii::Utilities::MPI::max(error_free_reference, MPI_COMM_WORLD),
+               dealii::Utilities::MPI::max(max_jump, MPI_COMM_WORLD)}};
+    }
+
+    /**
      * Activation of the neighbor cells depending on the volume fraction of the positive phase of
      * the cut cells. The level set phi(x) = (x_0 - a_0) (a_1 - x_0) on [-1,1]^dim with 8 cells
      * per direction is positive for a_0 < x_0 < a_1. The zero level set is located in the
@@ -1586,17 +1862,24 @@ namespace MeltPoolDG::LevelSet
     };
 
     /**
-     * Subcell distance of a thin strip of width 0.4 h (p = 2, 8^2 cells on [-1,1]^2, the strip in
-     * the middle of a row of cells): the points are seeded on the exact zero level set
-     * (interpolated on 64^2 cells), and both sides of the strip are unresolved. The reinitialized
-     * level set of the cut cells is replaced by -0.1 (strip lost), and the projection of the
-     * subcell distance restores both zeros in each cut cell.
+     * Subcell distance of a thin strip (p = 2, 8^2 cells on [-1,1]^2, h = 0.25), by default of
+     * width 0.4 h in the middle of a row of cells: the points are seeded on the exact zero level
+     * set (interpolated on 64^2 cells), and both sides of the strip are unresolved. The
+     * reinitialized level set of the cut cells is replaced by -0.1 (strip lost), and the
+     * projection of the subcell distance restores both zeros in each cut cell. The center and the
+     * width of the strip are given relative to h, and the projection optionally uses the
+     * orientation filter or the pinning penalty, or is computed in the continuous level set space
+     * (NarrowBandContinuousReinitialization, coupled projection on the projected cells).
      */
     SubcellDistanceResult
-    test_subcell_distance_strip()
+    test_subcell_distance_strip(const number relative_center    = 0.5,
+                                const number relative_width     = 0.4,
+                                const bool   orientation_filter = false,
+                                const number pinning_penalty    = 0.,
+                                const bool   continuous         = false)
     {
       constexpr int            dim = 2;
-      const number             h = 0.25, width = 0.4 * h, center = 0.5 * h;
+      const number             h = 0.25, width = relative_width * h, center = relative_center * h;
       const StripLevelSet<dim> strip(center, width);
 
       SubcellDistanceResult result;
@@ -1665,8 +1948,34 @@ namespace MeltPoolDG::LevelSet
       // reinitialized level set, which has lost the strip
       level_set_advected = level_set;
       level_set          = -0.1;
-      result.statistics  = interface_points.project_signed_distance(
-        coarse.mapping, coarse.dof_handler_cut, level_set_advected, level_set, 1., 4);
+      if (continuous)
+        {
+          const ReinitializationData<number>                reinit_data;
+          NarrowBandContinuousReinitialization<dim, number> continuous_reinitialization(
+            coarse.mapping,
+            coarse.triangulation,
+            reinit_data,
+            coarse.fe_degree,
+            coarse.fe_collection_cut,
+            pcout);
+          continuous_reinitialization.distribute_dofs(coarse.dof_handler_cut);
+          continuous_reinitialization.interpolate_from_discontinuous(coarse.dof_handler_cut,
+                                                                     level_set);
+          result.statistics = continuous_reinitialization.project_subcell_distance(
+            interface_points, coarse.dof_handler_cut, level_set_advected, 1., 4);
+          continuous_reinitialization.interpolate_to_discontinuous(coarse.dof_handler_cut,
+                                                                   level_set);
+        }
+      else
+        result.statistics = interface_points.project_signed_distance(coarse.mapping,
+                                                                     coarse.dof_handler_cut,
+                                                                     level_set_advected,
+                                                                     level_set,
+                                                                     1.,
+                                                                     4,
+                                                                     nullptr,
+                                                                     orientation_filter,
+                                                                     pinning_penalty);
       check_zeros(level_set, result.error_zeros_projected, result.min_n_zeros_projected);
 
       result.error_distance =
@@ -2588,6 +2897,25 @@ namespace MeltPoolDG::LevelSet
     EXPECT_LT(std::abs(deviation_advected_points), 0.2 * std::abs(deviation_zero_level_set));
   }
 
+  TEST(NarrowBandLevelSetTest, ReinitializationPrescribedDoFs2D)
+  {
+    // The prescribed DoFs keep their values, and the other cut cells are reinitialized with the
+    // same accuracy as without the prescription. The SIPG face terms couple them to the prescribed
+    // cells (small jumps across their common faces); without the coupling, the faces to the
+    // prescribed cells are a natural boundary of the other cells.
+    for (const bool couple : {true, false})
+      {
+        const auto [change_prescribed, error_free, error_free_reference, max_jump] =
+          test_reinitialization_prescribed_dofs<2>(2, 4, couple);
+
+        EXPECT_LT(change_prescribed, 1e-13);
+        EXPECT_LT(error_free, 1e-3);
+        EXPECT_LT(error_free, 2. * error_free_reference + 1e-6);
+        if (couple)
+          EXPECT_LT(max_jump, 1e-4);
+      }
+  }
+
   TEST(NarrowBandLevelSetTest, SubcellDistanceStrip2D)
   {
     const auto result = test_subcell_distance_strip();
@@ -2604,6 +2932,74 @@ namespace MeltPoolDG::LevelSet
     EXPECT_EQ(result.min_n_zeros_interpolated, 2U);
     EXPECT_EQ(result.min_n_zeros_projected, 2U);
     EXPECT_LT(result.error_zeros_projected, 0.05 * 0.25);
+  }
+
+  TEST(NarrowBandLevelSetTest, SubcellDistanceOrientationFilter2D)
+  {
+    // Strip of width 0.75 h, which contains the face y = 0 in the ratio 1:3: the sides of the strip
+    // lie in two rows of cells, and the medial axis lies inside the cells of the upper row. With
+    // all points, the kink of the distance on the medial axis shifts the zero of the upper cells;
+    // with the orientation filter, every cell only uses the points of its side (observed: 0.034 h
+    // and 0.0003 h).
+    const auto all_points = test_subcell_distance_strip(0.1875, 0.75, false);
+    const auto filtered   = test_subcell_distance_strip(0.1875, 0.75, true);
+
+    EXPECT_EQ(all_points.statistics.n_filtered_cells, 0U);
+    EXPECT_EQ(filtered.statistics.n_filtered_cells, filtered.statistics.n_cells);
+    EXPECT_EQ(filtered.min_n_zeros_projected, 1U);
+    EXPECT_GT(all_points.error_zeros_projected, 0.01 * 0.25);
+    EXPECT_LT(filtered.error_zeros_projected, 1e-3 * 0.25);
+  }
+
+  TEST(NarrowBandLevelSetTest, SubcellDistancePinned2D)
+  {
+    // Strip of width 0.75 h, whose sides lie in two rows of cells (see
+    // SubcellDistanceOrientationFilter2D): the distance to all points has its kink on the medial
+    // axis inside the cells of the upper row, and the pinning penalty keeps the zero of these
+    // cells on their points (observed: 0.034 h without and 0.00025 h with pinning).
+    const auto plain  = test_subcell_distance_strip(0.1875, 0.75, false, 0.);
+    const auto pinned = test_subcell_distance_strip(0.1875, 0.75, false, 1000.);
+
+    EXPECT_EQ(plain.statistics.n_pinned_cells, 0U);
+    EXPECT_EQ(pinned.statistics.n_pinned_cells, pinned.statistics.n_cells);
+    EXPECT_EQ(pinned.statistics.n_filtered_cells, 0U);
+    EXPECT_EQ(pinned.min_n_zeros_projected, 1U);
+    EXPECT_GT(plain.error_zeros_projected, 0.01 * 0.25);
+    EXPECT_LT(pinned.error_zeros_projected, 2e-3 * 0.25);
+
+    // strip of width 0.4 h inside one row of cells: every cut cell contains points of both
+    // orientations and is not pinned
+    const auto both_sides = test_subcell_distance_strip(0.5, 0.4, false, 1000.);
+    EXPECT_EQ(both_sides.statistics.n_cells, 8U);
+    EXPECT_EQ(both_sides.statistics.n_pinned_cells, 0U);
+    EXPECT_EQ(both_sides.min_n_zeros_projected, 2U);
+  }
+
+  TEST(NarrowBandLevelSetTest, SubcellDistanceContinuous2D)
+  {
+    // Subcell distance in the continuous level set space (coupled projection on the projected
+    // cells): the strip of width 0.4 h inside one row of cells keeps both zeros in every cut cell,
+    // and the strip of width 0.75 h, whose sides lie in two rows of cells, keeps one zero per cell
+    // (observed: 0.050 h and 0.047 h; discontinuous: 0.049 h and 0.034 h).
+    const auto one_row  = test_subcell_distance_strip(0.5, 0.4, false, 0., true);
+    const auto two_rows = test_subcell_distance_strip(0.1875, 0.75, false, 0., true);
+
+    EXPECT_EQ(one_row.statistics.n_cells, 8U);
+    EXPECT_EQ(one_row.min_n_zeros_projected, 2U);
+    EXPECT_LT(one_row.error_zeros_projected, 0.06 * 0.25);
+    EXPECT_EQ(two_rows.statistics.n_cells, 16U);
+    EXPECT_EQ(two_rows.min_n_zeros_projected, 1U);
+    EXPECT_LT(two_rows.error_zeros_projected, 0.06 * 0.25);
+  }
+
+  TEST(NarrowBandLevelSetTest, ContinuousReinitializationCircle2D)
+  {
+    // the continuous reinitialization recovers the signed distance from a scaled signed distance
+    // (observed: 2.9e-4) and the result is continuous across the faces between cut cells
+    const auto [error, jump, n_iterations] = test_continuous_reinitialization();
+    EXPECT_LT(error, 6e-4);
+    EXPECT_LT(jump, 1e-12);
+    EXPECT_GT(n_iterations, 1U);
   }
 
   TEST(NarrowBandLevelSetTest, LayeredBand2D)

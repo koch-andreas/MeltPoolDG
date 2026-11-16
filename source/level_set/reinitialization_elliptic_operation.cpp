@@ -414,6 +414,20 @@ namespace MeltPoolDG::LevelSet
   }
 
 
+  template <int dim, typename number>
+  void
+  ReinitializationEllipticOperation<dim, number>::set_prescribed_dofs(const VectorType *mask,
+                                                                      const VectorType *values,
+                                                                      const bool        couple)
+  {
+    AssertThrow(mask == nullptr or fixed_point_intersected_cells_operator,
+                ExcMessage("Prescribed DoFs require the elliptic reinitialization on intersected "
+                           "cells only (call reinit() first)."));
+
+    if (fixed_point_intersected_cells_operator)
+      fixed_point_intersected_cells_operator->set_prescribed_dofs(mask, values, couple);
+  }
+
   template class ReinitializationEllipticOperation<1, double>;
   template class ReinitializationEllipticOperation<2, double>;
   template class ReinitializationEllipticOperation<3, double>;

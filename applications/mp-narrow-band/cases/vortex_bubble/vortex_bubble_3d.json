@@ -36,7 +36,8 @@
     "reinitialization frequency": 2,
     "reinitialization interface": "advected_points",
     "advected points": {
-      "unresolved cells": "subcell_distance"
+      "unresolved cells": "subcell_distance",
+      "subcell coupling": "excluded"
     },
     "continuous level set": {
       "enable": false,

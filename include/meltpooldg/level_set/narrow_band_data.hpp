@@ -104,10 +104,31 @@ namespace MeltPoolDG::LevelSet
               // reinitialization with the zero level set of the advected level set in the penalty
               // term (cut cells without usable points)
               zero_level_set,
-              // after the reinitialization: L2-projection of the signed distance to the advected
-              // points evaluated at sub-cell quadrature points (see
+              // L2-projection of the signed distance to the advected points evaluated at
+              // sub-cell quadrature points (see
               // NarrowBandInterfacePoints::project_signed_distance())
               subcell_distance)
+
+  BETTER_ENUM(NarrowBandSubcellCoupling,
+              char,
+              // the projection replaces the reinitialized level set in the unresolved cells after
+              // the reinitialization
+              overwrite,
+              // the projection is computed before the reinitialization, which keeps it as
+              // prescribed values in the unresolved cells and couples the adjacent cells to them
+              // by the SIPG face terms
+              prescribed,
+              // as prescribed, but without the face terms between the projected and the other
+              // cells (natural boundary condition of the other cells at these faces)
+              excluded)
+
+  BETTER_ENUM(NarrowBandLevelSetSpace,
+              char,
+              // discontinuous level set (FE_DGQ) on the cut cells
+              discontinuous,
+              // continuous level set (FE_Q) on the cut cells: reinitialization and subcell distance
+              // in the continuous space (see NarrowBandContinuousReinitialization)
+              continuous)
 
   BETTER_ENUM(NarrowBandGhostPenaltyFaces,
               char,
@@ -298,6 +319,9 @@ namespace MeltPoolDG::LevelSet
     /// the gaps of the point set and merging in cells with too many points, see
     /// NarrowBandInterfacePoints). In the latter case, the zero level set is used in the cut
     /// cells without usable points.
+    /// Finite element space of the level set on the cut cells (semi-Lagrangian band).
+    NarrowBandLevelSetSpace level_set_space = NarrowBandLevelSetSpace::discontinuous;
+
     NarrowBandReinitializationInterface reinitialization_interface =
       NarrowBandReinitializationInterface::zero_level_set;
 
@@ -335,6 +359,18 @@ namespace MeltPoolDG::LevelSet
       /// Subcell distance: number of subdivisions per direction of the iterated Gauss quadrature
       /// of the L2-projection.
       unsigned int subcell_subdivisions = 4;
+
+      /// Subcell distance: coupling of the projected cells to the reinitialization of the other
+      /// cut cells.
+      NarrowBandSubcellCoupling subcell_coupling = NarrowBandSubcellCoupling::overwrite;
+
+      /// Subcell distance: in a cell, whose points all have the same orientation, the distance is
+      /// only computed to the points of this orientation (branch of the cell).
+      bool subcell_orientation_filter = false;
+
+      /// Subcell distance: dimensionless penalty parameter of the zero level set at the points of
+      /// a projected cell with one branch of the interface (pinned projection, zero: off).
+      number subcell_pinning_penalty = 0.;
     } advected_points;
 
     /// Continuous level-set field on the cut cells, which is computed after each time step by the

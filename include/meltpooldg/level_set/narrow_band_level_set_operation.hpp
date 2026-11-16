@@ -18,6 +18,7 @@
 #include <meltpooldg/level_set/narrow_band_bound_preserving_limiter.hpp>
 #include <meltpooldg/level_set/narrow_band_closest_point_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_continuous_level_set.hpp>
+#include <meltpooldg/level_set/narrow_band_continuous_reinitialization.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_interface_points.hpp>
@@ -304,6 +305,14 @@ namespace MeltPoolDG::LevelSet
     reinitialize();
 
     /**
+     * @brief Reinitialization and subcell distance in the continuous level set space (see
+     * NarrowBandContinuousReinitialization): the level set of the cut cells is interpolated into
+     * the continuous space, reinitialized there and interpolated back.
+     */
+    void
+    reinitialize_continuous();
+
+    /**
      * @brief Copy the level-set field of the cut cells to the band and extend it to the
      * neighbor cells (S2).
      */
@@ -417,6 +426,10 @@ namespace MeltPoolDG::LevelSet
 
     /// Elliptic reinitialization on the cut cells.
     std::unique_ptr<ReinitializationEllipticOperation<dim, number>> reinit_operation;
+
+    /// Reinitialization and subcell distance in the continuous level set space (optional, see
+    /// NarrowBandData::level_set_space).
+    std::unique_ptr<NarrowBandContinuousReinitialization<dim, number>> continuous_reinitialization;
 
     /// Ghost-penalty extension.
     const NarrowBandGhostPenaltyExtension<dim, number> ghost_penalty_extension;

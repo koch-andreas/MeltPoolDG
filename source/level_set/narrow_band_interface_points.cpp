@@ -43,7 +43,9 @@ namespace MeltPoolDG::LevelSet
      * NarrowBandInterfacePoints::signed_distance()), using the eight nearest points of @p tree. If
      * the closest point of the closest patch lies on its edge, i.e., @p x does not lie in front of
      * the patch (e.g., beyond the open end of a chain of points, whose cap has been removed), the
-     * side of the patch is not defined, and the sign is @p fallback_sign (if not zero).
+     * side of the patch is not defined, and the sign is @p fallback_sign (if not zero). If
+     * @p orientation is given, only the points with a normal vector n satisfying
+     * n . orientation > 0 are considered (distance to one branch of the interface).
      */
     template <int dim, typename number, typename TreeType>
     number
@@ -52,10 +54,19 @@ namespace MeltPoolDG::LevelSet
                                const TreeType                            &tree,
                                const std::vector<dealii::Tensor<1, dim>> &normals,
                                const std::vector<number>                 &weights,
-                               const double                               fallback_sign = 0.)
+                               const double                               fallback_sign = 0.,
+                               const dealii::Tensor<1, dim>              *orientation   = nullptr)
     {
       std::vector<std::pair<dealii::Point<dim>, unsigned int>> nearest;
-      tree.query(boost::geometry::index::nearest(x, 8), std::back_inserter(nearest));
+      if (orientation != nullptr)
+        tree.query(boost::geometry::index::nearest(x, 8) and
+                     boost::geometry::index::satisfies(
+                       [&](const std::pair<dealii::Point<dim>, unsigned int> &value) {
+                         return normals[value.second] * (*orientation) > 0.;
+                       }),
+                   std::back_inserter(nearest));
+      else
+        tree.query(boost::geometry::index::nearest(x, 8), std::back_inserter(nearest));
 
       double min_distance = std::numeric_limits<double>::max();
       double sign         = 0.;
@@ -667,13 +678,14 @@ namespace MeltPoolDG::LevelSet
 
   template <int dim, typename number>
   typename NarrowBandInterfacePoints<dim, number>::ProjectionStatistics
-  NarrowBandInterfacePoints<dim, number>::project_signed_distance(
+  NarrowBandInterfacePoints<dim, number>::for_each_unresolved_cell(
     const dealii::Mapping<dim>    &mapping,
     const dealii::DoFHandler<dim> &dof_handler,
     const VectorType              &level_set_advected,
-    VectorType                    &level_set,
     const double                   buffer,
-    const unsigned int             n_subdivisions) const
+    const unsigned int             n_subdivisions,
+    const bool                     orientation_filter,
+    const UnresolvedCellFunction  &function) const
   {
     Assert(located, dealii::ExcMessage("The points are not assigned to the cells."));
 
@@ -723,8 +735,7 @@ namespace MeltPoolDG::LevelSet
     };
 
     std::unique_ptr<dealii::FEValues<dim>> fe_values;
-    dealii::FullMatrix<double>             mass_matrix;
-    dealii::Vector<double>                 rhs, values_advected, values_new;
+    dealii::Vector<double>                 values_advected;
     std::vector<double>                    distances;
 
     for (const auto &cell : dof_handler.active_cell_iterators())
@@ -762,6 +773,34 @@ namespace MeltPoolDG::LevelSet
         values_advected.reinit(n_dofs);
         cell->get_dof_values(level_set_advected, values_advected);
 
+        // points of the cell with one orientation (pairwise n_i . n_j > 0), i.e., one branch of
+        // the interface in the cell
+        const auto &cell_points     = points_of_cell[cell->active_cell_index()];
+        bool        one_orientation = not cell_points.empty();
+        for (unsigned int i = 0; i < cell_points.size() and one_orientation; ++i)
+          for (unsigned int j = i + 1; j < cell_points.size(); ++j)
+            if (normals[cell_points[i]] * normals[cell_points[j]] <= 0.)
+              {
+                one_orientation = false;
+                break;
+              }
+
+        // orientation filter: the distance is only computed to the points of this orientation,
+        // i.e., to the branch of the interface in this cell, and not to a close branch of opposite
+        // orientation in a neighbor cell
+        std::optional<dealii::Tensor<1, dim>> orientation;
+        if (orientation_filter and one_orientation)
+          {
+            dealii::Tensor<1, dim> sum;
+            for (const unsigned int k : cell_points)
+              sum += normals[k];
+            if (sum.norm() > 0.)
+              {
+                orientation = sum / sum.norm();
+                ++statistics.n_filtered_cells;
+              }
+          }
+
         // signed distance at the quadrature points (sign of the advected level set beyond the
         // edges of the patches); sign check against the advected level set away from the points
         distances.resize(n_q_points);
@@ -779,7 +818,8 @@ namespace MeltPoolDG::LevelSet
                                                       normals,
                                                       weights,
                                                       advected > 0. ? 1. :
-                                                                      (advected < 0. ? -1. : 0.));
+                                                                      (advected < 0. ? -1. : 0.),
+                                                      orientation ? &*orientation : nullptr);
 
             if (std::abs(distances[q]) > sign_check_distance * h and advected * distances[q] < 0.)
               consistent = false;
@@ -791,21 +831,7 @@ namespace MeltPoolDG::LevelSet
             continue;
           }
 
-        // L2-projection onto the polynomials of the cell
-        mass_matrix.reinit(n_dofs, n_dofs);
-        rhs.reinit(n_dofs);
-        for (unsigned int q = 0; q < n_q_points; ++q)
-          for (unsigned int i = 0; i < n_dofs; ++i)
-            {
-              const double value_i = fe_values->shape_value(i, q) * fe_values->JxW(q);
-              rhs[i] += value_i * distances[q];
-              for (unsigned int j = 0; j < n_dofs; ++j)
-                mass_matrix(i, j) += value_i * fe_values->shape_value(j, q);
-            }
-        mass_matrix.gauss_jordan();
-        values_new.reinit(n_dofs);
-        mass_matrix.vmult(values_new, rhs);
-        cell->set_dof_values(values_new, level_set);
+        function(cell, *fe_values, distances, cell_points, one_orientation);
 
         ++statistics.n_cells;
       }
@@ -813,6 +839,88 @@ namespace MeltPoolDG::LevelSet
     statistics.n_cells = dealii::Utilities::MPI::sum(statistics.n_cells, mpi_comm);
     statistics.n_rejected_cells =
       dealii::Utilities::MPI::sum(statistics.n_rejected_cells, mpi_comm);
+    statistics.n_filtered_cells =
+      dealii::Utilities::MPI::sum(statistics.n_filtered_cells, mpi_comm);
+    return statistics;
+  }
+
+  template <int dim, typename number>
+  typename NarrowBandInterfacePoints<dim, number>::ProjectionStatistics
+  NarrowBandInterfacePoints<dim, number>::project_signed_distance(
+    const dealii::Mapping<dim>    &mapping,
+    const dealii::DoFHandler<dim> &dof_handler,
+    const VectorType              &level_set_advected,
+    VectorType                    &level_set,
+    const double                   buffer,
+    const unsigned int             n_subdivisions,
+    VectorType                    *projected_dofs,
+    const bool                     orientation_filter,
+    const double                   pinning_penalty) const
+  {
+    dealii::FullMatrix<double> mass_matrix;
+    dealii::Vector<double>     rhs, values_new;
+    unsigned int               n_pinned_cells = 0;
+
+    auto statistics = for_each_unresolved_cell(
+      mapping,
+      dof_handler,
+      level_set_advected,
+      buffer,
+      n_subdivisions,
+      orientation_filter,
+      [&](const typename dealii::DoFHandler<dim>::active_cell_iterator &cell,
+          const dealii::FEValues<dim>                                  &fe_values,
+          const std::vector<double>                                    &distances,
+          const std::vector<unsigned int>                              &cell_points,
+          const bool                                                    one_orientation) {
+        const auto        &fe         = cell->get_fe();
+        const unsigned int n_dofs     = fe.n_dofs_per_cell();
+        const unsigned int n_q_points = fe_values.n_quadrature_points;
+        const double       h          = cell->minimum_vertex_distance();
+
+        // L2-projection onto the polynomials of the cell
+        mass_matrix.reinit(n_dofs, n_dofs);
+        rhs.reinit(n_dofs);
+        for (unsigned int q = 0; q < n_q_points; ++q)
+          for (unsigned int i = 0; i < n_dofs; ++i)
+            {
+              const double value_i = fe_values.shape_value(i, q) * fe_values.JxW(q);
+              rhs[i] += value_i * distances[q];
+              for (unsigned int j = 0; j < n_dofs; ++j)
+                mass_matrix(i, j) += value_i * fe_values.shape_value(j, q);
+            }
+
+        // pinned projection: penalty c h sum_k w_k phi(x_k)^2 of the zero level set at the points
+        // of a cell with one branch of the interface
+        if (pinning_penalty > 0. and one_orientation)
+          {
+            std::vector<double> shape_values(n_dofs);
+            for (const unsigned int k : cell_points)
+              {
+                const auto   unit_point = mapping.transform_real_to_unit_cell(cell, points[k]);
+                const double factor     = pinning_penalty * h * weights[k];
+                for (unsigned int i = 0; i < n_dofs; ++i)
+                  shape_values[i] = fe.shape_value(i, unit_point);
+                for (unsigned int i = 0; i < n_dofs; ++i)
+                  for (unsigned int j = 0; j < n_dofs; ++j)
+                    mass_matrix(i, j) += factor * shape_values[i] * shape_values[j];
+              }
+            ++n_pinned_cells;
+          }
+
+        mass_matrix.gauss_jordan();
+        values_new.reinit(n_dofs);
+        mass_matrix.vmult(values_new, rhs);
+        cell->set_dof_values(values_new, level_set);
+        if (projected_dofs != nullptr)
+          {
+            values_new = 1.;
+            cell->set_dof_values(values_new, *projected_dofs);
+          }
+      });
+
+    statistics.n_pinned_cells =
+      dealii::Utilities::MPI::sum(n_pinned_cells, dof_handler.get_mpi_communicator());
     return statistics;
   }
 

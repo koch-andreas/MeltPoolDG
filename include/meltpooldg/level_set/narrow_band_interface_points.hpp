@@ -8,6 +8,7 @@
 
 #include <deal.II/dofs/dof_handler.h>
 
+#include <deal.II/fe/fe_values.h>
 #include <deal.II/fe/mapping.h>
 
 #include <deal.II/grid/tria.h>
@@ -64,10 +65,12 @@ namespace MeltPoolDG::LevelSet
    * filament or a sharp tip). In cut cells without usable points, the reinitialization uses the
    * zero level set of the advected level set as before. The points are kept and used again, once
    * they are separated by the flow. Only points with the same orientation are merged.
-   * Alternatively, the level set of the cut cells around unresolved points is replaced after the
-   * reinitialization by the L2-projection of the signed distance to all points evaluated at the
-   * subcell scale (project_signed_distance()), i.e., by an exact redistancing, which resolves the
-   * medial axis of a thin filament, and its best approximation by the polynomials of the cells.
+   * Alternatively, the level set of the cut cells around unresolved points is given by the
+   * L2-projection of the signed distance to all points evaluated at the subcell scale
+   * (project_signed_distance()), i.e., by an exact redistancing, which resolves the medial axis of
+   * a thin filament, and its best approximation by the polynomials of the cells. The projection
+   * is either prescribed in the reinitialization of the other cut cells or replaces the
+   * reinitialized level set (NarrowBandData::AdvectedPoints::subcell_coupling).
    *
    * The points of all processes are gathered on all processes (as the cut cells in the
    * semi-Lagrangian advection), and every process advects all points. A point on the common
@@ -195,6 +198,14 @@ namespace MeltPoolDG::LevelSet
       /// Number of unresolved cells, which keep their level set, since the projection would change
       /// the sign of the advected level set away from the points.
       unsigned int n_rejected_cells = 0;
+
+      /// Number of unresolved cells (projected or rejected), whose distance is only computed to
+      /// the points of the orientation of the cell (orientation filter).
+      unsigned int n_filtered_cells = 0;
+
+      /// Number of projected cells, whose projection is pinned to zero at the points of the cell
+      /// (pinning penalty).
+      unsigned int n_pinned_cells = 0;
     };
 
     /**
@@ -223,10 +234,37 @@ namespace MeltPoolDG::LevelSet
      * @param mapping Mapping.
      * @param dof_handler DoFHandler of the level set (FE_DGQ on the cut cells).
      * @param level_set_advected Advected level set before the reinitialization (sign check).
-     * @param level_set Reinitialized level set, which is modified on the projected cells.
+     * @param level_set Level set, which is modified on the projected cells (the reinitialized
+     * level set, or the advected level set, if the projected cells are prescribed in the
+     * reinitialization).
      * @param buffer Distance relative to the cell size, within which the cells around unresolved
      * points are projected.
      * @param n_subdivisions Number of subdivisions per direction of the quadrature.
+     * @param projected_dofs Optional mask of the DoFs of the projected cells (set to one on these
+     * DoFs, unchanged otherwise).
+     * @param orientation_filter If true, the distance in a cell, whose points all have the same
+     * orientation (pairwise $\boldsymbol{n}_i \cdot \boldsymbol{n}_j > 0$), is only computed to
+     * the points of this orientation, i.e., to the branch of the interface in this cell, and not to
+     * a close branch of opposite orientation in a neighbor cell (e.g., the other side of a narrow
+     * gap or of a thin filament, whose sides lie in different cells): the kink of the distance on
+     * the medial axis then lies on a face (jump of the level set) instead of inside the cell. Cells
+     * with points of both orientations or without points use all points. Since the level set
+     * between the branches then only represents the distance to the branch of each cell, the
+     * filter is only suited for interfaces at rest.
+     * @param pinning_penalty Dimensionless penalty parameter $c$ of the pinned projection (zero:
+     * plain L2-projection). In a cell, whose points all have the same orientation (one branch of
+     * the interface in the cell), the projection minimizes
+     * $\int_K (\phi - d)^2 \,\mathrm{d}x + c h \sum_k w_k \phi(\boldsymbol{x}_k)^2$, where the
+     * sum runs over the points $\boldsymbol{x}_k$ of the cell with the weights $w_k$ and $d$ is the
+     * signed distance to all points. The penalty keeps the zero level set of the cell on its
+     * points, while the distance to a close branch of opposite orientation in a neighbor cell
+     * (e.g., the other side of a narrow gap) still determines the level set away from the points,
+     * i.e., the kink of the distance on the medial axis only perturbs the level set away from the
+     * interface. Cells with points of both orientations or without points are not pinned, since the
+     * polynomials of the cell may not be able to vanish at the points of both branches (the
+     * penalty would then merge the branches). Since the penalty also keeps fragments of strongly
+     * stretched thin filaments, which the L2-projection would remove, the pinning is mainly suited
+     * for interfaces at rest or weakly deformed interfaces.
      */
     ProjectionStatistics
     project_signed_distance(const dealii::Mapping<dim>    &mapping,
@@ -234,7 +272,40 @@ namespace MeltPoolDG::LevelSet
                             const VectorType              &level_set_advected,
                             VectorType                    &level_set,
                             const double                   buffer,
-                            const unsigned int             n_subdivisions) const;
+                            const unsigned int             n_subdivisions,
+                            VectorType                    *projected_dofs     = nullptr,
+                            const bool                     orientation_filter = false,
+                            const double                   pinning_penalty    = 0.) const;
+
+    /**
+     * @brief Function called for each cell of the subcell distance (see for_each_unresolved_cell())
+     * with the cell, the FEValues of the iterated Gauss quadrature on the cell, the signed distance
+     * at its quadrature points, the indices of the points of the cell and whether all points of
+     * the cell have the same orientation.
+     */
+    using UnresolvedCellFunction =
+      std::function<void(const typename dealii::DoFHandler<dim>::active_cell_iterator &cell,
+                         const dealii::FEValues<dim>                                  &fe_values,
+                         const std::vector<double>                                    &distances,
+                         const std::vector<unsigned int>                              &cell_points,
+                         const bool one_orientation)>;
+
+    /**
+     * @brief Selection of the cells of the subcell distance and evaluation of the signed distance
+     * at the subcell scale (see project_signed_distance()), without the projection: @p function is
+     * called for each locally owned cell of @p dof_handler with DoFs, which is closer than
+     * @p buffer times the cell size to an unresolved point and passes the sign check against
+     * @p level_set_advected. This allows other projections of the signed distance, e.g., onto a
+     * continuous finite element space. The returned statistics do not contain pinned cells.
+     */
+    ProjectionStatistics
+    for_each_unresolved_cell(const dealii::Mapping<dim>    &mapping,
+                             const dealii::DoFHandler<dim> &dof_handler,
+                             const VectorType              &level_set_advected,
+                             const double                   buffer,
+                             const unsigned int             n_subdivisions,
+                             const bool                     orientation_filter,
+                             const UnresolvedCellFunction  &function) const;
 
     /**
      * @brief Signed distance of @p x to the interface represented by the points: each point is a

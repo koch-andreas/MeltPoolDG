@@ -4,6 +4,7 @@
 
 #include <deal.II/fe/fe_dgq.h>
 
+#include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/la_parallel_vector.h>
 #include <deal.II/lac/trilinos_sparse_matrix.h>
 
@@ -185,7 +186,34 @@ namespace MeltPoolDG::LevelSet
     std::pair<unsigned int, unsigned int>
     update_face_mask(const VectorType &level_set);
 
+    /**
+     * @brief Prescribe the values of a set of DoFs, e.g., of the cells, whose level set is
+     * computed by another method (subcell redistancing of the narrow band).
+     *
+     * The DoFs with nonzero entries in @p mask keep the values of @p values (locally owned
+     * entries, copied by this function): the operator acts as the identity on these DoFs and
+     * ignores their values on the other DoFs, and create_rhs() moves their contribution to the
+     * right-hand side of the other DoFs and returns their values on these DoFs. Since the DoFs of
+     * a cell are coupled to the adjacent cells only by the SIPG face terms, the prescribed cells
+     * act as weak Dirichlet data for the adjacent cells. Thus, the fixed-point iteration keeps the
+     * prescribed values, if its initial value contains them. The mask has to remain valid while
+     * the DoFs are prescribed; call with nullptr to remove the prescription. The prescription is
+     * removed by reinit().
+     *
+     * If @p couple is false, the face terms between prescribed and other cells are omitted, i.e.,
+     * the other cells are reinitialized with the natural boundary condition at these faces and are
+     * not influenced by the prescribed cells.
+     */
+    void
+    set_prescribed_dofs(const VectorType *mask, const VectorType *values, const bool couple = true);
+
   private:
+    /**
+     * @brief Apply the operator without the prescribed DoFs.
+     */
+    void
+    vmult_unconstrained(VectorType &dst, const VectorType &src) const;
+
     /**
      * @brief Check whether a range of cell batches belongs to the intersected cells.
      */
@@ -290,5 +318,20 @@ namespace MeltPoolDG::LevelSet
      */
     VectorizedArrayType
     get_face_mask(const unsigned int face_batch) const;
+
+    /// Prescribed DoFs (nonzero entries), their values (zero on the other DoFs) and the
+    /// homogeneous constraints of the prescribed DoFs for the system matrix.
+    const VectorType                 *prescribed_mask = nullptr;
+    VectorType                        prescribed_values;
+    dealii::AffineConstraints<number> prescribed_constraints;
+
+    /// Mask of the inner face batches for decoupled prescribed cells: 0 for faces between a
+    /// prescribed and another cell, 1 otherwise (empty: coupled).
+    dealii::AlignedVector<VectorizedArrayType> prescribed_face_mask;
+
+    /// Temporary vectors: source vector without the prescribed DoFs and contribution of the
+    /// prescribed DoFs to the right-hand side.
+    mutable VectorType src_free;
+    mutable VectorType prescribed_contribution;
   };
 } // namespace MeltPoolDG::LevelSet

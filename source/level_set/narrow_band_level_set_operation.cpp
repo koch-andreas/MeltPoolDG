@@ -127,6 +127,17 @@ namespace MeltPoolDG::LevelSet
           narrow_band_data.advected_points.support_tolerance);
       }
 
+    // reinitialization in the continuous level set space
+    if (narrow_band_data.level_set_space == NarrowBandLevelSetSpace::continuous)
+      continuous_reinitialization =
+        std::make_unique<NarrowBandContinuousReinitialization<dim, number>>(
+          scratch_data.get_mapping(),
+          triangulation,
+          reinit_data,
+          fe_degree,
+          fe_collection_cut,
+          scratch_data.get_pcout(1));
+
     // continuous level set on the cut cells: its DoFHandler is attached to the scratch data after
     // the band and the cut DoFHandler
     if (narrow_band_data.continuous_level_set.enable)
@@ -670,6 +681,12 @@ namespace MeltPoolDG::LevelSet
     ScopedName                 sc("narrow_band::reinitialize");
     dealii::TimerOutput::Scope scope(scratch_data.get_timer(), sc);
 
+    if (continuous_reinitialization)
+      {
+        reinitialize_continuous();
+        return;
+      }
+
     // interface penalty term: advected interface points (if they are assigned to the cells) or
     // the zero level set of the level set before the reinitialization
     if (interface_points and interface_points->is_located())
@@ -684,6 +701,9 @@ namespace MeltPoolDG::LevelSet
     const bool use_subcell_distance = interface_points and interface_points->is_located() and
                                       narrow_band_data.advected_points.unresolved_cells ==
                                         NarrowBandUnresolvedCells::subcell_distance;
+    const bool prescribe_subcell_distance =
+      use_subcell_distance and
+      narrow_band_data.advected_points.subcell_coupling != NarrowBandSubcellCoupling::overwrite;
     std::optional<VectorType> level_set_advected;
     if (use_subcell_distance)
       {
@@ -691,12 +711,55 @@ namespace MeltPoolDG::LevelSet
         level_set_advected->zero_out_ghost_values();
       }
 
+    // unresolved cells: L2-projection of the signed distance to the points at the subcell scale,
+    // either before the reinitialization (prescribed values of the reinitialization) or after it
+    // (replacing the reinitialized level set)
+    const auto project_subcell_distance = [&](VectorType *projected_dofs) {
+      const auto statistics = interface_points->project_signed_distance(
+        scratch_data.get_mapping(),
+        dof_handler_cut,
+        *level_set_advected,
+        level_set,
+        narrow_band_data.advected_points.subcell_buffer,
+        narrow_band_data.advected_points.subcell_subdivisions,
+        projected_dofs,
+        narrow_band_data.advected_points.subcell_orientation_filter,
+        narrow_band_data.advected_points.subcell_pinning_penalty);
+      if (statistics.n_cells + statistics.n_rejected_cells > 0)
+        Journal::print_line(scratch_data.get_pcout(1),
+                            "subcell distance: " + std::to_string(statistics.n_cells) +
+                              " unresolved cells projected, " +
+                              std::to_string(statistics.n_rejected_cells) +
+                              " rejected (sign check)" +
+                              (narrow_band_data.advected_points.subcell_orientation_filter ?
+                                 ", " + std::to_string(statistics.n_filtered_cells) +
+                                   " with orientation filter" :
+                                 std::string()) +
+                              (narrow_band_data.advected_points.subcell_pinning_penalty > 0. ?
+                                 ", " + std::to_string(statistics.n_pinned_cells) + " pinned" :
+                                 std::string()),
+                            "narrow_band");
+      return statistics.n_cells;
+    };
+
+    VectorType subcell_dofs;
+    if (prescribe_subcell_distance)
+      {
+        scratch_data.initialize_dof_vector(subcell_dofs, cut_dof_idx);
+        level_set.zero_out_ghost_values();
+        if (project_subcell_distance(&subcell_dofs) > 0)
+          reinit_operation->set_prescribed_dofs(&subcell_dofs,
+                                                &level_set,
+                                                narrow_band_data.advected_points.subcell_coupling ==
+                                                  NarrowBandSubcellCoupling::prescribed);
+      }
+
     reinit_operation->set_initial_condition(level_set);
 
     // Subcell distance: if most of the interface is unresolved, the penalty and the gradient terms
-    // of the reinitialization conflict in many cells, and the fixed-point iteration may not
-    // converge. These cells are replaced by the projection of the subcell distance anyway; outside
-    // of them, the advected level set is kept in this case.
+    // of the reinitialization may conflict in many cells, and the fixed-point iteration may not
+    // converge. Outside of the cells of the subcell distance, the advected level set is kept in
+    // this case.
     bool converged = true;
     if (use_subcell_distance)
       {
@@ -712,6 +775,9 @@ namespace MeltPoolDG::LevelSet
     else
       reinit_operation->solve();
 
+    if (prescribe_subcell_distance)
+      reinit_operation->set_prescribed_dofs(nullptr, nullptr);
+
     level_set.zero_out_ghost_values();
     if (converged)
       level_set.copy_locally_owned_data_from(reinit_operation->get_level_set());
@@ -721,24 +787,77 @@ namespace MeltPoolDG::LevelSet
                           "is kept outside of the cells of the subcell distance.",
                           "narrow_band");
 
-    // unresolved cells: L2-projection of the signed distance to the points at the subcell scale
-    if (use_subcell_distance)
-      {
-        const auto statistics = interface_points->project_signed_distance(
-          scratch_data.get_mapping(),
-          dof_handler_cut,
-          *level_set_advected,
-          level_set,
-          narrow_band_data.advected_points.subcell_buffer,
-          narrow_band_data.advected_points.subcell_subdivisions);
-        if (statistics.n_cells + statistics.n_rejected_cells > 0)
-          Journal::print_line(scratch_data.get_pcout(1),
-                              "subcell distance: " + std::to_string(statistics.n_cells) +
-                                " unresolved cells projected, " +
-                                std::to_string(statistics.n_rejected_cells) +
-                                " rejected (sign check)",
-                              "narrow_band");
-      }
+    if (use_subcell_distance and not prescribe_subcell_distance)
+      project_subcell_distance(nullptr);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::reinitialize_continuous()
+  {
+    auto &cg = *continuous_reinitialization;
+
+    level_set.zero_out_ghost_values();
+    cg.distribute_dofs(dof_handler_cut);
+    cg.interpolate_from_discontinuous(dof_handler_cut, level_set);
+
+    // interface penalty term: advected interface points or the zero level set
+    typename NarrowBandContinuousReinitialization<dim, number>::SurfaceQuadratureFunction
+      surface_quadrature_function;
+    if (interface_points and interface_points->is_located())
+      surface_quadrature_function =
+        [this](const typename dealii::Triangulation<dim>::cell_iterator &cell) {
+          return interface_points->get_surface_quadrature(cell);
+        };
+
+    const bool use_subcell_distance = interface_points and interface_points->is_located() and
+                                      narrow_band_data.advected_points.unresolved_cells ==
+                                        NarrowBandUnresolvedCells::subcell_distance;
+    const bool prescribe_subcell_distance =
+      use_subcell_distance and
+      narrow_band_data.advected_points.subcell_coupling == NarrowBandSubcellCoupling::prescribed;
+
+    const auto project = [&]() {
+      const auto statistics =
+        cg.project_subcell_distance(*interface_points,
+                                    dof_handler_cut,
+                                    level_set,
+                                    narrow_band_data.advected_points.subcell_buffer,
+                                    narrow_band_data.advected_points.subcell_subdivisions);
+      if (statistics.n_cells + statistics.n_rejected_cells > 0)
+        Journal::print_line(scratch_data.get_pcout(1),
+                            "subcell distance (continuous): " + std::to_string(statistics.n_cells) +
+                              " unresolved cells projected, " +
+                              std::to_string(statistics.n_rejected_cells) +
+                              " rejected (sign check)",
+                            "narrow_band");
+      return statistics.n_cells;
+    };
+
+    // Note: level_set holds the advected level set (sign check of the subcell distance) until it
+    // is overwritten at the end.
+    bool keep_prescribed_dofs = false;
+    if (prescribe_subcell_distance)
+      keep_prescribed_dofs = project() > 0;
+
+    const auto statistics = cg.reinitialize(surface_quadrature_function, keep_prescribed_dofs);
+
+    std::ostringstream str;
+    str << "continuous reinitialization: " << statistics.n_dofs << " DoFs, "
+        << statistics.n_iterations << " fixed-point iterations";
+    if (keep_prescribed_dofs)
+      str << ", " << statistics.n_prescribed_dofs << " prescribed DoFs";
+    Journal::print_line(scratch_data.get_pcout(1), str.str(), "narrow_band");
+    if (not statistics.converged)
+      Journal::print_line(scratch_data.get_pcout(0),
+                          "Warning: the continuous reinitialization did not converge; the level "
+                          "set before the reinitialization is kept.",
+                          "narrow_band");
+
+    if (use_subcell_distance and not prescribe_subcell_distance)
+      project();
+
+    cg.interpolate_to_discontinuous(dof_handler_cut, level_set);
   }
 
   template <int dim, typename number>

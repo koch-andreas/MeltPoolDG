@@ -248,6 +248,16 @@ namespace MeltPoolDG::LevelSet
         "between two cut cells, which are crossed by the interface (interface_faces). In the "
         "latter case, the cut cells are only coupled across the faces crossed by the interface.");
       prm.add_parameter(
+        "level set space",
+        level_set_space,
+        "Finite element space of the level set on the cut cells of the semi-Lagrangian band: "
+        "discontinuous (FE_DGQ) or continuous (FE_Q of the same degree, continuous across the "
+        "faces between cut cells). For the continuous space, the reinitialization (fixed-point "
+        "iteration without face terms, direct solver) and the subcell distance (L2-projection on "
+        "the union of the unresolved cells with natural boundary conditions) are computed in the "
+        "continuous space; the semi-Lagrangian step maps a continuous level set to a continuous "
+        "level set. The subcell coupling excluded is not available for the continuous space.");
+      prm.add_parameter(
         "reinitialization interface",
         reinitialization_interface,
         "Interface, at which the reinitialization on the cut cells enforces phi = 0 weakly by the "
@@ -298,8 +308,8 @@ namespace MeltPoolDG::LevelSet
           "'subcell buffer' times the cell size to an unresolved point. zero_level_set: the "
           "reinitialization uses the zero level set of the advected level set in the cut cells "
           "without usable points (and only the usable points in the other cut cells). "
-          "subcell_distance: after the reinitialization, the level set of these cells is replaced "
-          "by the L2-projection of the signed distance to the advected points (all points, "
+          "subcell_distance: the level set of these cells is given by the L2-projection of the "
+          "signed distance to the advected points (all points, "
           "evaluated at the points of an iterated Gauss quadrature with 'subcell subdivisions' "
           "subdivisions per direction; each point represents a flat patch of its weight with its "
           "normal vector), i.e., the reinitialization of these cells is replaced by an exact "
@@ -308,7 +318,8 @@ namespace MeltPoolDG::LevelSet
           "the signed distance takes the sign of the advected level set, and a cell keeps the "
           "reinitialized level set, if the signed distance has a different sign than the "
           "advected level set at a quadrature point farther than a quarter of the cell size from "
-          "the points (the points do not create new parts of the interface). Only used for "
+          "the points (the points do not create new parts of the interface); the coupling to the "
+          "reinitialization of the other cut cells is set by 'subcell coupling'. Only used for "
           "reinitialization interface = advected_points.");
         prm.add_parameter("subcell buffer",
                           advected_points.subcell_buffer,
@@ -320,6 +331,53 @@ namespace MeltPoolDG::LevelSet
                           "Number of subdivisions per direction of the iterated Gauss quadrature "
                           "of the L2-projection of the subcell distance.",
                           dealii::Patterns::Integer(1));
+        prm.add_parameter(
+          "subcell coupling",
+          advected_points.subcell_coupling,
+          "Coupling of the cells of the subcell distance to the reinitialization of the other cut "
+          "cells. overwrite: the projection replaces the reinitialized level set in these cells "
+          "after the reinitialization (the reinitialization is solved on all cut cells, and the "
+          "level set may jump at the faces between projected and reinitialized cells). "
+          "prescribed: the projection is computed before the reinitialization, which keeps it as "
+          "prescribed values in these cells, i.e., only the other cut cells are reinitialized, "
+          "and they are coupled to the projected cells by the SIPG face terms (weak Dirichlet "
+          "data). excluded: as prescribed, but without the face terms between projected and "
+          "reinitialized cells (natural boundary condition of the reinitialized cells at these "
+          "faces). With prescribed and excluded, the reinitialization does not contain the "
+          "conflicting terms of the unresolved cells and needs considerably fewer fixed-point "
+          "iterations; with prescribed, errors of the projection (e.g., remnants at the tips of "
+          "filaments) can spread into the adjacent cells.");
+        prm.add_parameter(
+          "subcell orientation filter",
+          advected_points.subcell_orientation_filter,
+          "If true, the subcell distance of a cell, whose points all have the same orientation "
+          "(pairwise n_i . n_j > 0), is only computed to the points of this orientation, i.e., to "
+          "the branch of the interface in this cell, and not to a close branch of opposite "
+          "orientation in a neighbor cell (e.g., the other side of a narrow gap or of a thin "
+          "filament, whose sides lie in different cells). The kink of the distance on the medial "
+          "axis then lies on the face between the cells (jump of the level set) instead of inside "
+          "a cell, where the polynomials cannot represent it. Cells with points of both "
+          "orientations (e.g., a thin filament inside the cell) or without points use all points. "
+          "Only recommended for interfaces at rest (e.g., close particles): for advected "
+          "interfaces, the semi-Lagrangian step evaluates the polynomials of the cells anywhere in "
+          "the cells, where the distance to one branch overestimates the magnitude of the level "
+          "set between the branches, so that thin filaments and gaps widen.");
+        prm.add_parameter(
+          "subcell pinning penalty",
+          advected_points.subcell_pinning_penalty,
+          "Dimensionless penalty parameter c of the pinned subcell projection (zero: plain "
+          "L2-projection). In a projected cell, whose points all have the same orientation (one "
+          "branch of the interface in the cell), the projection minimizes the L2-error to the "
+          "signed distance to all points plus c h sum_k w_k phi(x_k)^2 over the points x_k of the "
+          "cell with the weights w_k. The penalty keeps the zero level set of the cell on its "
+          "points, while the distance to a close branch of opposite orientation in a neighbor cell "
+          "(e.g., the other side of a narrow gap) still determines the level set away from the "
+          "points: the kink of the distance on the medial axis only perturbs the level set away "
+          "from the interface. Cells with points of both orientations are not pinned (the "
+          "polynomials may not vanish at the points of both branches). Recommended for interfaces "
+          "at rest or weakly deformed interfaces (e.g., close particles): for strongly stretched "
+          "thin filaments, the penalty also keeps fragments of filaments, which the L2-projection "
+          "would remove, so that small droplets and wiggles remain.");
       }
       prm.leave_subsection();
 
@@ -410,6 +468,21 @@ namespace MeltPoolDG::LevelSet
                     dealii::ExcMessage("The limiter and the artificial viscosity of the DG "
                                        "advection are not supported by the semi-Lagrangian "
                                        "narrow band."));
+      }
+
+    if (level_set_space == NarrowBandLevelSetSpace::continuous)
+      {
+        AssertThrow(type == NarrowBandType::semi_lagrangian,
+                    dealii::ExcMessage("The continuous level set space requires the "
+                                       "semi-Lagrangian narrow band."));
+        AssertThrow(advected_points.subcell_coupling != NarrowBandSubcellCoupling::excluded,
+                    dealii::ExcMessage("The subcell coupling excluded is not available for the "
+                                       "continuous level set space."));
+        AssertThrow(not advected_points.subcell_orientation_filter and
+                      advected_points.subcell_pinning_penalty == 0.,
+                    dealii::ExcMessage("The orientation filter and the pinning penalty of the "
+                                       "subcell distance are not available for the continuous "
+                                       "level set space."));
       }
 
     if (type == NarrowBandType::extension and
