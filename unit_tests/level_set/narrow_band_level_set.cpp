@@ -2884,6 +2884,62 @@ namespace MeltPoolDG::LevelSet
     EXPECT_LT(result.error_contraction, 0.01);
   }
 
+  TEST(NarrowBandLevelSetTest, InterfacePointsPerDirection2D)
+  {
+    // Seeding with n = 2 (p + 1 for p = 1) and n = 4 Gauss points per direction on the circle of
+    // radius 0.3 (16^2 cells): every piece of the interface in a cut cell gets n points, the sum
+    // of the weights is the length of the discrete interface in both cases (up to the accuracy of
+    // the surface quadratures, observed difference 5e-5), no point is inserted and no point is
+    // merged (at most 2 n points per cell in 2D), and every cut cell contains points.
+    constexpr int      dim    = 2;
+    const number       radius = 0.3;
+    dealii::Point<dim> center;
+    center[0] = 0.4;
+    const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, radius);
+
+    NarrowBandFixture<dim> fixture(1, 4, 1, &sphere);
+    VectorType             level_set, level_set_band;
+    fixture.initialize_vector(fixture.dof_handler_cut, level_set);
+    fixture.initialize_vector(fixture.dof_handler_band, level_set_band);
+    dealii::VectorTools::interpolate(fixture.mapping, fixture.dof_handler_cut, sphere, level_set);
+    dealii::VectorTools::interpolate(fixture.mapping,
+                                     fixture.dof_handler_band,
+                                     sphere,
+                                     level_set_band);
+    const std::vector<bool> is_cut_cell =
+      NarrowBand::compute_cut_cells(fixture.dof_handler_band, level_set_band, 1);
+
+    NarrowBandData<number> narrow_band_data;
+    EXPECT_EQ(narrow_band_data.advected_points.get_points_per_direction(1), 2U);
+    narrow_band_data.advected_points.points_per_direction = 4;
+    EXPECT_EQ(narrow_band_data.advected_points.get_points_per_direction(1), 4U);
+
+    const dealii::ConditionalOStream pcout(std::cout, false);
+    std::array<unsigned int, 2>      n_points{};
+    std::array<number, 2>            length{};
+    for (unsigned int k = 0; k < 2; ++k)
+      {
+        const unsigned int                     n = k == 0 ? 2 : 4;
+        NarrowBandInterfacePoints<dim, number> interface_points(pcout);
+        interface_points.seed(fixture.dof_handler_cut, level_set, n);
+        const auto statistics =
+          interface_points.locate(fixture.dof_handler_band, level_set_band, n, is_cut_cell);
+
+        EXPECT_EQ(statistics.n_inserted_points, 0U);
+        EXPECT_EQ(statistics.n_merged_points, 0U);
+        EXPECT_EQ(statistics.n_points_outside, 0U);
+        EXPECT_EQ(statistics.n_cut_cells_without_points, 0U);
+
+        n_points[k] = statistics.n_points;
+        for (const auto weight : interface_points.get_weights())
+          length[k] += weight;
+      }
+
+    EXPECT_EQ(n_points[1], 2 * n_points[0]);
+    EXPECT_NEAR(length[0], length[1], 1e-4);
+    EXPECT_NEAR(length[0], 2. * dealii::numbers::PI * radius, 0.03);
+  }
+
   TEST(NarrowBandLevelSetTest, ReinitializationAdvectedPoints2D)
   {
     const number deviation_zero_level_set = compute_rotating_circle_radial_deviation<2>(

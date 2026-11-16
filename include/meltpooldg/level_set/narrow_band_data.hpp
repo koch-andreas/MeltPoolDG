@@ -348,6 +348,22 @@ namespace MeltPoolDG::LevelSet
       /// cell size, are removed (parts of the interface, which the level set has lost).
       number support_tolerance = 0.2;
 
+      /// Number n of Gauss points per direction of the surface quadrature, at which the points are
+      /// seeded on the initial zero level set and inserted into gaps of the point set (0: n = p +
+      /// 1). It also sets the minimum distance h / n of an inserted point to all points and the
+      /// maximum number 2 n^(dim-1) of points per cell before merging.
+      unsigned int points_per_direction = 0;
+
+      /**
+       * @brief Number of Gauss points per direction of the interface points for the polynomial
+       * degree @p fe_degree of the level set (points_per_direction, or p + 1 if it is zero).
+       */
+      unsigned int
+      get_points_per_direction(const unsigned int fe_degree) const
+      {
+        return points_per_direction > 0 ? points_per_direction : fe_degree + 1;
+      }
+
       /// Treatment of the cut cells with unresolved points (points of opposite orientation closer
       /// than the unresolved distance) and of the cut cells within the buffer around them.
       NarrowBandUnresolvedCells unresolved_cells = NarrowBandUnresolvedCells::zero_level_set;

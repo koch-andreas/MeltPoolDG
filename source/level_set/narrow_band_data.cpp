@@ -268,11 +268,12 @@ namespace MeltPoolDG::LevelSet
         "normal vectors by Nanson's formula) independently of the interpolation of the level set "
         "(front tracking). Points outside of the band or with |phi| > 0.2 h are removed, the "
         "quadrature points of the zero level set of the advected level set phi, whose distance to "
-        "all points exceeds h / (p+1), are added, and in cells with more than 2 (p+1)^(dim-1) "
-        "points, the closest points are merged. Points with a point of opposite orientation "
-        "closer than 2 h (under-resolved interface) are not used. The cut cells are determined "
-        "from phi; in cut cells without usable points, the zero level set of phi is used. The "
-        "factors 0.2 and 2 are set in the subsection 'advected points'.");
+        "all points exceeds h / n, are added, and in cells with more than 2 n^(dim-1) points, the "
+        "closest points are merged (n Gauss points per direction, default p + 1). Points with a "
+        "point of opposite orientation closer than 2 h (under-resolved interface) are not used. "
+        "The cut cells are determined from phi; in cut cells without usable points, the zero "
+        "level set of phi is used. The factors 0.2 and 2 and the number n are set in the "
+        "subsection 'advected points'.");
       prm.add_parameter("reinitialization frequency",
                         reinitialization_frequency,
                         "Reinitialize the level-set field on the cut cells every n-th time step. "
@@ -301,6 +302,19 @@ namespace MeltPoolDG::LevelSet
           "this value times the cell size, are removed (parts of the interface, which the level "
           "set has lost). Only used for reinitialization interface = advected_points.",
           dealii::Patterns::Double(0.0));
+        prm.add_parameter(
+          "points per direction",
+          advected_points.points_per_direction,
+          "Number n of Gauss points per direction of the surface quadrature, at which the advected "
+          "interface points are seeded on the initial zero level set and inserted into gaps of the "
+          "point set (0: n = p + 1, i.e., p + 1 points per cut cell in 2D and (p + 1)^2 in 3D). It "
+          "also sets the minimum distance h / n of an inserted point to all points and the maximum "
+          "number 2 n^(dim-1) of points per cell, above which the closest points are merged. More "
+          "points cover small pieces of the interface in the cut cells (fewer cut cells, whose "
+          "penalty term falls back to the zero level set of the advected level set), pin the zero "
+          "level set more tightly between the points and shorten the patches of the subcell "
+          "distance, at a cost proportional to n^(dim-1). Only used for reinitialization interface "
+          "= advected_points.");
         prm.add_parameter(
           "unresolved cells",
           advected_points.unresolved_cells,

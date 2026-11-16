@@ -371,7 +371,10 @@ namespace MeltPoolDG::LevelSet
 
         // advected interface points: seeding on the initial zero level set
         if (interface_points)
-          interface_points->seed(dof_handler_cut, level_set, fe_degree + 1);
+          interface_points->seed(dof_handler_cut,
+                                 level_set,
+                                 narrow_band_data.advected_points.get_points_per_direction(
+                                   fe_degree));
 
         print_band_statistics();
         update_continuous_level_set();
@@ -383,7 +386,9 @@ namespace MeltPoolDG::LevelSet
 
     // advected interface points: seeding on the initial zero level set
     if (interface_points)
-      interface_points->seed(dof_handler_cut, level_set, fe_degree + 1);
+      interface_points->seed(dof_handler_cut,
+                             level_set,
+                             narrow_band_data.advected_points.get_points_per_direction(fe_degree));
 
     extend();
     update_continuous_level_set();
@@ -507,7 +512,11 @@ namespace MeltPoolDG::LevelSet
 
       // advected interface points: assignment to the cells, repair of the point set
       if (interface_points)
-        interface_points->locate(dof_handler_band, level_set_band, fe_degree + 1, is_cut_cell);
+        interface_points->locate(dof_handler_band,
+                                 level_set_band,
+                                 narrow_band_data.advected_points.get_points_per_direction(
+                                   fe_degree),
+                                 is_cut_cell);
       std::vector<bool> is_small_cut_cell_new =
         compute_small_cut_cells(is_cut_cell, volume_fractions);
 
