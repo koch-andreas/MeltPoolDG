@@ -935,6 +935,155 @@ namespace MeltPoolDG::LevelSet
     }
 
     /**
+     * Result of test_closed_interface().
+     */
+    template <int dim>
+    struct ClosedInterfaceResult
+    {
+      typename NarrowBandContinuousReinitialization<dim, number>::CorrectionStatistics statistics;
+
+      /// Minimum of s phi / h on the faces between the cut cells and the cells, which are not cut
+      /// (s: sign of the neighbor cell), at 21^(dim-1) points per face.
+      number min_value = std::numeric_limits<number>::max();
+
+      /// Maximum jump of the level set across the faces between cut cells.
+      number jump = 0.;
+
+      /// Maximum change of the level set at the nodes of the cut cells.
+      number max_change = 0.;
+    };
+
+    /**
+     * Closed-interface correction (NarrowBandContinuousReinitialization::close_interface()) of a
+     * perturbed plane: the cut cells are the layer 0 < x_{d-1} < 0.25 of 8^dim cells on
+     * [-1,1]^dim (zero level set x_{d-1} = 0.1), the cells below (above) the layer have the sign
+     * -1 (+1). The level set phi = x_{d-1} - 0.1 - a prod_{e < d-1} sin(2 pi x_e) of the cut
+     * cells leaves them through the faces to the cells above and below for a = 0.2 (open
+     * interface).
+     */
+    template <int dim>
+    ClosedInterfaceResult<dim>
+    test_closed_interface(const unsigned int fe_degree, const number amplitude)
+    {
+      const dealii::ScalarFunctionFromFunctionObject<dim> plane(
+        [](const dealii::Point<dim> &p) { return p[dim - 1] - 0.1; });
+      const dealii::ScalarFunctionFromFunctionObject<dim> perturbed_plane(
+        [&](const dealii::Point<dim> &p) {
+          number perturbation = amplitude;
+          for (unsigned int e = 0; e + 1 < dim; ++e)
+            perturbation *= std::sin(2. * dealii::numbers::PI * p[e]);
+          return p[dim - 1] - 0.1 - perturbation;
+        });
+
+      NarrowBandFixture<dim> fixture(fe_degree, 3, fe_degree, &plane);
+      const number           h = 0.25;
+
+      std::vector<int> cell_signs(fixture.triangulation.n_active_cells(), 0);
+      for (const auto &cell : fixture.triangulation.active_cell_iterators())
+        if (not cell->is_artificial())
+          cell_signs[cell->active_cell_index()] = plane.value(cell->center()) > 0. ? 1 : -1;
+
+      VectorType level_set, level_set_initial;
+      fixture.initialize_vector(fixture.dof_handler_cut, level_set);
+      dealii::VectorTools::interpolate(fixture.mapping,
+                                       fixture.dof_handler_cut,
+                                       perturbed_plane,
+                                       level_set);
+      level_set_initial = level_set;
+
+      const ReinitializationData<number>                reinit_data;
+      const dealii::ConditionalOStream                  pcout(std::cout, false);
+      NarrowBandContinuousReinitialization<dim, number> continuous_reinitialization(
+        fixture.mapping,
+        fixture.triangulation,
+        reinit_data,
+        fe_degree,
+        fixture.fe_collection_cut,
+        pcout);
+      continuous_reinitialization.distribute_dofs(fixture.dof_handler_cut);
+      continuous_reinitialization.interpolate_from_discontinuous(fixture.dof_handler_cut,
+                                                                 level_set);
+
+      ClosedInterfaceResult<dim> result;
+      result.statistics = continuous_reinitialization.close_interface(cell_signs, 0.01);
+      continuous_reinitialization.interpolate_to_discontinuous(fixture.dof_handler_cut, level_set);
+
+      for (unsigned int i = 0; i < level_set.locally_owned_size(); ++i)
+        result.max_change = std::max<number>(result.max_change,
+                                             std::abs(level_set.local_element(i) -
+                                                      level_set_initial.local_element(i)));
+
+      // s phi on the faces to the cells, which are not cut, and the jump across the faces between
+      // cut cells (locally owned and ghost neighbors)
+      level_set.update_ghost_values();
+      const unsigned int     n_points_1d = 21;
+      const unsigned int     n_points    = dealii::Utilities::pow(n_points_1d, dim - 1);
+      dealii::Vector<number> values, values_neighbor;
+      for (const auto &cell : fixture.dof_handler_cut.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+            continue;
+
+          const auto &fe = cell->get_fe();
+          values.reinit(fe.n_dofs_per_cell());
+          cell->get_dof_values(level_set, values);
+          for (const unsigned int f : cell->face_indices())
+            {
+              if (cell->at_boundary(f))
+                continue;
+
+              const auto neighbor = cell->neighbor(f);
+              const bool is_cut   = neighbor->get_fe().n_dofs_per_cell() > 0;
+              if (is_cut)
+                {
+                  values_neighbor.reinit(neighbor->get_fe().n_dofs_per_cell());
+                  neighbor->get_dof_values(level_set, values_neighbor);
+                }
+
+              for (unsigned int q = 0; q < n_points; ++q)
+                {
+                  // point on the face in unit coordinates of the cell
+                  dealii::Point<dim> unit_point;
+                  for (unsigned int d = 0, index = q; d < dim; ++d)
+                    if (d == f / 2)
+                      unit_point[d] = f % 2;
+                    else
+                      {
+                        unit_point[d] =
+                          static_cast<number>(index % n_points_1d) / (n_points_1d - 1);
+                        index /= n_points_1d;
+                      }
+
+                  number value = 0.;
+                  for (unsigned int i = 0; i < values.size(); ++i)
+                    value += values[i] * fe.shape_value(i, unit_point);
+
+                  if (is_cut)
+                    {
+                      const auto x = fixture.mapping.transform_unit_to_real_cell(cell, unit_point);
+                      const auto unit_point_neighbor =
+                        fixture.mapping.transform_real_to_unit_cell(neighbor, x);
+                      number value_neighbor = 0.;
+                      for (unsigned int i = 0; i < values_neighbor.size(); ++i)
+                        value_neighbor +=
+                          values_neighbor[i] * fe.shape_value(i, unit_point_neighbor);
+                      result.jump = std::max<number>(result.jump, std::abs(value - value_neighbor));
+                    }
+                  else
+                    result.min_value =
+                      std::min<number>(result.min_value,
+                                       cell_signs[neighbor->active_cell_index()] * value / h);
+                }
+            }
+        }
+
+      result.min_value  = dealii::Utilities::MPI::min(result.min_value, MPI_COMM_WORLD);
+      result.jump       = dealii::Utilities::MPI::max(result.jump, MPI_COMM_WORLD);
+      result.max_change = dealii::Utilities::MPI::max(result.max_change, MPI_COMM_WORLD);
+      return result;
+    }
+
+    /**
      * Elliptic reinitialization on the cut cells of a circle with prescribed DoFs: the DoFs of
      * the cut cells right of the center (x_0 > 0) are prescribed by the signed distance function,
      * while the other cut cells start from the scaled signed distance function (same zero level
@@ -1991,13 +2140,17 @@ namespace MeltPoolDG::LevelSet
      * Rotating circle (radius 0.3, center (0.4, 0), rigid rotation by a quarter turn in 25 time
      * steps, semi-Lagrangian band, p = 1, 32^2 cells on [-1,1]^2, reinitialization in every time
      * step) with the interface penalty term of the reinitialization at the zero level set or at
-     * the advected interface points. Returns the mean signed radial deviation int_Gamma_h (|x -
-     * c| - R) ds / |Gamma_h| of the discrete interface from the exact circle at the end.
+     * the advected interface points (new points from the level set given by @p point_insertion),
+     * in the level set space @p level_set_space (with the closed-interface correction for the
+     * continuous space). Returns the mean signed radial deviation int_Gamma_h (|x - c| - R) ds /
+     * |Gamma_h| of the discrete interface from the exact circle at the end.
      */
     template <int dim>
     number
     compute_rotating_circle_radial_deviation(
-      const NarrowBandReinitializationInterface reinitialization_interface)
+      const NarrowBandReinitializationInterface reinitialization_interface,
+      const NarrowBandLevelSetSpace  level_set_space = NarrowBandLevelSetSpace::discontinuous,
+      const NarrowBandPointInsertion point_insertion = NarrowBandPointInsertion::final_level_set)
     {
       const unsigned int fe_degree = 1;
       const number       radius    = 0.3;
@@ -2012,8 +2165,10 @@ namespace MeltPoolDG::LevelSet
       scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
 
       NarrowBandData<number> narrow_band_data;
-      narrow_band_data.type                       = NarrowBandType::semi_lagrangian;
-      narrow_band_data.reinitialization_interface = reinitialization_interface;
+      narrow_band_data.type                            = NarrowBandType::semi_lagrangian;
+      narrow_band_data.reinitialization_interface      = reinitialization_interface;
+      narrow_band_data.level_set_space                 = level_set_space;
+      narrow_band_data.advected_points.point_insertion = point_insertion;
 
       ReinitializationData<number> reinit_data;
       reinit_data.enable                                      = true;
@@ -2947,10 +3102,21 @@ namespace MeltPoolDG::LevelSet
     const number deviation_advected_points = compute_rotating_circle_radial_deviation<2>(
       NarrowBandReinitializationInterface::advected_points);
 
+    // insertion of new points from the advected level set (instead of the reinitialized level
+    // set), continuous level set space with the closed-interface correction
+    const number deviation_advected_insertion = compute_rotating_circle_radial_deviation<2>(
+      NarrowBandReinitializationInterface::advected_points,
+      NarrowBandLevelSetSpace::discontinuous,
+      NarrowBandPointInsertion::advected_level_set);
+    const number deviation_continuous = compute_rotating_circle_radial_deviation<2>(
+      NarrowBandReinitializationInterface::advected_points, NarrowBandLevelSetSpace::continuous);
+
     // p = 1: the interpolation of the advected signed distance function shrinks the circle; the
     // advected interface points remove this drift
     EXPECT_LT(deviation_zero_level_set, -1e-3);
     EXPECT_LT(std::abs(deviation_advected_points), 0.2 * std::abs(deviation_zero_level_set));
+    EXPECT_LT(std::abs(deviation_advected_insertion), 0.2 * std::abs(deviation_zero_level_set));
+    EXPECT_LT(std::abs(deviation_continuous), 0.2 * std::abs(deviation_zero_level_set));
   }
 
   TEST(NarrowBandLevelSetTest, ReinitializationPrescribedDoFs2D)
@@ -3056,6 +3222,201 @@ namespace MeltPoolDG::LevelSet
     EXPECT_LT(error, 6e-4);
     EXPECT_LT(jump, 1e-12);
     EXPECT_GT(n_iterations, 1U);
+  }
+
+  TEST(NarrowBandLevelSetTest, ClosedInterface)
+  {
+    // closed plane (a = 0): no correction, the level set on the faces to the cells above and below
+    // the layer of cut cells is at least 0.1 / h = 0.4 away from zero
+    for (const unsigned int fe_degree : {1U, 2U, 3U})
+      {
+        const auto result = test_closed_interface<2>(fe_degree, 0.);
+        EXPECT_EQ(result.statistics.n_faces, 16U);
+        EXPECT_EQ(result.statistics.n_clamped_dofs, 0U);
+        EXPECT_EQ(result.statistics.n_linearized_faces, 0U);
+        EXPECT_EQ(result.statistics.max_correction, 0.);
+        EXPECT_LT(result.max_change, 1e-14);
+        EXPECT_NEAR(result.min_value, 0.4, 1e-12);
+      }
+
+    // perturbed plane (a = 0.2): the interface leaves the cut cells through these faces; after
+    // the correction, the level set has the sign of the neighbor cell on the whole faces (observed
+    // minimum: the offset 0.01 h at the nodes) and is continuous; there are no conflicting nodes.
+    // The Bernstein test fails on faces, whose clamped nodes leave a dip between the nodes, which
+    // are then linearized (p >= 2). Maximum correction: 0.41 h (phi = 0.1 -> -0.01 h at the
+    // bottom faces). Observed numbers of clamped nodes and linearized faces (identical on 1 and 3
+    // processes): p = 1: 4, 0; p = 2: 8, 8; p = 3: 12, 8.
+    const std::array<std::array<unsigned int, 2>, 3> n_corrected{{{{4, 0}}, {{8, 8}}, {{12, 8}}}};
+    for (const unsigned int fe_degree : {1U, 2U, 3U})
+      {
+        const auto result = test_closed_interface<2>(fe_degree, 0.2);
+        EXPECT_EQ(result.statistics.n_faces, 16U);
+        EXPECT_EQ(result.statistics.n_clamped_dofs, n_corrected[fe_degree - 1][0]);
+        EXPECT_EQ(result.statistics.n_linearized_faces, n_corrected[fe_degree - 1][1]);
+        EXPECT_EQ(result.statistics.n_conflicting_dofs, 0U);
+        EXPECT_EQ(result.statistics.n_open_faces, 0U);
+        EXPECT_NEAR(result.statistics.max_correction, 0.41, 1e-10);
+        EXPECT_GT(result.min_value, 0.);
+        EXPECT_LT(result.jump, 1e-12);
+      }
+
+    // 3D (a = 0.2, p = 2): the nodes of the edges are shared by the faces of adjacent cells
+    // (observed: 80 clamped nodes, 64 linearized faces)
+    {
+      const auto result = test_closed_interface<3>(2, 0.2);
+      EXPECT_EQ(result.statistics.n_faces, 128U);
+      EXPECT_EQ(result.statistics.n_clamped_dofs, 80U);
+      EXPECT_EQ(result.statistics.n_linearized_faces, 64U);
+      EXPECT_EQ(result.statistics.n_conflicting_dofs, 0U);
+      EXPECT_EQ(result.statistics.n_open_faces, 0U);
+      EXPECT_GT(result.min_value, 0.);
+      EXPECT_LT(result.jump, 1e-12);
+    }
+  }
+
+  TEST(NarrowBandLevelSetTest, SignedDistanceToPatchesShell3D)
+  {
+    // Points seeded on a thin spherical shell (radii 0.45 and 0.75, width 1.2 h, p = 2, 8^3
+    // cells on [-1,1]^3), i.e., two close branches of opposite orientation: the signed distance to
+    // the patches of the nearest points (24 in 3D) equals the minimum distance to the patches of
+    // all points (brute force) at points between and around the branches, and its sign is the side
+    // of the closest patch. With the 8 nearest points (as in 2D), the distance was overestimated by
+    // up to 8.2e-4 (0.003 h): the closest patch is not always among them in 3D.
+    constexpr int                                       dim       = 3;
+    const unsigned int                                  fe_degree = 2;
+    const number                                        h         = 0.25;
+    const number                                        radius = 0.6, half_width = 0.15;
+    const dealii::ScalarFunctionFromFunctionObject<dim> shell(
+      [&](const dealii::Point<dim> &p) { return half_width - std::abs(p.norm() - radius); });
+
+    NarrowBandFixture<dim> fixture(fe_degree, 3, fe_degree, &shell);
+    VectorType             level_set;
+    fixture.initialize_vector(fixture.dof_handler_cut, level_set);
+    dealii::VectorTools::interpolate(fixture.mapping, fixture.dof_handler_cut, shell, level_set);
+
+    const dealii::ConditionalOStream       pcout(std::cout, false);
+    NarrowBandInterfacePoints<dim, number> interface_points(pcout);
+    interface_points.seed(fixture.dof_handler_cut, level_set, fe_degree + 1);
+
+    const auto &points  = interface_points.get_points();
+    const auto &weights = interface_points.get_weights();
+    const auto &normals = interface_points.get_normals();
+    ASSERT_GT(points.size(), 1000U);
+
+    // brute force: patch of each point (disk of the area of its weight, at most of radius h)
+    const auto brute_force = [&](const dealii::Point<dim> &x) {
+      number min_distance = std::numeric_limits<number>::max(), sign = 0.;
+      for (unsigned int k = 0; k < points.size(); ++k)
+        {
+          const number patch_radius      = std::min(std::sqrt(weights[k] / dealii::numbers::PI), h);
+          const dealii::Tensor<1, dim> d = x - points[k];
+          const number                 normal_distance  = normals[k] * d;
+          const number                 tangent_distance = (d - normal_distance * normals[k]).norm();
+          const number                 distance         = std::sqrt(
+            normal_distance * normal_distance +
+            dealii::Utilities::fixed_power<2>(std::max(0., tangent_distance - patch_radius)));
+          if (distance < min_distance)
+            {
+              min_distance = distance;
+              sign         = normal_distance > 0. ? 1. : -1.;
+            }
+        }
+      return sign * min_distance;
+    };
+
+    // points in the octant x, y, z > 0 with radii between 0.3 and 0.9 (deterministic sequence)
+    number       max_error     = 0.;
+    unsigned int n_wrong_signs = 0;
+    for (unsigned int i = 0; i < 400; ++i)
+      {
+        const number r     = 0.3 + 0.6 * std::fmod(0.618033988749895 * (i + 1), 1.);
+        const number theta = 0.5 * dealii::numbers::PI * std::fmod(0.754877666246693 * (i + 1), 1.);
+        const number phi   = 0.5 * dealii::numbers::PI * std::fmod(0.569840290998053 * (i + 1), 1.);
+        const dealii::Point<dim> x(r * std::sin(theta) * std::cos(phi),
+                                   r * std::sin(theta) * std::sin(phi),
+                                   r * std::cos(theta));
+        const number             distance           = interface_points.signed_distance(x, h);
+        const number             distance_reference = brute_force(x);
+        max_error =
+          std::max<number>(max_error, std::abs(std::abs(distance) - std::abs(distance_reference)));
+        if (std::abs(distance_reference) > 1e-3 and distance * distance_reference < 0.)
+          ++n_wrong_signs;
+      }
+
+    EXPECT_LT(max_error, 1e-12);
+    EXPECT_EQ(n_wrong_signs, 0U);
+  }
+
+  TEST(NarrowBandLevelSetTest, InterfacePointsInsertionFinalLevelSet2D)
+  {
+    // The points seeded on a circle (radius 0.3) are not supported by the advected level set of a
+    // larger circle (radius 0.3 + 0.4 h) and removed. Without insertion in locate(), the gaps are
+    // filled by insert_points() from the final level set of the cut cells (here: the initial
+    // circle, e.g., after the reinitialization with other points), i.e., the new points are the
+    // seeded points again, and not the points of the zero level set of the advected level set
+    // (insertion in locate()).
+    constexpr int      dim    = 2;
+    const number       radius = 0.3;
+    const number       h      = 2. / 16.;
+    dealii::Point<dim> center;
+    center[0] = 0.4;
+    const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, radius);
+    const dealii::Functions::SignedDistance::Sphere<dim> sphere_larger(center, radius + 0.4 * h);
+
+    NarrowBandFixture<dim> fixture(1, 4, 1, &sphere);
+    VectorType             level_set, level_set_larger;
+    fixture.initialize_vector(fixture.dof_handler_cut, level_set);
+    fixture.initialize_vector(fixture.dof_handler_band, level_set_larger);
+    dealii::VectorTools::interpolate(fixture.mapping, fixture.dof_handler_cut, sphere, level_set);
+    dealii::VectorTools::interpolate(fixture.mapping,
+                                     fixture.dof_handler_band,
+                                     sphere_larger,
+                                     level_set_larger);
+    const std::vector<bool> is_cut_cell =
+      NarrowBand::compute_cut_cells(fixture.dof_handler_band, level_set_larger, 1);
+
+    const dealii::ConditionalOStream pcout(std::cout, false);
+
+    // insertion in locate(): points on the zero level set of the advected level set (larger
+    // circle, interpolation error of p = 1 observed: 0.035 h)
+    NarrowBandInterfacePoints<dim, number> points_advected(pcout);
+    points_advected.seed(fixture.dof_handler_cut, level_set, 2);
+    const unsigned int n_seeded = points_advected.get_points().size();
+    const auto         statistics =
+      points_advected.locate(fixture.dof_handler_band, level_set_larger, 2, is_cut_cell, true);
+    EXPECT_EQ(statistics.n_unsupported_points, n_seeded);
+    EXPECT_EQ(statistics.n_inserted_points, statistics.n_points);
+    for (const auto &point : points_advected.get_points())
+      EXPECT_NEAR(point.distance(center), radius + 0.4 * h, 0.1 * h);
+
+    // insertion after the reinitialization: points on the final level set
+    NarrowBandInterfacePoints<dim, number> points_final(pcout);
+    points_final.seed(fixture.dof_handler_cut, level_set, 2);
+    const auto seeded_points = points_final.get_points();
+    const auto statistics_located =
+      points_final.locate(fixture.dof_handler_band, level_set_larger, 2, is_cut_cell, false);
+    EXPECT_EQ(statistics_located.n_unsupported_points, n_seeded);
+    EXPECT_EQ(statistics_located.n_inserted_points, 0U);
+    EXPECT_EQ(statistics_located.n_points, 0U);
+    EXPECT_TRUE(points_final.is_located());
+
+    const auto statistics_final =
+      points_final.insert_points(fixture.dof_handler_cut, level_set, fixture.dof_handler_band, 2);
+    EXPECT_EQ(statistics_final.n_unsupported_points, n_seeded);
+    EXPECT_EQ(statistics_final.n_inserted_points, n_seeded);
+    EXPECT_EQ(statistics_final.n_points, n_seeded);
+    EXPECT_EQ(statistics_final.n_cut_cells_without_points, 0U);
+    EXPECT_EQ(statistics_final.n_points_in_non_cut_cells, 0U);
+    ASSERT_EQ(points_final.get_points().size(), seeded_points.size());
+    number error = 0.;
+    for (unsigned int k = 0; k < seeded_points.size(); ++k)
+      error = std::max<number>(error, points_final.get_points()[k].distance(seeded_points[k]));
+    EXPECT_LT(error, 1e-14);
+
+    // a second insertion does not add points (no gaps)
+    const auto statistics_again =
+      points_final.insert_points(fixture.dof_handler_cut, level_set, fixture.dof_handler_band, 2);
+    EXPECT_EQ(statistics_again.n_points, n_seeded);
   }
 
   TEST(NarrowBandLevelSetTest, LayeredBand2D)

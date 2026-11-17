@@ -40,7 +40,8 @@ namespace MeltPoolDG::LevelSet
   {
     /**
      * Signed distance of @p x to the flat patches of the points (see
-     * NarrowBandInterfacePoints::signed_distance()), using the eight nearest points of @p tree. If
+     * NarrowBandInterfacePoints::signed_distance()), using the 8 (2D) or 24 (3D) nearest points of
+     * @p tree (NarrowBand::internal::n_nearest_interface_points()). If
      * the closest point of the closest patch lies on its edge, i.e., @p x does not lie in front of
      * the patch (e.g., beyond the open end of a chain of points, whose cap has been removed), the
      * side of the patch is not defined, and the sign is @p fallback_sign (if not zero). If
@@ -57,16 +58,18 @@ namespace MeltPoolDG::LevelSet
                                const double                               fallback_sign = 0.,
                                const dealii::Tensor<1, dim>              *orientation   = nullptr)
     {
+      constexpr unsigned int n_nearest = NarrowBand::internal::n_nearest_interface_points<dim>();
+
       std::vector<std::pair<dealii::Point<dim>, unsigned int>> nearest;
       if (orientation != nullptr)
-        tree.query(boost::geometry::index::nearest(x, 8) and
+        tree.query(boost::geometry::index::nearest(x, n_nearest) and
                      boost::geometry::index::satisfies(
                        [&](const std::pair<dealii::Point<dim>, unsigned int> &value) {
                          return normals[value.second] * (*orientation) > 0.;
                        }),
                    std::back_inserter(nearest));
       else
-        tree.query(boost::geometry::index::nearest(x, 8), std::back_inserter(nearest));
+        tree.query(boost::geometry::index::nearest(x, n_nearest), std::back_inserter(nearest));
 
       double min_distance = std::numeric_limits<double>::max();
       double sign         = 0.;
@@ -170,6 +173,43 @@ namespace MeltPoolDG::LevelSet
             weights.push_back(weight);
             normals.push_back(normal);
           }
+      }
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandInterfacePoints<dim, number>::pack_gap_points(
+    const dealii::DoFHandler<dim> &dof_handler,
+    const VectorType              &level_set,
+    const unsigned int             n_points_1d,
+    const std::vector<bool>       *cells,
+    std::vector<double>           &data) const
+  {
+    // Note: the quadrature generator keeps a pointer to the quadrature collection.
+    const dealii::hp::QCollection<1> q_collection{dealii::QGauss<1>(n_points_1d)};
+    dealii::NonMatching::DiscreteQuadratureGenerator<dim> quadrature_generator(q_collection,
+                                                                               dof_handler,
+                                                                               level_set);
+
+    std::vector<std::pair<dealii::Point<dim>, unsigned int>> indexed_points;
+    indexed_points.reserve(points.size());
+    for (unsigned int k = 0; k < points.size(); ++k)
+      indexed_points.emplace_back(points[k], k);
+    const auto point_tree = dealii::pack_rtree(indexed_points);
+
+    std::vector<std::pair<dealii::Point<dim>, unsigned int>> nearest;
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0 or
+            (cells != nullptr and not(*cells)[cell->active_cell_index()]))
+          continue;
+
+        const double min_distance = cell->minimum_vertex_distance() / n_points_1d;
+        pack_surface_points(cell, quadrature_generator, data, [&](const dealii::Point<dim> &x) {
+          nearest.clear();
+          point_tree.query(boost::geometry::index::nearest(x, 1), std::back_inserter(nearest));
+          return nearest.empty() or nearest[0].first.distance(x) > min_distance;
+        });
       }
   }
 
@@ -347,7 +387,8 @@ namespace MeltPoolDG::LevelSet
   NarrowBandInterfacePoints<dim, number>::locate(const dealii::DoFHandler<dim> &dof_handler_band,
                                                  const VectorType              &level_set_band,
                                                  const unsigned int             n_points_1d,
-                                                 const std::vector<bool>       &is_cut_cell)
+                                                 const std::vector<bool>       &is_cut_cell,
+                                                 const bool                     insert)
   {
     const auto &triangulation = dof_handler_band.get_triangulation();
     AssertDimension(is_cut_cell.size(), triangulation.n_active_cells());
@@ -429,43 +470,23 @@ namespace MeltPoolDG::LevelSet
 
     // 3) locally owned cells: new points at the quadrature points of the zero level set of the
     // advected level set, which are farther than h / n_points_1d from all points (gaps of the
-    // point set due to the stretching of the interface), merging of the closest pairs of points in
-    // cells with too many points (compression of the interface)
+    // point set due to the stretching of the interface; only if insert is true, otherwise see
+    // insert_points()), merging of the closest pairs of points in cells with too many points
+    // (compression of the interface)
     const unsigned int max_n_points_per_cell = 2 * dealii::Utilities::pow(n_points_1d, dim - 1);
 
-    std::vector<double>       new_points_local;
+    std::vector<double> new_points_local;
+    if (insert)
+      pack_gap_points(
+        dof_handler_band, level_set_band, n_points_1d, &is_cut_cell, new_points_local);
+
     std::vector<unsigned int> merged_pairs_local; // (removed point, kept point)
     {
-      // Note: the quadrature generator keeps a pointer to the quadrature collection.
-      const dealii::hp::QCollection<1> q_collection{dealii::QGauss<1>(n_points_1d)};
-      dealii::NonMatching::DiscreteQuadratureGenerator<dim> quadrature_generator(q_collection,
-                                                                                 dof_handler_band,
-                                                                                 level_set_band);
-
-      std::vector<std::pair<dealii::Point<dim>, unsigned int>> indexed_points;
-      indexed_points.reserve(points.size());
-      for (unsigned int k = 0; k < points.size(); ++k)
-        indexed_points.emplace_back(points[k], k);
-      const auto point_tree = dealii::pack_rtree(indexed_points);
-
-      std::vector<std::pair<dealii::Point<dim>, unsigned int>> nearest;
-      std::vector<unsigned int>                                active;
+      std::vector<unsigned int> active;
       for (const auto &cell : dof_handler_band.active_cell_iterators())
         {
           if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
             continue;
-
-          if (is_cut_cell[cell->active_cell_index()])
-            {
-              const double min_distance = cell->minimum_vertex_distance() / n_points_1d;
-              pack_surface_points(
-                cell, quadrature_generator, new_points_local, [&](const dealii::Point<dim> &x) {
-                  nearest.clear();
-                  point_tree.query(boost::geometry::index::nearest(x, 1),
-                                   std::back_inserter(nearest));
-                  return nearest.empty() or nearest[0].first.distance(x) > min_distance;
-                });
-            }
 
           const auto &cell_points = points_of_cell[cell->active_cell_index()];
           if (cell_points.size() > max_n_points_per_cell)
@@ -537,6 +558,74 @@ namespace MeltPoolDG::LevelSet
     // 5) assignment of the updated points
     assign_points_to_cells(dof_handler_band);
 
+    // 6), 7) unresolved points and statistics of the cells
+    last_statistics = statistics;
+    update_unresolved_points(triangulation, is_cut_cell, mpi_comm);
+    if (insert)
+      print_statistics();
+
+    return last_statistics;
+  }
+
+  template <int dim, typename number>
+  typename NarrowBandInterfacePoints<dim, number>::Statistics
+  NarrowBandInterfacePoints<dim, number>::insert_points(
+    const dealii::DoFHandler<dim> &dof_handler_cut,
+    const VectorType              &level_set,
+    const dealii::DoFHandler<dim> &dof_handler_band,
+    const unsigned int             n_points_1d)
+  {
+    Assert(located, dealii::ExcMessage("The points are not assigned to the cells."));
+
+    const auto    &triangulation = dof_handler_cut.get_triangulation();
+    const MPI_Comm mpi_comm      = dof_handler_cut.get_mpi_communicator();
+
+    // new points at the quadrature points of the zero level set of the locally owned cells with
+    // DoFs, which are farther than h / n_points_1d from all points
+    std::vector<double> new_points_local;
+    {
+      const bool update_ghosts = not level_set.has_ghost_elements();
+      if (update_ghosts)
+        level_set.update_ghost_values();
+
+      pack_gap_points(dof_handler_cut, level_set, n_points_1d, nullptr, new_points_local);
+
+      if (update_ghosts)
+        level_set.zero_out_ghost_values();
+    }
+
+    const std::size_t n_points_old = points.size();
+    append_points(new_points_local, mpi_comm);
+    last_statistics.n_inserted_points += points.size() - n_points_old;
+
+    // assignment of all points to the cells of the band, unresolved points and statistics of the
+    // cells (cut cells: cells with DoFs of dof_handler_cut)
+    assign_points_to_cells(dof_handler_band);
+
+    std::vector<bool> is_cut_cell(triangulation.n_active_cells(), false);
+    for (const auto &cell : dof_handler_cut.active_cell_iterators())
+      if (cell->is_locally_owned() and cell->get_fe().n_dofs_per_cell() > 0)
+        is_cut_cell[cell->active_cell_index()] = true;
+    update_unresolved_points(triangulation, is_cut_cell, mpi_comm);
+    print_statistics();
+
+    return last_statistics;
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandInterfacePoints<dim, number>::update_unresolved_points(
+    const dealii::Triangulation<dim> &triangulation,
+    const std::vector<bool>          &is_cut_cell,
+    const MPI_Comm                    mpi_comm)
+  {
+    AssertDimension(is_cut_cell.size(), triangulation.n_active_cells());
+
+    Statistics &statistics                = last_statistics;
+    statistics.n_unresolved_points        = 0;
+    statistics.n_points_in_non_cut_cells  = 0;
+    statistics.n_cut_cells_without_points = 0;
+
     // 6) points of the locally owned cells with a point of opposite orientation (n_i . n_j < 0)
     // closer than the unresolved distance: the interface is not resolved (e.g., both sides of a
     // thin filament or a tip), and the points are not used in the surface quadrature
@@ -605,19 +694,22 @@ namespace MeltPoolDG::LevelSet
     statistics.n_unresolved_points =
       dealii::Utilities::MPI::sum(statistics.n_unresolved_points, mpi_comm);
 
-    {
-      std::ostringstream str;
-      str << "interface points: " << statistics.n_points << " (" << statistics.n_inserted_points
-          << " new, " << statistics.n_merged_points << " merged, " << statistics.n_points_outside
-          << " outside of the band, " << statistics.n_unsupported_points << " not supported), "
-          << statistics.n_points_in_non_cut_cells << " in cells, which are not cut, "
-          << statistics.n_cut_cells_without_points << " cut cells without points, "
-          << statistics.n_unresolved_points << " unresolved points";
-      Journal::print_line(pcout, str.str(), "narrow_band");
-    }
-
     located = true;
-    return statistics;
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandInterfacePoints<dim, number>::print_statistics() const
+  {
+    const Statistics  &statistics = last_statistics;
+    std::ostringstream str;
+    str << "interface points: " << statistics.n_points << " (" << statistics.n_inserted_points
+        << " new, " << statistics.n_merged_points << " merged, " << statistics.n_points_outside
+        << " outside of the band, " << statistics.n_unsupported_points << " not supported), "
+        << statistics.n_points_in_non_cut_cells << " in cells, which are not cut, "
+        << statistics.n_cut_cells_without_points << " cut cells without points, "
+        << statistics.n_unresolved_points << " unresolved points";
+    Journal::print_line(pcout, str.str(), "narrow_band");
   }
 
   template <int dim, typename number>
@@ -936,6 +1028,13 @@ namespace MeltPoolDG::LevelSet
   NarrowBandInterfacePoints<dim, number>::get_weights() const
   {
     return weights;
+  }
+
+  template <int dim, typename number>
+  const std::vector<dealii::Tensor<1, dim>> &
+  NarrowBandInterfacePoints<dim, number>::get_normals() const
+  {
+    return normals;
   }
 
   template class NarrowBandInterfacePoints<1, double>;

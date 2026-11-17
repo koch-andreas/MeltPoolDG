@@ -53,6 +53,20 @@ namespace MeltPoolDG::LevelSet
    * of this region. Since the projected cells share their boundary nodes with the adjacent cut
    * cells, the projection is a coupled problem on the region (instead of the cell-wise projection
    * of the DG level set).
+   *
+   * Closed interface (close_interface()): the zero level set of the cut cells is closed, if the
+   * level set does not vanish on the faces between the cut cells and the cells, which are not cut
+   * (the interface cannot leave the cut cells there), i.e., if it has the sign $s$ of the
+   * neighbor cell on the whole face. This is enforced for any polynomial degree by
+   * 1. clamping the nodal values on these faces: $s \phi_i \geq \epsilon h$,
+   * 2. testing the Bernstein coefficients of the restriction of $\phi$ to the face (sufficient
+   *    condition: all coefficients have the sign $s$), and
+   * 3. replacing the level set on a face, which fails the test, by the (multi)linear interpolant
+   *    of its vertex values (the nodes in the interior of the face, of its edges in 3D), which has
+   *    the sign $s$ on the whole face.
+   * Since the nodes of an edge in 3D are shared by several faces, step 3 is repeated until no
+   * face fails the test. The correction only moves the interface away from the boundary of the
+   * cut cells; it is applied after the reinitialization and the subcell distance.
    */
   template <int dim, typename number>
   class NarrowBandContinuousReinitialization
@@ -79,6 +93,33 @@ namespace MeltPoolDG::LevelSet
 
       /// Number of prescribed (projected) DoFs.
       dealii::types::global_dof_index n_prescribed_dofs = 0;
+    };
+
+    /**
+     * @brief Statistics of the closed-interface correction (summed over all processes).
+     */
+    struct CorrectionStatistics
+    {
+      /// Number of faces between the cut cells and the cells, which are not cut (excluding the
+      /// boundary of the domain and neighbor cells without sign).
+      unsigned int n_faces = 0;
+
+      /// Number of nodes on these faces, whose value is clamped to the sign of the neighbor cell.
+      unsigned int n_clamped_dofs = 0;
+
+      /// Number of faces, whose level set is replaced by the (multi)linear interpolant of the
+      /// vertex values.
+      unsigned int n_linearized_faces = 0;
+
+      /// Number of nodes on faces to neighbor cells of opposite signs (unchanged).
+      unsigned int n_conflicting_dofs = 0;
+
+      /// Number of faces, which fail the Bernstein test after the correction (only possible with
+      /// conflicting nodes).
+      unsigned int n_open_faces = 0;
+
+      /// Maximum change of a nodal value relative to the cell size.
+      double max_correction = 0.;
     };
 
     /**
@@ -149,6 +190,19 @@ namespace MeltPoolDG::LevelSet
     Statistics
     reinitialize(const SurfaceQuadratureFunction &surface_quadrature_function,
                  const bool                       keep_prescribed_dofs);
+
+    /**
+     * @brief Closed-interface correction of the continuous level set (see the class
+     * description): on the faces between the cut cells and the cells, which are not cut, the level
+     * set takes the sign of the neighbor cell.
+     *
+     * @param cell_signs Signs (+1, -1, or 0 if unknown) of the cells, which are not cut, indexed
+     * by the active cell index (locally owned and ghost cells).
+     * @param offset Minimum magnitude $\epsilon$ of the nodal values on these faces relative to
+     * the cell size.
+     */
+    CorrectionStatistics
+    close_interface(const std::vector<int> &cell_signs, const double offset);
 
     /**
      * @brief Continuous level set (with ghost values).

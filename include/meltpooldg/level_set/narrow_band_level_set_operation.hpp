@@ -71,7 +71,11 @@ namespace MeltPoolDG::LevelSet
    * on the cut cells. In each time step, it is evaluated on the cut cells and their vertex
    * neighbors (candidate cells) by the semi-Lagrangian advection (see
    * NarrowBandSemiLagrangianAdvection), which replaces steps 1 and 4; the new cut cells are
-   * determined from the candidate cells (step 2) and reinitialized (step 3).
+   * determined from the candidate cells (step 2) and reinitialized (step 3). For the continuous
+   * level set space (NarrowBandLevelSetSpace::continuous), the reinitialization is computed in
+   * the continuous space (see NarrowBandContinuousReinitialization), and the zero level set is
+   * closed after step 3 (NarrowBandData::closed_interface_correction): on the faces between the
+   * cut cells and the cells, which are not cut, the level set takes the sign of the neighbor cell.
    *
    * For the advected band (NarrowBandType::advected_layers), the band consists of the cut cells
    * and NarrowBandData::n_layers layers of vertex neighbors, which are advected together with
@@ -311,6 +315,15 @@ namespace MeltPoolDG::LevelSet
      */
     void
     reinitialize_continuous();
+
+    /**
+     * @brief Closed-interface correction of the level set of the cut cells (continuous level set
+     * space, see NarrowBandContinuousReinitialization::close_interface()): on the faces between
+     * the cut cells and the cells, which are not cut, the level set takes the sign of the neighbor
+     * cell (cell_signs). No effect for the discontinuous space or if the correction is disabled.
+     */
+    void
+    close_interface();
 
     /**
      * @brief Copy the level-set field of the cut cells to the band and extend it to the

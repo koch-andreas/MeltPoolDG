@@ -42,7 +42,9 @@ namespace MeltPoolDG::LevelSet
    *   the level set does not contain,
    * - the quadrature points of the zero level set of the advected level set, whose distance to
    *   all points exceeds $h / n$ ($n$ points per direction of the surface quadrature), are added
-   *   as new points (gaps of the point set due to the stretching of the interface),
+   *   as new points (gaps of the point set due to the stretching of the interface); alternatively,
+   *   the new points are taken from the zero level set of the level set at the end of the time
+   *   step, i.e., after the reinitialization (insert_points()),
    * - in cells with more than $2 n^{d-1}$ points ($n$ points per direction of the surface
    *   quadrature), the closest pairs of points with the same orientation are merged by removing
    *   one point and adding its weight to the other one (compression of the interface).
@@ -165,12 +167,37 @@ namespace MeltPoolDG::LevelSet
      * points.
      * @param is_cut_cell Cut cells of the advected level set, indexed by the active cell index
      * (locally owned cells).
+     * @param insert If false, no new points are seeded in the gaps of the point set, and the
+     * statistics are not printed; the gaps are then filled by insert_points() from the level set
+     * at the end of the time step.
      */
     Statistics
     locate(const dealii::DoFHandler<dim> &dof_handler_band,
            const VectorType              &level_set_band,
            const unsigned int             n_points_1d,
-           const std::vector<bool>       &is_cut_cell);
+           const std::vector<bool>       &is_cut_cell,
+           const bool                     insert = true);
+
+    /**
+     * @brief Seed new points in the gaps of the point set after locate(): the quadrature points of
+     * the zero level set of @p level_set on the locally owned cells with DoFs of
+     * @p dof_handler_cut (e.g., the reinitialized level set of the cut cells), whose distance to
+     * all points exceeds $h / n$, are added. Then, all points are assigned to the cells of
+     * @p dof_handler_band again, the unresolved points are updated, and the statistics of the time
+     * step are printed. Thus, the gaps are filled from the corrected interface instead of the
+     * zero level set of the advected level set.
+     *
+     * @param dof_handler_cut DoFHandler of the level set (FE_DGQ on the cut cells).
+     * @param level_set Level set on the cut cells.
+     * @param dof_handler_band Band DoFHandler (all cells with DoFs).
+     * @param n_points_1d Number of Gauss points per direction of the surface quadrature of new
+     * points.
+     */
+    Statistics
+    insert_points(const dealii::DoFHandler<dim> &dof_handler_cut,
+                  const VectorType              &level_set,
+                  const dealii::DoFHandler<dim> &dof_handler_band,
+                  const unsigned int             n_points_1d);
 
     /**
      * @brief Return true, if the points have been assigned to the cells since the last seeding or
@@ -311,8 +338,10 @@ namespace MeltPoolDG::LevelSet
      * @brief Signed distance of @p x to the interface represented by the points: each point is a
      * flat patch (a segment of the length of its weight in 2D, a disk of the area of its weight
      * in 3D, at most of radius @p max_radius) orthogonal to its normal vector. The distance is the
-     * minimum distance to the patches of the eight nearest points, its sign is the side of the
-     * closest patch (positive in the direction of the normal vector).
+     * minimum distance to the patches of the 8 (2D) or 24 (3D) nearest points (the nearest point
+     * and its neighbors on up to two close branches of the interface, as the candidates of the
+     * closest-point search of the semi-Lagrangian advection), its sign is the side of the closest
+     * patch (positive in the direction of the normal vector).
      */
     number
     signed_distance(const dealii::Point<dim> &x, const double max_radius) const;
@@ -328,6 +357,12 @@ namespace MeltPoolDG::LevelSet
      */
     const std::vector<number> &
     get_weights() const;
+
+    /**
+     * @brief Return the unit normal vectors of the points in real space (all processes).
+     */
+    const std::vector<dealii::Tensor<1, dim>> &
+    get_normals() const;
 
   private:
     /// Output stream.
@@ -361,10 +396,42 @@ namespace MeltPoolDG::LevelSet
     append_points(const std::vector<double> &local_data, const MPI_Comm mpi_comm);
 
     /**
+     * @brief Append the quadrature points of the zero level set of @p level_set on the locally
+     * owned cells with DoFs of @p dof_handler (only the cells marked in @p cells, if given), whose
+     * distance to all points exceeds h / @p n_points_1d, to @p data (see pack_surface_points()).
+     * The ghost values of @p level_set must be up to date.
+     */
+    void
+    pack_gap_points(const dealii::DoFHandler<dim> &dof_handler,
+                    const VectorType              &level_set,
+                    const unsigned int             n_points_1d,
+                    const std::vector<bool>       *cells,
+                    std::vector<double>           &data) const;
+
+    /**
      * @brief Assign the points to the locally owned cells of the band (points_of_cell).
      */
     void
     assign_points_to_cells(const dealii::DoFHandler<dim> &dof_handler_band);
+
+    /**
+     * @brief Mark the unresolved points of the locally owned cells and update the statistics of
+     * the cells in last_statistics (number of points, points in cells, which are not cut, cut
+     * cells without usable points, unresolved points).
+     */
+    void
+    update_unresolved_points(const dealii::Triangulation<dim> &triangulation,
+                             const std::vector<bool>          &is_cut_cell,
+                             const MPI_Comm                    mpi_comm);
+
+    /**
+     * @brief Print last_statistics.
+     */
+    void
+    print_statistics() const;
+
+    /// Statistics of the last time step.
+    Statistics last_statistics;
 
     /// Indices of the points assigned to the locally owned cells, indexed by the active cell
     /// index.

@@ -175,7 +175,8 @@ namespace MeltPoolDG::LevelSet
 
     // number of nearest quadrature points of the interface, whose cut cells are candidates of the
     // closest-point search
-    const unsigned int n_nearest_points = dim == 1 ? 2 : (dim == 2 ? 8 : 24);
+    constexpr unsigned int n_nearest_points =
+      NarrowBand::internal::n_nearest_interface_points<dim>();
 
     std::vector<std::pair<dealii::Point<dim>, unsigned int>>               nearest_points;
     std::vector<std::pair<dealii::BoundingBox<dim, double>, unsigned int>> containing_boxes;

@@ -130,6 +130,16 @@ namespace MeltPoolDG::LevelSet
               // in the continuous space (see NarrowBandContinuousReinitialization)
               continuous)
 
+  BETTER_ENUM(NarrowBandPointInsertion,
+              char,
+              // new points in the gaps of the point set from the zero level set of the advected
+              // level set (before the reinitialization)
+              advected_level_set,
+              // new points in the gaps of the point set from the zero level set of the level set
+              // at the end of the time step (after the reinitialization, the subcell distance and
+              // the closed-interface correction)
+              final_level_set)
+
   BETTER_ENUM(NarrowBandGhostPenaltyFaces,
               char,
               // all interior faces of the narrow band with at least one adjacent neighbor cell,
@@ -312,6 +322,18 @@ namespace MeltPoolDG::LevelSet
     NarrowBandReinitializationFaces reinitialization_faces =
       NarrowBandReinitializationFaces::cut_cell_faces;
 
+    /// Finite element space of the level set on the cut cells (semi-Lagrangian band).
+    NarrowBandLevelSetSpace level_set_space = NarrowBandLevelSetSpace::discontinuous;
+
+    /// Continuous level set space: closed-interface correction after each time step, i.e., the
+    /// level set takes the sign of the neighbor cell on all faces between the cut cells and the
+    /// cells, which are not cut (see NarrowBandContinuousReinitialization::close_interface()).
+    bool closed_interface_correction = true;
+
+    /// Closed-interface correction: minimum magnitude of the nodal values on the faces between
+    /// the cut cells and the cells, which are not cut, relative to the cell size.
+    number closed_interface_offset = 0.01;
+
     /// Interface, at which the reinitialization on the cut cells enforces phi = 0 weakly
     /// (interface penalty term): the zero level set of the level set before the reinitialization
     /// or points of the interface, which are seeded on the initial zero level set and advected
@@ -319,9 +341,6 @@ namespace MeltPoolDG::LevelSet
     /// the gaps of the point set and merging in cells with too many points, see
     /// NarrowBandInterfacePoints). In the latter case, the zero level set is used in the cut
     /// cells without usable points.
-    /// Finite element space of the level set on the cut cells (semi-Lagrangian band).
-    NarrowBandLevelSetSpace level_set_space = NarrowBandLevelSetSpace::discontinuous;
-
     NarrowBandReinitializationInterface reinitialization_interface =
       NarrowBandReinitializationInterface::zero_level_set;
 
@@ -363,6 +382,11 @@ namespace MeltPoolDG::LevelSet
       {
         return points_per_direction > 0 ? points_per_direction : fe_degree + 1;
       }
+
+      /// Level set, from whose zero level set new points are inserted into the gaps of the point
+      /// set: the advected level set or the level set at the end of the time step (after the
+      /// reinitialization and the closed-interface correction).
+      NarrowBandPointInsertion point_insertion = NarrowBandPointInsertion::final_level_set;
 
       /// Treatment of the cut cells with unresolved points (points of opposite orientation closer
       /// than the unresolved distance) and of the cut cells within the buffer around them.

@@ -27,6 +27,21 @@
 namespace MeltPoolDG::LevelSet::NarrowBand::internal
 {
   /**
+   * Number of nearest interface points (quadrature points of the discrete interface or advected
+   * interface points), among which the closest part of the interface is searched: the nearest
+   * point and its neighbors along the interface on up to two close branches of the interface
+   * (e.g., both sides of a thin filament), i.e., 8 in 2D (neighbors along a curve) and 24 in 3D
+   * (rings of neighbors on a surface). Used by the closest-point search of the semi-Lagrangian
+   * advection and by the signed distance to the advected interface points.
+   */
+  template <int dim>
+  constexpr unsigned int
+  n_nearest_interface_points()
+  {
+    return dim == 1 ? 2 : (dim == 2 ? 8 : 24);
+  }
+
+  /**
    * Affine map x = origin + jacobian * xi of a parallelepiped cell.
    */
   template <int dim>

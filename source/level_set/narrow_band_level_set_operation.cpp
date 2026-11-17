@@ -369,6 +369,9 @@ namespace MeltPoolDG::LevelSet
               redistance_layers();
           }
 
+        // continuous level set space: closed interface
+        close_interface();
+
         // advected interface points: seeding on the initial zero level set
         if (interface_points)
           interface_points->seed(dof_handler_cut,
@@ -516,7 +519,9 @@ namespace MeltPoolDG::LevelSet
                                  level_set_band,
                                  narrow_band_data.advected_points.get_points_per_direction(
                                    fe_degree),
-                                 is_cut_cell);
+                                 is_cut_cell,
+                                 narrow_band_data.advected_points.point_insertion ==
+                                   NarrowBandPointInsertion::advected_level_set);
       std::vector<bool> is_small_cut_cell_new =
         compute_small_cut_cells(is_cut_cell, volume_fractions);
 
@@ -667,6 +672,22 @@ namespace MeltPoolDG::LevelSet
         // advected band: geometric redistancing of the layers after the reinitialization
         if (do_reinitialize and is_advected_band())
           redistance_layers();
+      }
+
+    // continuous level set space: closed interface
+    close_interface();
+
+    // advected interface points: new points in the gaps of the point set from the zero level set
+    // of the final level set of the cut cells
+    if (interface_points and narrow_band_data.advected_points.point_insertion ==
+                               NarrowBandPointInsertion::final_level_set)
+      {
+        level_set.zero_out_ghost_values();
+        interface_points->insert_points(dof_handler_cut,
+                                        level_set,
+                                        dof_handler_band,
+                                        narrow_band_data.advected_points.get_points_per_direction(
+                                          fe_degree));
       }
 
     if (is_layered_band())
@@ -867,6 +888,38 @@ namespace MeltPoolDG::LevelSet
       project();
 
     cg.interpolate_to_discontinuous(dof_handler_cut, level_set);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::close_interface()
+  {
+    if (not continuous_reinitialization or not narrow_band_data.closed_interface_correction)
+      return;
+
+    ScopedName                 sc("narrow_band::close_interface");
+    dealii::TimerOutput::Scope scope(scratch_data.get_timer(), sc);
+
+    auto &cg = *continuous_reinitialization;
+
+    level_set.zero_out_ghost_values();
+    cg.distribute_dofs(dof_handler_cut);
+    cg.interpolate_from_discontinuous(dof_handler_cut, level_set);
+
+    const auto statistics =
+      cg.close_interface(cell_signs, narrow_band_data.closed_interface_offset);
+
+    cg.interpolate_to_discontinuous(dof_handler_cut, level_set);
+
+    std::ostringstream str;
+    str << "closed interface: " << statistics.n_faces << " faces to cells, which are not cut, "
+        << statistics.n_clamped_dofs << " clamped nodes, " << statistics.n_linearized_faces
+        << " linearized faces, max correction " << std::scientific << std::setprecision(2)
+        << statistics.max_correction << " h";
+    if (statistics.n_conflicting_dofs + statistics.n_open_faces > 0)
+      str << ", " << statistics.n_conflicting_dofs << " nodes between faces of opposite signs, "
+          << statistics.n_open_faces << " open faces";
+    Journal::print_line(scratch_data.get_pcout(1), str.str(), "narrow_band");
   }
 
   template <int dim, typename number>

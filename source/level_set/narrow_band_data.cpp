@@ -258,6 +258,26 @@ namespace MeltPoolDG::LevelSet
         "continuous space; the semi-Lagrangian step maps a continuous level set to a continuous "
         "level set. The subcell coupling excluded is not available for the continuous space.");
       prm.add_parameter(
+        "closed interface correction",
+        closed_interface_correction,
+        "Continuous level set space: correction of the level set after each time step (after the "
+        "reinitialization and the subcell distance, and after the initial reinitialization), such "
+        "that the zero level set is closed: on each face between a cut cell and a cell, which is "
+        "not cut (excluding the boundary of the domain), the level set takes the sign of the "
+        "neighbor cell. The nodal values on the face are clamped to s phi_i >= c h (closed "
+        "interface offset c); if a Bernstein coefficient of the restriction of the level set to "
+        "the face does not have the sign s (any polynomial degree), the values at the nodes of "
+        "the face, which are not vertices, are replaced by the (multi)linear interpolant of the "
+        "vertex values. Thus, the interface only ends at the boundary of the domain. Not used for "
+        "the discontinuous space.");
+      prm.add_parameter("closed interface offset",
+                        closed_interface_offset,
+                        "Closed-interface correction: minimum magnitude c of the nodal values on "
+                        "the faces between the cut cells and the cells, which are not cut, "
+                        "relative to the cell size (distance of the corrected interface from these "
+                        "faces).",
+                        dealii::Patterns::Double(0.0));
+      prm.add_parameter(
         "reinitialization interface",
         reinitialization_interface,
         "Interface, at which the reinitialization on the cut cells enforces phi = 0 weakly by the "
@@ -267,8 +287,9 @@ namespace MeltPoolDG::LevelSet
         "advected with the velocity (classical fourth-order Runge-Kutta method, weights and "
         "normal vectors by Nanson's formula) independently of the interpolation of the level set "
         "(front tracking). Points outside of the band or with |phi| > 0.2 h are removed, the "
-        "quadrature points of the zero level set of the advected level set phi, whose distance to "
-        "all points exceeds h / n, are added, and in cells with more than 2 n^(dim-1) points, the "
+        "quadrature points of the zero level set of the level set at the end of the time step (or "
+        "of the advected level set phi, see 'point insertion'), whose distance to all points "
+        "exceeds h / n, are added, and in cells with more than 2 n^(dim-1) points, the "
         "closest points are merged (n Gauss points per direction, default p + 1). Points with a "
         "point of opposite orientation closer than 2 h (under-resolved interface) are not used. "
         "The cut cells are determined from phi; in cut cells without usable points, the zero "
@@ -315,6 +336,17 @@ namespace MeltPoolDG::LevelSet
           "level set more tightly between the points and shorten the patches of the subcell "
           "distance, at a cost proportional to n^(dim-1). Only used for reinitialization interface "
           "= advected_points.");
+        prm.add_parameter(
+          "point insertion",
+          advected_points.point_insertion,
+          "Level set, from whose zero level set new advected interface points are inserted into "
+          "the gaps of the point set (Gauss points farther than h / n from all points): the "
+          "advected level set before the reinitialization (advected_level_set) or the level set at "
+          "the end of the time step, i.e., after the reinitialization, the subcell distance and "
+          "the closed-interface correction (final_level_set). In the latter case, the new points "
+          "lie on the corrected interface, and the reinitialization of the time step uses the zero "
+          "level set of the advected level set in the cut cells without usable points. Only used "
+          "for reinitialization interface = advected_points.");
         prm.add_parameter(
           "unresolved cells",
           advected_points.unresolved_cells,
