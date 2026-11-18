@@ -351,6 +351,25 @@ namespace MeltPoolDG::LevelSet
           "set has lost). Only used for reinitialization interface = advected_points.",
           dealii::Patterns::Double(0.0));
         prm.add_parameter(
+          "merge distance",
+          advected_points.merge_distance,
+          "Merge distance c_m relative to the cell size of the merge rule for topology changes "
+          "(e.g., merging droplets): with the approach a = dt max(0, (u(x - h n) - u(x)) . n) of "
+          "the flow on the outer side of an advected interface point within one time step, a point "
+          "in a converging flow (the positive part of the normal velocity difference (u(x - h n) - "
+          "u(x)) . n exceeds half of the local speed) is removed, if the advected level set at the "
+          "distance c_m h + a on the outer side of the point (opposite to its normal vector) "
+          "exceeds the value at the point by more than a quarter of this distance (the point lies "
+          "inside of the phase or at a gap thinner than about c_m h + a), or if a point of a "
+          "different orientation (n_i . n_j < 1/2) is closer than the sum of the approaches of the "
+          "two points and each of them lies on the outer side of the other one (the gap has closed "
+          "within the time step). The points move forward in time and cannot represent the "
+          "disappearance of colliding parts of the interface, while the advected level set "
+          "(backward characteristics) already contains the merged interface. Wider gaps and thin "
+          "filaments are kept. Zero disables the merge rule. Only used for reinitialization "
+          "interface = advected_points.",
+          dealii::Patterns::Double(0.0));
+        prm.add_parameter(
           "points per direction",
           advected_points.points_per_direction,
           "Number n of Gauss points per direction of the surface quadrature, at which the advected "

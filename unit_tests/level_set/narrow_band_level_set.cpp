@@ -2276,6 +2276,132 @@ namespace MeltPoolDG::LevelSet
     }
 
     /**
+     * Velocity u = -U sign(x) e_x (sign(0) = 1): both halves of the domain move rigidly towards
+     * the plane x = 0 (dim components).
+     */
+    template <int dim>
+    class ConvergingVelocity : public dealii::Function<dim>
+    {
+    public:
+      explicit ConvergingVelocity(const number velocity)
+        : dealii::Function<dim>(dim)
+        , velocity(velocity)
+      {}
+
+      number
+      value(const dealii::Point<dim> &p, const unsigned int component) const override
+      {
+        if (component != 0)
+          return 0.;
+        return p[0] >= 0. ? -velocity : velocity;
+      }
+
+    private:
+      const number velocity;
+    };
+
+    /**
+     * Two circles of the radius r = 0.25 with the initial distance D_0 = 0.6 of their centers
+     * (0 -+ D_0 / 2, 0.013) move towards each other with the velocity U = 0.25 (ConvergingVelocity)
+     * and merge at t = 0.2 (continuous level set space with the closed-interface correction, p = 2,
+     * advected points with the subcell distance, 32^2 cells, U dt = 0.04 h). Returns the relative
+     * error of the length of the zero level set at t = 0.4 (exact: the boundary of the union of the
+     * two disks with D = 0.4) for the merge distance @p merge_distance.
+     */
+    template <int dim>
+    number
+    compute_merging_circles_length_error(const number merge_distance)
+    {
+      const unsigned int fe_degree = 2;
+      const number       radius = 0.25, distance = 0.6, velocity = 0.25, time_step = 0.01;
+      const unsigned int n_time_steps = 40;
+
+      dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
+      dealii::GridGenerator::hyper_cube(triangulation, -1., 1.);
+      triangulation.refine_global(5);
+
+      ScratchData<dim, dim, number> scratch_data(MPI_COMM_WORLD, 0, true);
+      scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
+
+      NarrowBandData<number> narrow_band_data;
+      narrow_band_data.type            = NarrowBandType::semi_lagrangian;
+      narrow_band_data.level_set_space = NarrowBandLevelSetSpace::continuous;
+      narrow_band_data.reinitialization_faces = NarrowBandReinitializationFaces::interface_faces;
+      narrow_band_data.reinitialization_interface =
+        NarrowBandReinitializationInterface::advected_points;
+      narrow_band_data.advected_points.unresolved_cells =
+        NarrowBandUnresolvedCells::subcell_distance;
+      narrow_band_data.advected_points.subcell_coupling = NarrowBandSubcellCoupling::prescribed;
+      narrow_band_data.advected_points.points_per_direction = 3;
+      narrow_band_data.advected_points.merge_distance       = merge_distance;
+
+      ReinitializationData<number> reinit_data;
+      reinit_data.enable                                      = true;
+      reinit_data.modeltype                                   = ModelType::elliptic;
+      reinit_data.fe.type                                     = FiniteElementType::FE_DGQ;
+      reinit_data.fe.degree                                   = fe_degree;
+      reinit_data.elliptic.intersected_cells_only             = true;
+      reinit_data.elliptic.penalty_parameter                  = 1e4;
+      reinit_data.elliptic.nlsolve.max_nonlinear_iterations   = 1000;
+      reinit_data.elliptic.nlsolve.residual_tolerance         = 1e-6;
+      reinit_data.elliptic.nlsolve.field_correction_tolerance = 1e-6;
+      reinit_data.elliptic.nlsolve.verbosity_level            = 0;
+      reinit_data.linear_solver.solver_type                   = LinearSolverType::CG;
+      reinit_data.linear_solver.preconditioner_type           = PreconditionerType::ILU;
+      reinit_data.linear_solver.rel_tolerance                 = 1e-10;
+      reinit_data.linear_solver.abs_tolerance                 = 1e-20;
+      reinit_data.linear_solver.max_iterations                = 1000;
+
+      auto velocity_function = std::make_shared<ConvergingVelocity<dim>>(velocity);
+
+      NarrowBandLevelSetOperation<dim, number> operation(
+        scratch_data, triangulation, narrow_band_data, reinit_data, fe_degree, velocity_function);
+
+      // signed distance of the two disjoint disks
+      dealii::Point<dim> center_minus, center_plus;
+      center_minus[0] = -0.5 * distance;
+      center_plus[0]  = 0.5 * distance;
+      center_minus[1] = center_plus[1] = 0.013;
+      const dealii::ScalarFunctionFromFunctionObject<dim> initial_condition(
+        [&](const dealii::Point<dim> &p) {
+          return radius - std::min(p.distance(center_minus), p.distance(center_plus));
+        });
+      operation.set_initial_condition(initial_condition);
+
+      for (unsigned int n = 0; n < n_time_steps; ++n)
+        {
+          velocity_function->set_time(n * time_step);
+          operation.advance_time_step(n * time_step, time_step, n + 1);
+        }
+
+      const auto &dof_handler = operation.get_dof_handler_cut();
+      const auto &level_set   = operation.get_level_set();
+      level_set.update_ghost_values();
+      // Note: the generator keeps a pointer to the quadrature collection
+      const dealii::hp::QCollection<1> q_collection{dealii::QGauss<1>(fe_degree + 2)};
+      dealii::NonMatching::DiscreteQuadratureGenerator<dim> generator(q_collection,
+                                                                      dof_handler,
+                                                                      level_set);
+
+      number length = 0.;
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        if (cell->is_locally_owned() and cell->get_fe().n_dofs_per_cell() > 0)
+          {
+            generator.generate(cell);
+            const auto  &quadrature = generator.get_surface_quadrature();
+            const number h          = cell->vertex(1)[0] - cell->vertex(0)[0];
+            for (unsigned int q = 0; q < quadrature.size(); ++q)
+              length += quadrature.weight(q) * std::pow(h, dim - 1);
+          }
+      length = dealii::Utilities::MPI::sum(length, MPI_COMM_WORLD);
+
+      const number D = distance - 2. * velocity * n_time_steps * time_step;
+      const number exact_length =
+        4. * dealii::numbers::PI * radius - 4. * radius * std::acos(0.5 * D / radius);
+      return (length - exact_length) / exact_length;
+    }
+
+    /**
      * Semi-Lagrangian advection of a planar signed distance function phi = n.x - c (|n| = 1) with
      * a constant velocity u: the back-traced level set phi(x - u dt) is reproduced exactly on all
      * candidate cells (cut cells and their vertex neighbors), since the polynomials of the cut
@@ -3180,6 +3306,20 @@ namespace MeltPoolDG::LevelSet
     EXPECT_NEAR(small_steps, reference, 1e-6);
     EXPECT_LT(std::abs(subcycling), 2. * std::abs(reference));
     EXPECT_NEAR(large_steps, reference, 1e-12);
+  }
+
+  TEST(NarrowBandLevelSetTest, MergingCircles2D)
+  {
+    // Two circles merge (topology change): the advected interface points of the colliding sides
+    // stop at the plane of the collision inside of the merged phase. Without the merge rule, they
+    // pin spurious parts of the interface inside of the merged phase (observed: relative length
+    // error 8.0e-2 at t = 0.4); the merge rule removes them, and the merged interface is accurate
+    // (observed: -3.3e-4).
+    const number error_without_rule = compute_merging_circles_length_error<2>(0.);
+    const number error_with_rule    = compute_merging_circles_length_error<2>(0.05);
+
+    EXPECT_GT(std::abs(error_without_rule), 2e-2);
+    EXPECT_LT(std::abs(error_with_rule), 2e-3);
   }
 
   TEST(NarrowBandLevelSetTest, ReinitializationPrescribedDoFs2D)

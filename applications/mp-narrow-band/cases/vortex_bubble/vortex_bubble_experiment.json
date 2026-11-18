@@ -54,8 +54,7 @@
       "subcell subdivisions": 4,
       "subdivision buffer": 1.0,
       "subcell coupling": "prescribed",
-      "points per direction": 3,
-      "unresolved distance": 1
+      "points per direction": 3
     }
   },
   "reinitialization": {

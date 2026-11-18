@@ -106,14 +106,16 @@ namespace MeltPoolDG::LevelSet
   NarrowBandInterfacePoints<dim, number>::NarrowBandInterfacePoints(
     const dealii::ConditionalOStream &pcout,
     const double                      unresolved_distance,
-    const double                      support_tolerance)
+    const double                      support_tolerance,
+    const double                      merge_distance)
     : pcout(pcout)
     , unresolved_distance(unresolved_distance)
     , support_tolerance(support_tolerance)
+    , merge_distance(merge_distance)
   {
-    AssertThrow(unresolved_distance >= 0. and support_tolerance > 0.,
-                dealii::ExcMessage("The unresolved distance must not be negative, and the support "
-                                   "tolerance must be positive."));
+    AssertThrow(unresolved_distance >= 0. and support_tolerance > 0. and merge_distance >= 0.,
+                dealii::ExcMessage("The unresolved distance and the merge distance must not be "
+                                   "negative, and the support tolerance must be positive."));
   }
 
   template <int dim, typename number>
@@ -253,6 +255,8 @@ namespace MeltPoolDG::LevelSet
         min_cell_size = std::min(min_cell_size, cell->minimum_vertex_distance());
     length_scale = dealii::Utilities::MPI::min(min_cell_size, dof_handler.get_mpi_communicator());
 
+    approach.clear();
+    convergence.clear();
     points_of_cell.clear();
     is_unresolved.clear();
     located = false;
@@ -316,6 +320,32 @@ namespace MeltPoolDG::LevelSet
           normals[k] = m_new / weights[k];
       }
 
+    // approach of the flow on the outer side of each point within one time step (merge rule):
+    // dt max(0, (u(x - l n) - u(x)) . n) at t^{n+1} with the length scale l, i.e., the
+    // displacement, by which a part of the interface on the outer side approaches the point
+    // within one time step (nonzero for converging flows, zero for rigid-body motions)
+    // and the convergence ratio of this normal velocity difference and the speed
+    approach.assign(points.size(), 0.);
+    convergence.assign(points.size(), 0.);
+    if (merge_distance > 0.)
+      {
+        velocity.set_time(time + h);
+        for (unsigned int k = 0; k < points.size(); ++k)
+          {
+            const dealii::Point<dim> outer = points[k] - length_scale * normals[k];
+            dealii::Tensor<1, dim>   u_point, u_outer;
+            for (unsigned int d = 0; d < dim; ++d)
+              {
+                u_point[d] = velocity.value(points[k], d);
+                u_outer[d] = velocity.value(outer, d);
+              }
+            const double rate  = (u_outer - u_point) * normals[k];
+            const double speed = std::max(u_point.norm(), u_outer.norm());
+            approach[k]        = h * std::max(0., rate);
+            convergence[k]     = speed > 0. ? std::max(0., rate) / speed : 0.;
+          }
+      }
+
     velocity.set_time(old_time);
 
     points_of_cell.clear();
@@ -324,24 +354,19 @@ namespace MeltPoolDG::LevelSet
   }
 
   template <int dim, typename number>
-  void
-  NarrowBandInterfacePoints<dim, number>::assign_points_to_cells(
-    const dealii::DoFHandler<dim> &dof_handler_band)
+  std::vector<std::optional<typename NarrowBandInterfacePoints<dim, number>::Location>>
+  NarrowBandInterfacePoints<dim, number>::find_cells(
+    const dealii::DoFHandler<dim>         &dof_handler_band,
+    const std::vector<dealii::Point<dim>> &query_points)
   {
     // cell of the band containing each point (locally owned and ghost cells): on the common
     // boundary of several cells, the cell with the smallest CellId (unique on all processes)
-    struct Location
-    {
-      dealii::CellId cell_id;
-      unsigned int   active_cell_index;
-      bool           is_locally_owned;
-    };
-    std::vector<std::optional<Location>> locations(points.size());
+    std::vector<std::optional<Location>> locations(query_points.size());
 
     std::vector<std::pair<dealii::Point<dim>, unsigned int>> indexed_points;
-    indexed_points.reserve(points.size());
-    for (unsigned int k = 0; k < points.size(); ++k)
-      indexed_points.emplace_back(points[k], k);
+    indexed_points.reserve(query_points.size());
+    for (unsigned int k = 0; k < query_points.size(); ++k)
+      indexed_points.emplace_back(query_points[k], k);
     const auto point_tree = dealii::pack_rtree(indexed_points);
 
     constexpr double tolerance = 1e-10;
@@ -376,10 +401,153 @@ namespace MeltPoolDG::LevelSet
           }
       }
 
+    return locations;
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandInterfacePoints<dim, number>::assign_points_to_cells(
+    const dealii::DoFHandler<dim> &dof_handler_band)
+  {
+    const auto locations = find_cells(dof_handler_band, points);
+
     points_of_cell.assign(dof_handler_band.get_triangulation().n_active_cells(), {});
     for (unsigned int k = 0; k < points.size(); ++k)
       if (locations[k] and locations[k]->is_locally_owned)
         points_of_cell[locations[k]->active_cell_index].push_back(k);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandInterfacePoints<dim, number>::mark_collided_points(
+    const dealii::DoFHandler<dim> &dof_handler_band,
+    const VectorType              &level_set_band,
+    const std::vector<double>     &values_at_points,
+    const std::vector<double>     &cell_sizes,
+    std::vector<unsigned int>     &status) const
+  {
+    const MPI_Comm mpi_comm = dof_handler_band.get_mpi_communicator();
+
+    // only points in a converging flow are candidates (the positive part of the normal velocity
+    // difference over h on the outer side exceeds half of the local speed, e.g., two parts of the
+    // interface pushed against each other), i.e., not the points of thin gaps or filaments in
+    // stretching or rotating flows, which the level set does not resolve (the points are the same
+    // on all processes, i.e., all processes take the same decisions)
+    const auto is_candidate = [&](const unsigned int k) {
+      return status[k] == 1 and convergence.size() == points.size() and convergence[k] > 0.5;
+    };
+    bool any_candidate = false;
+    for (unsigned int k = 0; k < points.size(); ++k)
+      any_candidate = any_candidate or is_candidate(k);
+    if (not any_candidate)
+      return;
+
+    const auto approach_of = [&](const unsigned int k) {
+      return approach.size() == points.size() ? approach[k] : 0.;
+    };
+
+    // distance of the merge rule: c_m h plus the approach of the flow on the outer side within
+    // one time step (collisions within the time step)
+    std::vector<double> distances(points.size());
+    for (unsigned int k = 0; k < points.size(); ++k)
+      distances[k] = merge_distance * cell_sizes[k] + approach_of(k);
+
+    // (a) ray test: the advected level set at the probe x - delta n, i.e., on the outer side of
+    // the point, exceeds the value at the point by more than delta / 4 (for a point on the
+    // interface, it decreases by about delta)
+    std::vector<dealii::Point<dim>> probes(points.size());
+    for (unsigned int k = 0; k < points.size(); ++k)
+      probes[k] = is_candidate(k) ? points[k] - distances[k] * normals[k] : points[k];
+
+    const auto locations = find_cells(dof_handler_band, probes);
+
+    std::vector<std::vector<unsigned int>> probes_of_cell(
+      dof_handler_band.get_triangulation().n_active_cells());
+    for (unsigned int k = 0; k < points.size(); ++k)
+      if (is_candidate(k) and locations[k] and locations[k]->is_locally_owned)
+        probes_of_cell[locations[k]->active_cell_index].push_back(k);
+
+    std::vector<double> probe_values(points.size(), 0.), probe_found(points.size(), 0.);
+    {
+      dealii::Vector<number> values;
+      for (const auto &cell : dof_handler_band.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+            continue;
+
+          const auto &cell_probes = probes_of_cell[cell->active_cell_index()];
+          if (cell_probes.empty())
+            continue;
+
+          const auto              &fe = cell->get_fe();
+          const AffineCellMap<dim> map(cell);
+          values.reinit(fe.n_dofs_per_cell());
+          cell->get_dof_values(level_set_band, values);
+
+          for (const unsigned int k : cell_probes)
+            {
+              const dealii::Point<dim> unit_point = map.to_unit(probes[k]);
+              double                   value      = 0.;
+              for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
+                value += values[i] * fe.shape_value(i, unit_point);
+              probe_values[k] = value;
+              probe_found[k]  = 1.;
+            }
+        }
+    }
+    dealii::Utilities::MPI::sum(probe_values, mpi_comm, probe_values);
+    dealii::Utilities::MPI::sum(probe_found, mpi_comm, probe_found);
+
+    std::vector<bool> is_collided(points.size(), false);
+    for (unsigned int k = 0; k < points.size(); ++k)
+      if (is_candidate(k) and probe_found[k] > 0.5 and
+          probe_values[k] - values_at_points[k] > 0.25 * distances[k])
+        is_collided[k] = true;
+
+    // (b) pair test: a point of a different orientation (n_i . n_j < 1/2) is closer than the sum
+    // of the approaches of the flow of the two points within the time step, and each of the two
+    // points lies on the outer side of the other one (back to back, i.e., the gap between the two
+    // parts of the interface has closed within the time step)
+    std::vector<std::pair<dealii::Point<dim>, unsigned int>> indexed_points;
+    for (unsigned int k = 0; k < points.size(); ++k)
+      if (status[k] != 0)
+        indexed_points.emplace_back(points[k], k);
+    const auto point_tree = dealii::pack_rtree(indexed_points);
+
+    double max_approach = 0.;
+    for (unsigned int k = 0; k < points.size(); ++k)
+      max_approach = std::max(max_approach, approach_of(k));
+
+    std::vector<std::pair<dealii::Point<dim>, unsigned int>> neighbors;
+    for (unsigned int k = 0; k < points.size(); ++k)
+      {
+        if (not is_candidate(k) or is_collided[k])
+          continue;
+
+        const double       radius = approach_of(k) + max_approach;
+        dealii::Point<dim> lower = points[k], upper = points[k];
+        for (unsigned int d = 0; d < dim; ++d)
+          {
+            lower[d] -= radius;
+            upper[d] += radius;
+          }
+        neighbors.clear();
+        point_tree.query(boost::geometry::index::intersects(
+                           dealii::BoundingBox<dim>(std::make_pair(lower, upper))),
+                         std::back_inserter(neighbors));
+        for (const auto &[point, j] : neighbors)
+          if (j != k and point.distance(points[k]) < approach_of(k) + approach_of(j) and
+              normals[k] * normals[j] < 0.5 and normals[k] * (points[j] - points[k]) <= 0. and
+              normals[j] * (points[k] - points[j]) <= 0.)
+            {
+              is_collided[k] = true;
+              break;
+            }
+      }
+
+    for (unsigned int k = 0; k < points.size(); ++k)
+      if (is_collided[k])
+        status[k] = 3;
   }
 
   template <int dim, typename number>
@@ -408,6 +576,7 @@ namespace MeltPoolDG::LevelSet
     // <= 0 at the point x (e.g., parts of the interface, which are not resolved by the level set
     // and have been lost by it)
     std::vector<unsigned int> status_local(points.size(), 0), status(points.size(), 0);
+    std::vector<double>       values_at_points(points.size(), 0.), cell_sizes(points.size(), 0.);
     {
       dealii::Vector<number> values;
       for (const auto &cell : dof_handler_band.active_cell_iterators())
@@ -439,11 +608,22 @@ namespace MeltPoolDG::LevelSet
 
               const bool is_supported =
                 std::abs(value) <= support_tolerance * map.cell_size and normals[k] * gradient > 0.;
-              status_local[k] = is_supported ? 1 : 2;
+              status_local[k]     = is_supported ? 1 : 2;
+              values_at_points[k] = value;
+              cell_sizes[k]       = map.cell_size;
             }
         }
     }
     dealii::Utilities::MPI::sum(status_local, mpi_comm, status);
+
+    // merge rule (status 3: collided points, removed)
+    if (merge_distance > 0.)
+      {
+        dealii::Utilities::MPI::sum(values_at_points, mpi_comm, values_at_points);
+        dealii::Utilities::MPI::sum(cell_sizes, mpi_comm, cell_sizes);
+        mark_collided_points(
+          dof_handler_band, level_set_band, values_at_points, cell_sizes, status);
+      }
 
     {
       unsigned int n_kept = 0;
@@ -453,6 +633,8 @@ namespace MeltPoolDG::LevelSet
             ++statistics.n_points_outside;
           else if (status[k] == 2)
             ++statistics.n_unsupported_points;
+          else if (status[k] == 3)
+            ++statistics.n_collided_points;
           if (status[k] != 1)
             continue;
 
@@ -705,8 +887,10 @@ namespace MeltPoolDG::LevelSet
     std::ostringstream str;
     str << "interface points: " << statistics.n_points << " (" << statistics.n_inserted_points
         << " new, " << statistics.n_merged_points << " merged, " << statistics.n_points_outside
-        << " outside of the band, " << statistics.n_unsupported_points << " not supported), "
-        << statistics.n_points_in_non_cut_cells << " in cells, which are not cut, "
+        << " outside of the band, " << statistics.n_unsupported_points << " not supported";
+    if (statistics.n_collided_points > 0)
+      str << ", " << statistics.n_collided_points << " collided";
+    str << "), " << statistics.n_points_in_non_cut_cells << " in cells, which are not cut, "
         << statistics.n_cut_cells_without_points << " cut cells without points, "
         << statistics.n_unresolved_points << " unresolved points";
     Journal::print_line(pcout, str.str(), "narrow_band");

@@ -130,7 +130,8 @@ namespace MeltPoolDG::LevelSet
         interface_points = std::make_unique<NarrowBandInterfacePoints<dim, number>>(
           scratch_data.get_pcout(1),
           narrow_band_data.advected_points.unresolved_distance,
-          narrow_band_data.advected_points.support_tolerance);
+          narrow_band_data.advected_points.support_tolerance,
+          narrow_band_data.advected_points.merge_distance);
       }
 
     // reinitialization in the continuous level set space

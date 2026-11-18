@@ -381,6 +381,12 @@ namespace MeltPoolDG::LevelSet
       /// cell size, are removed (parts of the interface, which the level set has lost).
       number support_tolerance = 0.2;
 
+      /// Merge distance c_m relative to the cell size of the merge rule for topology changes
+      /// (e.g., merging droplets): points of two parts of the interface, which have collided
+      /// within the time step or whose gap is thinner than about c_m h, are removed (zero: no
+      /// merge rule, see NarrowBandInterfacePoints).
+      number merge_distance = 0.05;
+
       /// Number n of Gauss points per direction of the surface quadrature, at which the points are
       /// seeded on the initial zero level set and inserted into gaps of the point set (0: n = p +
       /// 1). It also sets the minimum distance h / n of an inserted point to all points and the

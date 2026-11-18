@@ -11,6 +11,7 @@
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/fe/mapping.h>
 
+#include <deal.II/grid/cell_id.h>
 #include <deal.II/grid/tria.h>
 
 #include <deal.II/lac/la_parallel_vector.h>
@@ -18,6 +19,7 @@
 #include <deal.II/non_matching/immersed_surface_quadrature.h>
 
 #include <functional>
+#include <optional>
 #include <vector>
 
 namespace MeltPoolDG::LevelSet
@@ -47,7 +49,32 @@ namespace MeltPoolDG::LevelSet
    *   step, i.e., after the reinitialization (insert_points()),
    * - in cells with more than $2 n^{d-1}$ points ($n$ points per direction of the surface
    *   quadrature), the closest pairs of points with the same orientation are merged by removing
-   *   one point and adding its weight to the other one (compression of the interface).
+   *   one point and adding its weight to the other one (compression of the interface),
+   * - merge rule (topology change, merge distance $c_m > 0$): the points of two parts of the
+   *   interface, which have collided, are removed. The points move forward in time and cannot
+   *   represent the disappearance of the parts of the interface, which collide (e.g., the facing
+   *   sides of two merging droplets, whose points stop at the plane of the collision inside of
+   *   the merged phase), while the advected level set, which is evaluated along the backward
+   *   characteristics, already contains the merged interface. With the approach
+   *   $a = \Delta t \max(0, (\boldsymbol{u}(\boldsymbol{x} - h \boldsymbol{n}) -
+   *   \boldsymbol{u}(\boldsymbol{x})) \cdot \boldsymbol{n})$ of the flow on the outer side
+   *   of a point within one time step (nonzero for converging flows, zero for rigid-body
+   *   motions), a supported point in a converging flow (the positive part of the normal velocity
+   *   difference $(\boldsymbol{u}(\boldsymbol{x} - h \boldsymbol{n}) -
+   *   \boldsymbol{u}(\boldsymbol{x})) \cdot \boldsymbol{n}$ exceeds half of the local speed,
+   *   e.g., two parts of the interface pushed against each other; not the points of thin gaps or
+   *   filaments in stretching or rotating flows, which the level set does not resolve) is
+   *   removed, (a) if the advected level set at the probe
+   *   $\boldsymbol{x} - \delta \boldsymbol{n}$, $\delta = c_m h + a$, on its outer side
+   *   exceeds the value at the point by more than $\delta / 4$ (for a point on the interface,
+   *   it decreases by about $\delta$), i.e., the point lies inside of the phase or at a gap
+   *   thinner than about $\delta$, or (b) if a point of a different orientation
+   *   ($\boldsymbol{n}_i \cdot \boldsymbol{n}_j < 1/2$) is closer than the sum of the
+   *   approaches of the two points and each of them lies on the outer side of the other one
+   *   (back to back, i.e., the gap between the two parts has closed within the time step). Thin
+   *   filaments (both sides face each other) and gaps wider than $\delta$ are kept. After the
+   *   removal, the advected level set determines the interface in these cells, and new points
+   *   are inserted from the merged interface.
    * The reinitialization then enforces $\phi_h = 0$ weakly at the points
    * (get_surface_quadrature()) instead of at the zero level set of the advected level set in the
    * cut cells containing usable points (see below). The cut cells are still determined from the
@@ -101,6 +128,9 @@ namespace MeltPoolDG::LevelSet
       /// Number of points, which are not supported by the advected level set (removed).
       unsigned int n_unsupported_points = 0;
 
+      /// Number of points removed by the merge rule (collision of two parts of the interface).
+      unsigned int n_collided_points = 0;
+
       /// Number of new points seeded in the gaps of the point set.
       unsigned int n_inserted_points = 0;
 
@@ -127,10 +157,13 @@ namespace MeltPoolDG::LevelSet
      * opposite orientation are not used (unresolved interface).
      * @param support_tolerance Maximum magnitude of the advected level set at a supported point
      * relative to the cell size.
+     * @param merge_distance Merge distance $c_m$ relative to the cell size of the merge rule
+     * (zero: no merge rule), see the class documentation.
      */
     explicit NarrowBandInterfacePoints(const dealii::ConditionalOStream &pcout,
                                        const double                      unresolved_distance = 2.0,
-                                       const double                      support_tolerance   = 0.2);
+                                       const double                      support_tolerance   = 0.2,
+                                       const double                      merge_distance      = 0.);
 
     /**
      * @brief Seed the points on the zero level set of a level set (all previous points are
@@ -409,10 +442,47 @@ namespace MeltPoolDG::LevelSet
                     std::vector<double>           &data) const;
 
     /**
+     * @brief Cell of the band containing a point.
+     */
+    struct Location
+    {
+      dealii::CellId cell_id;
+      unsigned int   active_cell_index;
+      bool           is_locally_owned;
+    };
+
+    /**
+     * @brief Cells of the band (locally owned or ghost cells with DoFs) containing the points
+     * @p query_points: on the common boundary of several cells, the cell with the smallest CellId
+     * (unique on all processes); empty for points outside of these cells.
+     */
+    static std::vector<std::optional<Location>>
+    find_cells(const dealii::DoFHandler<dim>         &dof_handler_band,
+               const std::vector<dealii::Point<dim>> &query_points);
+
+    /**
      * @brief Assign the points to the locally owned cells of the band (points_of_cell).
      */
     void
     assign_points_to_cells(const dealii::DoFHandler<dim> &dof_handler_band);
+
+    /**
+     * @brief Merge rule: set @p status to 3 for the supported points (status 1), which belong to
+     * two parts of the interface, which have collided (see the class documentation).
+     *
+     * @param dof_handler_band Band DoFHandler.
+     * @param level_set_band Advected level set on the band (with ghost values).
+     * @param values_at_points Advected level set at the points (all processes).
+     * @param cell_sizes Cell sizes of the cells containing the points (all processes).
+     * @param status Status of the points (all processes): 0: outside of the band, 1: supported,
+     * 2: not supported, 3: collided.
+     */
+    void
+    mark_collided_points(const dealii::DoFHandler<dim> &dof_handler_band,
+                         const VectorType              &level_set_band,
+                         const std::vector<double>     &values_at_points,
+                         const std::vector<double>     &cell_sizes,
+                         std::vector<unsigned int>     &status) const;
 
     /**
      * @brief Mark the unresolved points of the locally owned cells and update the statistics of
@@ -449,8 +519,20 @@ namespace MeltPoolDG::LevelSet
     /// size.
     const double support_tolerance;
 
+    /// Merge distance relative to the cell size (zero: no merge rule).
+    const double merge_distance;
+
     /// Length scale of the finite differences of the velocity (minimum cell size at the seeding).
     double length_scale = 1.;
+
+    /// Approach of the flow on the outer side of each point within the last time step (merge
+    /// rule, computed in advect(), empty after the seeding).
+    std::vector<double> approach;
+
+    /// Convergence ratio of the flow on the outer side of each point: positive part of the normal
+    /// velocity difference over the length scale divided by the speed (merge rule, computed in
+    /// advect(), empty after the seeding).
+    std::vector<double> convergence;
 
     /// The points are assigned to the cells.
     bool located = false;

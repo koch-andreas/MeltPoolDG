@@ -1,0 +1,40 @@
+| t = 0.0000e+00: 64 cut cells, 116 neighbor cells                                 merging_circles |
+| area (phi>0): 3.9270210758e-01                                                   merging_circles |
+| interface length: 3.1416e+00  circularity: 7.0711e-01                            merging_circles |
+| exact area: 3.9269908170e-01  rel. error area: 7.7053e-06                        merging_circles |
+| exact length: 3.1416e+00  rel. error length: 5.8451e-06                          merging_circles |
+| gap: 1.0001e-01 (exact: 1.0000e-01)  neck: 0.0000e+00 (exact: 0.0000e+00)        merging_circles |
+| rel. L2 error signed distance: 8.3368e-04  L2 error |grad phi|-1: 1.5934e-03     merging_circles |
+| interface error L2: 2.4485e-05  max: 7.2248e-05  rel. error measure: 5.8451e-06  merging_circles |
+| t = 1.0000e-01: 64 cut cells, 112 neighbor cells                                 merging_circles |
+| area (phi>0): 3.9280365906e-01                                                   merging_circles |
+| interface length: 3.1420e+00  circularity: 7.0710e-01                            merging_circles |
+| exact area: 3.9269908170e-01  rel. error area: 2.6630e-04                        merging_circles |
+| exact length: 3.1416e+00  rel. error length: 1.4356e-04                          merging_circles |
+| gap: 4.9804e-02 (exact: 5.0000e-02)  neck: 0.0000e+00 (exact: 0.0000e+00)        merging_circles |
+| rel. L2 error signed distance: 4.1278e-03  L2 error |grad phi|-1: 5.8578e-03     merging_circles |
+| interface error L2: 7.1410e-05  max: 2.8713e-04  rel. error measure: 1.4356e-04  merging_circles |
+| t = 2.0000e-01: 60 cut cells, 104 neighbor cells                                 merging_circles |
+| area (phi>0): 3.9285015908e-01                                                   merging_circles |
+| interface length: 2.9935e+00  circularity: 7.4223e-01                            merging_circles |
+| exact area: 3.9269908170e-01  rel. error area: 3.8472e-04                        merging_circles |
+| exact length: 3.1416e+00  rel. error length: -4.7140e-02                         merging_circles |
+| gap: 0.0000e+00 (exact: 0.0000e+00)  neck: 4.0499e-02 (exact: 3.7253e-09)        merging_circles |
+| rel. L2 error signed distance: 1.3345e-01  L2 error |grad phi|-1: 7.7294e-02     merging_circles |
+| interface error L2: 5.4024e-04  max: 4.1246e-03  rel. error measure: -4.7140e-02 merging_circles |
+| t = 3.0000e-01: 56 cut cells, 104 neighbor cells                                 merging_circles |
+| area (phi>0): 3.8552130720e-01                                                   merging_circles |
+| interface length: 2.6729e+00  circularity: 8.2348e-01                            merging_circles |
+| exact area: 3.8535834334e-01  rel. error area: 4.2289e-04                        merging_circles |
+| exact length: 2.6906e+00  rel. error length: -6.5783e-03                         merging_circles |
+| gap: 0.0000e+00 (exact: 0.0000e+00)  neck: 1.1473e-01 (exact: 1.0897e-01)        merging_circles |
+| rel. L2 error signed distance: 3.3171e-02  L2 error |grad phi|-1: 1.9013e-02     merging_circles |
+| interface error L2: 2.8368e-04  max: 4.5244e-03  rel. error measure: -6.5783e-03 merging_circles |
+| t = 4.0000e-01: 52 cut cells, 100 neighbor cells                                 merging_circles |
+| area (phi>0): 3.7231356918e-01                                                   merging_circles |
+| interface length: 2.4973e+00  circularity: 8.6615e-01                            merging_circles |
+| exact area: 3.7226144310e-01  rel. error area: 1.4003e-04                        merging_circles |
+| exact length: 2.4981e+00  rel. error length: -3.2625e-04                         merging_circles |
+| gap: 0.0000e+00 (exact: 0.0000e+00)  neck: 1.5038e-01 (exact: 1.5000e-01)        merging_circles |
+| rel. L2 error signed distance: 5.6518e-03  L2 error |grad phi|-1: 1.3768e-02     merging_circles |
+| interface error L2: 8.3925e-05  max: 4.1982e-04  rel. error measure: -3.2625e-04 merging_circles |

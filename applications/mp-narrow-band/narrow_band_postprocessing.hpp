@@ -14,6 +14,8 @@
 #include <deal.II/hp/mapping_collection.h>
 #include <deal.II/hp/q_collection.h>
 
+#include <deal.II/lac/vector.h>
+
 #include <deal.II/non_matching/fe_immersed_values.h>
 #include <deal.II/non_matching/quadrature_generator.h>
 
@@ -27,6 +29,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace MeltPoolDG::LevelSet
@@ -85,9 +88,10 @@ namespace MeltPoolDG::LevelSet
    * @param area_precision Number of digits after the decimal point of the area (scientific
    * format). For the default of four digits, all measures are printed in one line; for more
    * digits, the area is printed in a separate line (the line width of the output is limited).
+   * @return The area (volume in 3D) of $\Omega^+$ and the length (area in 3D) of $\Gamma_h$.
    */
   template <int dim, typename number>
-  void
+  std::pair<number, number>
   print_interface_measures(const GenericDataOut<dim, number> &generic_data_out,
                            const std::string                 &vector_name,
                            const MPI_Comm                     mpi_communicator,
@@ -173,6 +177,133 @@ namespace MeltPoolDG::LevelSet
         Journal::print_line(pcout, area_str.str(), label);
         Journal::print_line(pcout, str.str(), label);
       }
+
+    return {volume, interface_measure};
+  }
+
+  /**
+   * @brief Zeros of a narrow-band level-set field on the segment from @p a to @p b, given by their
+   * parameters $s \in [0, 1]$ (position $\boldsymbol{a} + s (\boldsymbol{b} - \boldsymbol{a})$),
+   * sorted in ascending order (all processes).
+   *
+   * On each locally owned cell with DoFs, which the segment intersects, the polynomial of the
+   * cell is sampled at @p n_samples points of the part of the segment in the cell, and each sign
+   * change is refined by bisection. Cells without DoFs are skipped, i.e., only the zeros in the
+   * cells with DoFs (e.g., the cut cells) are found. Zeros found by several cells (e.g., on a
+   * common face) are reported once (tolerance $10^{-8} |\boldsymbol{b} - \boldsymbol{a}|$).
+   * Requires parallelepiped cells (the unit points are computed with the mapping).
+   */
+  template <int dim, typename number>
+  std::vector<number>
+  find_zeros_on_segment(const GenericDataOut<dim, number> &generic_data_out,
+                        const std::string                 &vector_name,
+                        const dealii::Point<dim>          &a,
+                        const dealii::Point<dim>          &b,
+                        const MPI_Comm                     mpi_communicator,
+                        const unsigned int                 n_samples = 64)
+  {
+    const auto &dof_handler = generic_data_out.get_dof_handler(vector_name);
+    const auto &level_set   = generic_data_out.get_vector(vector_name);
+    const auto &mapping     = generic_data_out.get_mapping();
+
+    const bool has_ghost_elements = level_set.has_ghost_elements();
+    if (not has_ghost_elements)
+      level_set.update_ghost_values();
+
+    const dealii::Tensor<1, dim> direction = b - a;
+    const double                 length    = direction.norm();
+
+    std::vector<double>    zeros;
+    dealii::Vector<number> cell_values;
+
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+          continue;
+
+        // part [s_begin, s_end] of the segment in the bounding box of the cell
+        const auto   box       = cell->bounding_box();
+        const double tolerance = 1e-12 * cell->diameter();
+        double       s_begin = 0., s_end = 1.;
+        for (unsigned int d = 0; d < dim; ++d)
+          {
+            const double lower = box.get_boundary_points().first[d] - tolerance;
+            const double upper = box.get_boundary_points().second[d] + tolerance;
+            if (std::abs(direction[d]) < 1e-14 * length)
+              {
+                if (a[d] < lower or a[d] > upper)
+                  s_end = -1.;
+              }
+            else
+              {
+                const double s0 = (lower - a[d]) / direction[d];
+                const double s1 = (upper - a[d]) / direction[d];
+                s_begin         = std::max(s_begin, std::min(s0, s1));
+                s_end           = std::min(s_end, std::max(s0, s1));
+              }
+          }
+        if (s_end <= s_begin)
+          continue;
+
+        const auto &fe = cell->get_fe();
+        cell_values.reinit(fe.n_dofs_per_cell());
+        cell->get_dof_values(level_set, cell_values);
+
+        const auto evaluate = [&](const double s) {
+          dealii::Point<dim> unit = mapping.transform_real_to_unit_cell(cell, a + s * direction);
+          for (unsigned int d = 0; d < dim; ++d)
+            unit[d] = std::clamp(unit[d], 0., 1.);
+          double value = 0.;
+          for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
+            value += cell_values[i] * fe.shape_value(i, unit);
+          return value;
+        };
+
+        double s_previous = s_begin;
+        double f_previous = evaluate(s_previous);
+        for (unsigned int k = 1; k <= n_samples; ++k)
+          {
+            const double s = s_begin + (s_end - s_begin) * k / n_samples;
+            const double f = evaluate(s);
+            if (f_previous == 0.)
+              zeros.push_back(s_previous);
+            else if (f_previous * f < 0.)
+              {
+                double s_lower = s_previous, s_upper = s, f_lower = f_previous;
+                for (unsigned int iteration = 0; iteration < 60; ++iteration)
+                  {
+                    const double s_middle = 0.5 * (s_lower + s_upper);
+                    const double f_middle = evaluate(s_middle);
+                    if ((f_middle < 0.) == (f_lower < 0.))
+                      {
+                        s_lower = s_middle;
+                        f_lower = f_middle;
+                      }
+                    else
+                      s_upper = s_middle;
+                  }
+                zeros.push_back(0.5 * (s_lower + s_upper));
+              }
+            s_previous = s;
+            f_previous = f;
+          }
+        if (f_previous == 0.)
+          zeros.push_back(s_previous);
+      }
+
+    if (not has_ghost_elements)
+      level_set.zero_out_ghost_values();
+
+    std::vector<number> all_zeros;
+    for (const auto &process_zeros : dealii::Utilities::MPI::all_gather(mpi_communicator, zeros))
+      all_zeros.insert(all_zeros.end(), process_zeros.begin(), process_zeros.end());
+    std::sort(all_zeros.begin(), all_zeros.end());
+
+    std::vector<number> unique_zeros;
+    for (const number s : all_zeros)
+      if (unique_zeros.empty() or s - unique_zeros.back() > 1e-8)
+        unique_zeros.push_back(s);
+    return unique_zeros;
   }
 
   /**
