@@ -7,6 +7,7 @@
 #include <deal.II/fe/fe_q.h>
 #include <deal.II/fe/mapping.h>
 
+#include <deal.II/grid/cell_id.h>
 #include <deal.II/grid/tria.h>
 
 #include <deal.II/hp/fe_collection.h>
@@ -57,16 +58,16 @@ namespace MeltPoolDG::LevelSet
    * Closed interface (close_interface()): the zero level set of the cut cells is closed, if the
    * level set does not vanish on the faces between the cut cells and the cells, which are not cut
    * (the interface cannot leave the cut cells there), i.e., if it has the sign $s$ of the
-   * neighbor cell on the whole face. This is enforced for any polynomial degree by
-   * 1. clamping the nodal values on these faces: $s \phi_i \geq \epsilon h$,
-   * 2. testing the Bernstein coefficients of the restriction of $\phi$ to the face (sufficient
-   *    condition: all coefficients have the sign $s$), and
-   * 3. replacing the level set on a face, which fails the test, by the (multi)linear interpolant
-   *    of its vertex values (the nodes in the interior of the face, of its edges in 3D), which has
-   *    the sign $s$ on the whole face.
-   * Since the nodes of an edge in 3D are shared by several faces, step 3 is repeated until no
-   * face fails the test. The correction only moves the interface away from the boundary of the
-   * cut cells; it is applied after the reinitialization and the subcell distance.
+   * neighbor cell on the whole face. For any polynomial degree, this is checked with the
+   * Bernstein coefficients of the restriction of the level set to the face (the polynomial is a
+   * convex combination of its coefficients), refined by de Casteljau subdivision, which yields a
+   * lower bound $m$ of the minimum of $s \phi$ on the face (branch and bound). Only on the faces
+   * with $m < -10^{-6} h$ (an interface, which only touches a face, does not open it), all
+   * nodal values of the face are shifted by $s (\epsilon h - m)$, i.e., the restriction of the
+   * level set to the face is lifted uniformly to the minimum $\epsilon h$. The level set is not
+   * changed on faces, on which it has the correct sign, and the change is proportional to the
+   * violation. The correction only moves the interface away from the boundary of the cut cells;
+   * it is applied after the reinitialization and the subcell distance.
    */
   template <int dim, typename number>
   class NarrowBandContinuousReinitialization
@@ -104,18 +105,15 @@ namespace MeltPoolDG::LevelSet
       /// boundary of the domain and neighbor cells without sign).
       unsigned int n_faces = 0;
 
-      /// Number of nodes on these faces, whose value is clamped to the sign of the neighbor cell.
-      unsigned int n_clamped_dofs = 0;
-
-      /// Number of faces, whose level set is replaced by the (multi)linear interpolant of the
-      /// vertex values.
-      unsigned int n_linearized_faces = 0;
+      /// Number of faces, on which the level set does not have the sign of the neighbor cell
+      /// everywhere (lifted).
+      unsigned int n_lifted_faces = 0;
 
       /// Number of nodes on faces to neighbor cells of opposite signs (unchanged).
       unsigned int n_conflicting_dofs = 0;
 
-      /// Number of faces, which fail the Bernstein test after the correction (only possible with
-      /// conflicting nodes).
+      /// Number of faces, on which the level set still does not have the sign of the neighbor
+      /// cell after the correction (only possible with conflicting nodes).
       unsigned int n_open_faces = 0;
 
       /// Maximum change of a nodal value relative to the cell size.
@@ -150,11 +148,14 @@ namespace MeltPoolDG::LevelSet
 
     /**
      * @brief Set the continuous level set to the nodal values of the discontinuous level set
-     * @p level_set_dg (average of the values of the adjacent cut cells at shared nodes).
+     * @p level_set_dg (average of the values of the adjacent cut cells at shared nodes). If
+     * @p priority_cells is given (indexed by the active cell index), a node shared with a marked
+     * cell takes the average of the values of the marked cells only.
      */
     void
     interpolate_from_discontinuous(const dealii::DoFHandler<dim> &dof_handler_cut,
-                                   const VectorType              &level_set_dg);
+                                   const VectorType              &level_set_dg,
+                                   const std::vector<bool>       *priority_cells = nullptr);
 
     /**
      * @brief Write the continuous level set into the discontinuous level set @p level_set_dg on
@@ -203,6 +204,17 @@ namespace MeltPoolDG::LevelSet
      */
     CorrectionStatistics
     close_interface(const std::vector<int> &cell_signs, const double offset);
+
+    /**
+     * @brief Cells, which are not cut, behind the faces between the locally owned cut cells and
+     * the cells, which are not cut, on which the continuous level set does not have the sign of
+     * the neighbor cell (the interface leaves the cut cells there, see close_interface()).
+     *
+     * @return Ids of these cells (of the locally owned cut cells of this process; the cells may
+     * be ghost cells).
+     */
+    std::vector<dealii::CellId>
+    find_cells_behind_open_faces(const std::vector<int> &cell_signs) const;
 
     /**
      * @brief Continuous level set (with ghost values).

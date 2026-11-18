@@ -263,20 +263,47 @@ namespace MeltPoolDG::LevelSet
         "Continuous level set space: correction of the level set after each time step (after the "
         "reinitialization and the subcell distance, and after the initial reinitialization), such "
         "that the zero level set is closed: on each face between a cut cell and a cell, which is "
-        "not cut (excluding the boundary of the domain), the level set takes the sign of the "
-        "neighbor cell. The nodal values on the face are clamped to s phi_i >= c h (closed "
-        "interface offset c); if a Bernstein coefficient of the restriction of the level set to "
-        "the face does not have the sign s (any polynomial degree), the values at the nodes of "
-        "the face, which are not vertices, are replaced by the (multi)linear interpolant of the "
-        "vertex values. Thus, the interface only ends at the boundary of the domain. Not used for "
-        "the discontinuous space.");
+        "not cut (excluding the boundary of the domain), the level set has the sign s of the "
+        "neighbor cell. The minimum of s phi on a face is computed with the Bernstein coefficients "
+        "of the restriction of the level set to the face and de Casteljau subdivision (any "
+        "polynomial degree); faces, on which the interface only touches the face, are not "
+        "changed. Where the interface crosses a face, the cell behind the face is added to the cut "
+        "cells (closed interface activation; the nodes of the face keep their values, the other "
+        "nodes of the cell take the values of the semi-Lagrangian step), since the "
+        "reinitialization has moved the interface into this cell. On the remaining faces, all "
+        "nodal values of the face are shifted by s (c h - m) (m: minimum of s phi on the face, c: "
+        "closed interface offset), i.e., the interface is moved back into the cut cell. Thus, the "
+        "interface only ends at the boundary of the domain. Not used for the discontinuous space.");
+      prm.add_parameter(
+        "closed interface activation",
+        closed_interface_activation,
+        "Closed-interface correction: add the cells, which are not cut, behind faces crossed by "
+        "the interface to the cut cells (instead of moving the interface back into the cut cell). "
+        "Without the activation, the correction pushes the interface back, when the "
+        "reinitialization moves it towards the points into a cell, which the advected level set "
+        "does not cut, which delays the interface and accumulates errors for small time steps.");
       prm.add_parameter("closed interface offset",
                         closed_interface_offset,
-                        "Closed-interface correction: minimum magnitude c of the nodal values on "
-                        "the faces between the cut cells and the cells, which are not cut, "
-                        "relative to the cell size (distance of the corrected interface from these "
-                        "faces).",
+                        "Closed-interface correction: minimum c of s phi on a lifted face relative "
+                        "to the cell size (distance of the corrected interface from the face).",
                         dealii::Patterns::Double(0.0));
+      prm.add_parameter(
+        "level set update cfl",
+        level_set_update_cfl,
+        "Semi-Lagrangian band: sub-cycling of the level-set update for small time steps. If "
+        "positive, the level set of a time step is evaluated from the last reference level set by "
+        "the backward integration of the characteristics over all time steps since the reference "
+        "(one fourth-order Runge-Kutta step per time step) and the evaluation of the reference "
+        "level set at the foot points, i.e., without accumulating the interpolation errors of the "
+        "intermediate time steps; these level sets are only corrected by the closed-interface "
+        "correction. The reinitialization, the insertion of new interface points and the update "
+        "of the reference are performed, once the maximum displacement of the nodes since the "
+        "reference exceeds this value times the cell size (the reinitialization frequency then "
+        "counts these updates). Thus, the number of these operations, whose errors accumulate, "
+        "does not grow with the number of time steps. Recommended: 0.5 (at most 0.9, since the "
+        "interface must not leave the candidate cells of the reference). Zero: update in every "
+        "time step.",
+        dealii::Patterns::Double(0.0, 0.9));
       prm.add_parameter(
         "reinitialization interface",
         reinitialization_interface,
@@ -515,6 +542,10 @@ namespace MeltPoolDG::LevelSet
                                        "advection are not supported by the semi-Lagrangian "
                                        "narrow band."));
       }
+
+    AssertThrow(level_set_update_cfl == 0. or type == NarrowBandType::semi_lagrangian,
+                dealii::ExcMessage("The sub-cycling of the level-set update requires the "
+                                   "semi-Lagrangian narrow band."));
 
     if (level_set_space == NarrowBandLevelSetSpace::continuous)
       {

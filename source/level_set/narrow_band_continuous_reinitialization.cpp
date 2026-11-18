@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace MeltPoolDG::LevelSet
 {
@@ -73,17 +74,11 @@ namespace MeltPoolDG::LevelSet
       /// Cell DoFs on the face.
       std::vector<unsigned int> dofs;
 
-      /// Whether a DoF of the face (index into dofs) is a vertex of the face.
-      std::vector<bool> is_vertex;
-
       /// Bernstein coefficients of the restriction to the face from the values at the face DoFs
       /// (inverse of the matrix of the tensor-product Bernstein polynomials at the support
-      /// points of the face).
+      /// points of the face). The coefficient of the multi-index (k_0, ..., k_{d-2}) has the index
+      /// sum_e k_e (p+1)^e.
       dealii::FullMatrix<double> bernstein_coefficients;
-
-      /// Values of the (multi)linear interpolant of the vertex values at the face DoFs (columns:
-      /// face DoFs, which are vertices, in the order of dofs).
-      dealii::FullMatrix<double> linear_interpolation;
     };
 
     /**
@@ -138,40 +133,96 @@ namespace MeltPoolDG::LevelSet
               }
           data.bernstein_coefficients = bernstein;
           data.bernstein_coefficients.gauss_jordan();
-
-          // vertices of the face and (multi)linear interpolation of their values
-          std::vector<unsigned int> vertex_bits;
-          data.is_vertex.assign(n_face_dofs, false);
-          for (unsigned int j = 0; j < n_face_dofs; ++j)
-            {
-              bool         is_vertex = true;
-              unsigned int bits      = 0;
-              for (unsigned int e = 0; e + 1 < dim; ++e)
-                if (std::abs(coordinates[j][e] - 1.) < tolerance)
-                  bits |= 1u << e;
-                else if (std::abs(coordinates[j][e]) > tolerance)
-                  is_vertex = false;
-              if (is_vertex)
-                {
-                  data.is_vertex[j] = true;
-                  vertex_bits.push_back(bits);
-                }
-            }
-          AssertDimension(static_cast<unsigned int>(vertex_bits.size()), 1u << (dim - 1));
-
-          data.linear_interpolation.reinit(n_face_dofs, vertex_bits.size());
-          for (unsigned int j = 0; j < n_face_dofs; ++j)
-            for (unsigned int v = 0; v < vertex_bits.size(); ++v)
-              {
-                double value = 1.;
-                for (unsigned int e = 0; e + 1 < dim; ++e)
-                  value *=
-                    (vertex_bits[v] & (1u << e)) ? coordinates[j][e] : 1. - coordinates[j][e];
-                data.linear_interpolation(j, v) = value;
-              }
         }
 
       return face_data;
+    }
+
+    /**
+     * Minimum of the tensor-product Bernstein polynomial of degree @p p in @p n_directions
+     * variables on [0,1]^n_directions with the coefficients @p coefficients by branch and bound:
+     * the polynomial on a patch is a convex combination of its coefficients, i.e., the minimum
+     * coefficient is a lower bound and the corner coefficients are values of the polynomial. A
+     * patch is discarded, if its lower bound is positive or not below the smallest value found
+     * so far (@p upper); otherwise, it is subdivided at the midpoints (de Casteljau algorithm) up
+     * to the depth @p max_depth. Returns the smallest lower bound of the remaining patches of the
+     * maximum depth (+infinity if the polynomial is positive or all patches are discarded);
+     * @p upper is the smallest value found, i.e., the minimum of the polynomial is the minimum of
+     * the returned bound and @p upper up to the error of the bound.
+     */
+    double
+    bernstein_minimum_bound(const std::vector<double> &coefficients,
+                            const unsigned int         p,
+                            const unsigned int         n_directions,
+                            const unsigned int         depth,
+                            const unsigned int         max_depth,
+                            double                    &upper)
+    {
+      const double min_coefficient = *std::min_element(coefficients.begin(), coefficients.end());
+      if (min_coefficient > 0. or min_coefficient >= upper)
+        return std::numeric_limits<double>::infinity();
+
+      // values at the corners of the patch (indices with k_e in {0, p} for all directions)
+      for (unsigned int corner = 0; corner < (1u << n_directions); ++corner)
+        {
+          unsigned int index = 0;
+          for (unsigned int e = 0, stride = 1; e < n_directions; ++e, stride *= p + 1)
+            if (corner & (1u << e))
+              index += p * stride;
+          upper = std::min(upper, coefficients[index]);
+        }
+
+      if (depth == max_depth or n_directions == 0)
+        return min_coefficient;
+
+      // subdivision at the midpoint in all directions: 2^n_directions children
+      std::vector<std::vector<double>> patches{coefficients};
+      std::vector<double>              line(p + 1), left(p + 1), right(p + 1);
+      for (unsigned int e = 0, stride = 1; e < n_directions; ++e, stride *= p + 1)
+        {
+          std::vector<std::vector<double>> split;
+          for (const auto &patch : patches)
+            {
+              std::vector<double> lower(patch.size()), higher(patch.size());
+              for (unsigned int start = 0; start < patch.size(); ++start)
+                {
+                  // first index of a line in direction e
+                  if ((start / stride) % (p + 1) != 0)
+                    continue;
+                  for (unsigned int i = 0; i <= p; ++i)
+                    line[i] = patch[start + i * stride];
+                  left[0]  = line[0];
+                  right[p] = line[p];
+                  for (unsigned int r = 1; r <= p; ++r)
+                    {
+                      for (unsigned int i = 0; i + r <= p; ++i)
+                        line[i] = 0.5 * (line[i] + line[i + 1]);
+                      left[r]      = line[0];
+                      right[p - r] = line[p - r];
+                    }
+                  for (unsigned int i = 0; i <= p; ++i)
+                    {
+                      lower[start + i * stride]  = left[i];
+                      higher[start + i * stride] = right[i];
+                    }
+                }
+              split.push_back(std::move(lower));
+              split.push_back(std::move(higher));
+            }
+          patches = std::move(split);
+        }
+
+      // children in the order of their lower bounds (the most promising first)
+      std::sort(patches.begin(), patches.end(), [](const auto &a, const auto &b) {
+        return *std::min_element(a.begin(), a.end()) < *std::min_element(b.begin(), b.end());
+      });
+
+      double bound = std::numeric_limits<double>::infinity();
+      for (const auto &patch : patches)
+        bound =
+          std::min(bound,
+                   bernstein_minimum_bound(patch, p, n_directions, depth + 1, max_depth, upper));
+      return bound;
     }
   } // namespace
 
@@ -224,10 +275,12 @@ namespace MeltPoolDG::LevelSet
   void
   NarrowBandContinuousReinitialization<dim, number>::interpolate_from_discontinuous(
     const dealii::DoFHandler<dim> &dof_handler_cut,
-    const VectorType              &level_set_dg)
+    const VectorType              &level_set_dg,
+    const std::vector<bool>       *priority_cells)
   {
-    VectorType sum(locally_owned_dofs, locally_relevant_dofs, dof_handler.get_mpi_communicator());
-    VectorType count(sum);
+    const MPI_Comm mpi_comm = dof_handler.get_mpi_communicator();
+    VectorType     sum(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+    VectorType     count(sum), sum_priority(sum), count_priority(sum);
 
     dealii::FullMatrix<double>                   interpolation;
     dealii::Vector<double>                       values_dg;
@@ -249,6 +302,9 @@ namespace MeltPoolDG::LevelSet
                 interpolation(i, j) = fe_dg.shape_value(j, fe.get_unit_support_points()[i]);
           }
 
+        const bool is_priority =
+          priority_cells != nullptr and (*priority_cells)[cell->active_cell_index()];
+
         values_dg.reinit(fe_dg.n_dofs_per_cell());
         cell_dg->get_dof_values(level_set_dg, values_dg);
         cell->get_dof_indices(dof_indices);
@@ -257,17 +313,21 @@ namespace MeltPoolDG::LevelSet
             double value = 0.;
             for (unsigned int j = 0; j < fe_dg.n_dofs_per_cell(); ++j)
               value += interpolation(i, j) * values_dg[j];
-            sum(dof_indices[i]) += value;
-            count(dof_indices[i]) += 1.;
+            (is_priority ? sum_priority : sum)(dof_indices[i]) += value;
+            (is_priority ? count_priority : count)(dof_indices[i]) += 1.;
           }
       }
 
     sum.compress(dealii::VectorOperation::add);
     count.compress(dealii::VectorOperation::add);
+    sum_priority.compress(dealii::VectorOperation::add);
+    count_priority.compress(dealii::VectorOperation::add);
 
     level_set.zero_out_ghost_values();
     for (const auto i : locally_owned_dofs)
-      level_set(i) = count(i) > 0. ? sum(i) / count(i) : 0.;
+      level_set(i) = count_priority(i) > 0. ? sum_priority(i) / count_priority(i) :
+                     count(i) > 0.          ? sum(i) / count(i) :
+                                              0.;
     level_set.update_ghost_values();
   }
 
@@ -643,7 +703,15 @@ namespace MeltPoolDG::LevelSet
 
     const MPI_Comm     mpi_comm  = dof_handler.get_mpi_communicator();
     const unsigned int n_dofs    = fe.n_dofs_per_cell();
+    const unsigned int p         = fe.degree;
     const auto         face_data = create_face_data<dim>(fe);
+
+    // maximum depth of the subdivision of the Bernstein test (faces: 1D in 2D, 2D in 3D) and
+    // tolerance of the minimum relative to the cell size, below which a face is lifted: the
+    // interface may touch a face (minimum zero at isolated points, e.g., a circle tangent to a
+    // face), which does not open it, while it crosses the face for a negative minimum
+    const unsigned int max_depth = 12;
+    constexpr double   tolerance = 1e-6;
 
     CorrectionStatistics statistics;
 
@@ -655,7 +723,6 @@ namespace MeltPoolDG::LevelSet
       unsigned int                                 face_no;
       int                                          sign;
       double                                       cell_size;
-      bool                                         is_linearized;
     };
     std::vector<BoundaryFace> faces;
     for (const auto &cell : dof_handler.active_cell_iterators())
@@ -680,138 +747,154 @@ namespace MeltPoolDG::LevelSet
             BoundaryFace face{std::vector<dealii::types::global_dof_index>(n_dofs),
                               f,
                               sign,
-                              cell->minimum_vertex_distance(),
-                              false};
+                              cell->minimum_vertex_distance()};
             cell->get_dof_indices(face.dof_indices);
             faces.push_back(std::move(face));
           }
       }
 
-    // 1) clamping of the nodal values on the faces: s phi_i >= epsilon h (nodes on faces of
-    // opposite signs are not changed)
-    VectorType positive(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
-    VectorType negative(positive), cell_sizes(positive);
-    for (const auto &face : faces)
-      for (const unsigned int i : face_data[face.face_no].dofs)
-        {
-          const auto index = face.dof_indices[i];
-          (face.sign > 0 ? positive : negative)(index) += 1.;
-          cell_sizes(index) += face.cell_size;
-        }
-    positive.compress(dealii::VectorOperation::add);
-    negative.compress(dealii::VectorOperation::add);
-    cell_sizes.compress(dealii::VectorOperation::add);
-
-    double max_correction = 0.;
-    level_set.zero_out_ghost_values();
-    for (const auto i : locally_owned_dofs)
-      {
-        const double n_positive = positive(i), n_negative = negative(i);
-        if (n_positive == 0. and n_negative == 0.)
-          continue;
-
-        if (n_positive > 0. and n_negative > 0.)
-          {
-            ++statistics.n_conflicting_dofs;
-            continue;
-          }
-
-        const double sign      = n_positive > 0. ? 1. : -1.;
-        const double cell_size = cell_sizes(i) / (n_positive + n_negative);
-        if (sign * level_set(i) < offset * cell_size)
-          {
-            max_correction =
-              std::max(max_correction,
-                       std::abs(sign * offset * cell_size - level_set(i)) / cell_size);
-            level_set(i) = sign * offset * cell_size;
-            ++statistics.n_clamped_dofs;
-          }
-      }
-    level_set.update_ghost_values();
-
-    // 2) Bernstein test of a face: all Bernstein coefficients of the restriction of the level set
-    // to the face have the sign of the neighbor cell (sufficient for s phi > 0 on the face)
+    // lower bound of the minimum of s phi on a face (+infinity if s phi > 0 on the whole face)
     dealii::Vector<double> face_values, coefficients;
-    const auto             passes_test = [&](const BoundaryFace &face) {
+    std::vector<double>    signed_coefficients;
+    const auto             minimum_bound = [&](const BoundaryFace &face) {
       const FaceData &data = face_data[face.face_no];
       face_values.reinit(data.dofs.size());
       coefficients.reinit(data.dofs.size());
       for (unsigned int j = 0; j < data.dofs.size(); ++j)
         face_values[j] = level_set(face.dof_indices[data.dofs[j]]);
       data.bernstein_coefficients.vmult(coefficients, face_values);
-      for (const double coefficient : coefficients)
-        if (face.sign * coefficient <= 0.)
-          return false;
-      return true;
+      signed_coefficients.resize(coefficients.size());
+      for (unsigned int k = 0; k < coefficients.size(); ++k)
+        signed_coefficients[k] = face.sign * coefficients[k];
+      double upper = std::numeric_limits<double>::infinity();
+      double bound = bernstein_minimum_bound(signed_coefficients, p, dim - 1, 0, max_depth, upper);
+      // patches discarded by the bound are not below the smallest value found
+      if (upper <= 0.)
+        bound = std::min(bound, upper);
+      // touching (minimum zero within the tolerance) is not a violation
+      return bound < -tolerance * face.cell_size ? bound : std::numeric_limits<double>::infinity();
     };
 
-    // 3) faces, which fail the test: (multi)linear interpolant of the vertex values at the other
-    // nodes of the face; repeated, since the nodes of an edge (3D) are shared by several faces
-    // (each face is linearized at most once; the vertex values are not changed)
-    VectorType             sum(positive), count(positive);
-    dealii::Vector<double> vertex_values, linear_values;
-    while (true)
+    // 1) faces, on which s phi is not positive: lift of all nodal values of the face by
+    // (epsilon h - m), where m is the lower bound of the minimum of s phi (the Lagrange basis on
+    // the face sums to one, i.e., the face polynomial is shifted uniformly). Nodes shared by
+    // several faces receive the maximum lift of these faces in each direction; nodes on faces to
+    // neighbor cells of opposite signs are not changed.
+    VectorType lift_positive(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+    VectorType lift_negative(lift_positive);
+    double     max_correction = 0.;
+    for (const auto &face : faces)
       {
-        sum   = 0.;
-        count = 0.;
+        const double bound = minimum_bound(face);
+        if (bound == std::numeric_limits<double>::infinity())
+          continue;
 
-        unsigned int n_linearized_faces = 0;
-        for (auto &face : faces)
+        ++statistics.n_lifted_faces;
+        const double lift = offset * face.cell_size - bound;
+        max_correction    = std::max(max_correction, lift / face.cell_size);
+        for (const unsigned int i : face_data[face.face_no].dofs)
           {
-            if (face.is_linearized or passes_test(face))
-              continue;
-
-            const FaceData &data = face_data[face.face_no];
-            vertex_values.reinit(data.linear_interpolation.n());
-            linear_values.reinit(data.dofs.size());
-            for (unsigned int j = 0, v = 0; j < data.dofs.size(); ++j)
-              if (data.is_vertex[j])
-                vertex_values[v++] = level_set(face.dof_indices[data.dofs[j]]);
-            data.linear_interpolation.vmult(linear_values, vertex_values);
-
-            for (unsigned int j = 0; j < data.dofs.size(); ++j)
-              if (not data.is_vertex[j])
-                {
-                  const auto index = face.dof_indices[data.dofs[j]];
-                  sum(index) += linear_values[j];
-                  count(index) += 1.;
-                  max_correction =
-                    std::max(max_correction,
-                             std::abs(linear_values[j] - level_set(index)) / face.cell_size);
-                }
-
-            face.is_linearized = true;
-            ++n_linearized_faces;
+            auto &entry = (face.sign > 0 ? lift_positive : lift_negative)(face.dof_indices[i]);
+            entry       = std::max<number>(entry, lift);
           }
-
-        n_linearized_faces = dealii::Utilities::MPI::sum(n_linearized_faces, mpi_comm);
-        if (n_linearized_faces == 0)
-          break;
-        statistics.n_linearized_faces += n_linearized_faces;
-
-        sum.compress(dealii::VectorOperation::add);
-        count.compress(dealii::VectorOperation::add);
-        level_set.zero_out_ghost_values();
-        for (const auto i : locally_owned_dofs)
-          if (count(i) > 0.)
-            level_set(i) = sum(i) / count(i);
-        level_set.update_ghost_values();
       }
 
-    // faces, which still fail the test (conflicting nodes)
+    // nodes on faces to neighbor cells of opposite signs
+    VectorType positive(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+    VectorType negative(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
     for (const auto &face : faces)
-      if (not passes_test(face))
+      for (const unsigned int i : face_data[face.face_no].dofs)
+        (face.sign > 0 ? positive : negative)(face.dof_indices[i]) = 1.;
+
+    lift_positive.compress(dealii::VectorOperation::max);
+    lift_negative.compress(dealii::VectorOperation::max);
+    positive.compress(dealii::VectorOperation::max);
+    negative.compress(dealii::VectorOperation::max);
+
+    level_set.zero_out_ghost_values();
+    for (const auto i : locally_owned_dofs)
+      {
+        if (positive(i) > 0. and negative(i) > 0.)
+          {
+            ++statistics.n_conflicting_dofs;
+            continue;
+          }
+        level_set(i) += lift_positive(i) - lift_negative(i);
+      }
+    level_set.update_ghost_values();
+
+    // 2) faces, which are still not closed (only possible at conflicting nodes)
+    for (const auto &face : faces)
+      if (minimum_bound(face) != std::numeric_limits<double>::infinity())
         ++statistics.n_open_faces;
 
     statistics.n_faces =
       dealii::Utilities::MPI::sum(static_cast<unsigned int>(faces.size()), mpi_comm);
-    statistics.n_clamped_dofs = dealii::Utilities::MPI::sum(statistics.n_clamped_dofs, mpi_comm);
+    statistics.n_lifted_faces = dealii::Utilities::MPI::sum(statistics.n_lifted_faces, mpi_comm);
     statistics.n_conflicting_dofs =
       dealii::Utilities::MPI::sum(statistics.n_conflicting_dofs, mpi_comm);
     statistics.n_open_faces   = dealii::Utilities::MPI::sum(statistics.n_open_faces, mpi_comm);
     statistics.max_correction = dealii::Utilities::MPI::max(max_correction, mpi_comm);
 
     return statistics;
+  }
+
+  template <int dim, typename number>
+  std::vector<dealii::CellId>
+  NarrowBandContinuousReinitialization<dim, number>::find_cells_behind_open_faces(
+    const std::vector<int> &cell_signs) const
+  {
+    AssertDimension(cell_signs.size(), dof_handler.get_triangulation().n_active_cells());
+
+    const unsigned int p         = fe.degree;
+    const auto         face_data = create_face_data<dim>(fe);
+    constexpr double   tolerance = 1e-6;
+
+    std::vector<dealii::CellId>                  cells;
+    std::vector<dealii::types::global_dof_index> dof_indices(fe.n_dofs_per_cell());
+    dealii::Vector<double>                       face_values, coefficients;
+    std::vector<double>                          signed_coefficients;
+    for (const auto &cell : dof_handler.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+          continue;
+
+        cell->get_dof_indices(dof_indices);
+        for (const unsigned int f : cell->face_indices())
+          {
+            if (cell->at_boundary(f) and not cell->has_periodic_neighbor(f))
+              continue;
+
+            const auto neighbor =
+              cell->at_boundary(f) ? cell->periodic_neighbor(f) : cell->neighbor(f);
+            if (neighbor->get_fe().n_dofs_per_cell() > 0)
+              continue;
+
+            const int sign = cell_signs[neighbor->active_cell_index()];
+            if (sign == 0)
+              continue;
+
+            const FaceData &data = face_data[f];
+            face_values.reinit(data.dofs.size());
+            coefficients.reinit(data.dofs.size());
+            for (unsigned int j = 0; j < data.dofs.size(); ++j)
+              face_values[j] = level_set(dof_indices[data.dofs[j]]);
+            data.bernstein_coefficients.vmult(coefficients, face_values);
+            signed_coefficients.resize(coefficients.size());
+            for (unsigned int k = 0; k < coefficients.size(); ++k)
+              signed_coefficients[k] = sign * coefficients[k];
+
+            double upper = std::numeric_limits<double>::infinity();
+            double bound = bernstein_minimum_bound(signed_coefficients, p, dim - 1, 0, 12, upper);
+            if (upper <= 0.)
+              bound = std::min(bound, upper);
+            if (bound < -tolerance * cell->minimum_vertex_distance() and
+                std::find(cells.begin(), cells.end(), neighbor->id()) == cells.end())
+              cells.push_back(neighbor->id());
+          }
+      }
+
+    return cells;
   }
 
   template <int dim, typename number>

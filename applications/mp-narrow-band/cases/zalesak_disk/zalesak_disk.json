@@ -22,7 +22,7 @@
   "time stepping": {
     "start time": 0.0,
     "end time": 1.5707963267948966,
-    "time step size": 0.004908738521234052
+    "time step size": 0.004
   },
   "output": {
     "directory": "output_zalesak_disk",
@@ -36,7 +36,8 @@
   },
   "narrow band": {
     "type": "semi_lagrangian",
-    "reinitialization frequency": 2,
+    "level set space": "continuous",
+    "reinitialization frequency": 1,
     "continuous level set": {
       "enable": true
     },

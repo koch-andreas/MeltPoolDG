@@ -126,7 +126,7 @@ namespace MeltPoolDG::LevelSet
 
     const auto &initial_condition = *simulation_case->get_initial_condition("level_set");
     narrow_band_operation->set_initial_condition(initial_condition,
-                                                 false /*do_reinitialize*/,
+                                                 simulation_case->reinitialize_initial_condition(),
                                                  simulation_case->get_cellwise_initial_condition());
 
     post_processor = std::make_unique<Postprocessor<dim, number>>(scratch_data->get_mpi_comm(),
@@ -161,7 +161,9 @@ namespace MeltPoolDG::LevelSet
     if (param.output.do_user_defined_postprocessing)
       simulation_case->do_postprocessing(generic_data_out);
 
-    post_processor->process(time_step, generic_data_out, time);
+    // The postprocessor checks the output interval again; thus, the forced output (after the last
+    // time step) has to be passed on. The paraview files are only written if enabled.
+    post_processor->process(time_step, generic_data_out, time, force_output);
   }
 
   template <int dim, typename number>

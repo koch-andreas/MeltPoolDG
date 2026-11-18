@@ -951,6 +951,13 @@ namespace MeltPoolDG::LevelSet
 
       /// Maximum change of the level set at the nodes of the cut cells.
       number max_change = 0.;
+
+      /// Maximum change of the level set at the nodes on the upper faces of the cut cells.
+      number max_change_top = 0.;
+
+      /// Number of cells behind faces crossed by the interface before the correction (see
+      /// NarrowBandContinuousReinitialization::find_cells_behind_open_faces()).
+      unsigned int n_cells_behind_open_faces = 0;
     };
 
     /**
@@ -963,7 +970,9 @@ namespace MeltPoolDG::LevelSet
      */
     template <int dim>
     ClosedInterfaceResult<dim>
-    test_closed_interface(const unsigned int fe_degree, const number amplitude)
+    test_closed_interface(const unsigned int                                       fe_degree,
+                          const number                                             amplitude,
+                          const std::function<number(const dealii::Point<dim> &)> &function = {})
     {
       const dealii::ScalarFunctionFromFunctionObject<dim> plane(
         [](const dealii::Point<dim> &p) { return p[dim - 1] - 0.1; });
@@ -972,7 +981,7 @@ namespace MeltPoolDG::LevelSet
           number perturbation = amplitude;
           for (unsigned int e = 0; e + 1 < dim; ++e)
             perturbation *= std::sin(2. * dealii::numbers::PI * p[e]);
-          return p[dim - 1] - 0.1 - perturbation;
+          return function ? function(p) : p[dim - 1] - 0.1 - perturbation;
         });
 
       NarrowBandFixture<dim> fixture(fe_degree, 3, fe_degree, &plane);
@@ -1005,8 +1014,31 @@ namespace MeltPoolDG::LevelSet
                                                                  level_set);
 
       ClosedInterfaceResult<dim> result;
+      result.n_cells_behind_open_faces = dealii::Utilities::MPI::sum(
+        static_cast<unsigned int>(
+          continuous_reinitialization.find_cells_behind_open_faces(cell_signs).size()),
+        MPI_COMM_WORLD);
       result.statistics = continuous_reinitialization.close_interface(cell_signs, 0.01);
       continuous_reinitialization.interpolate_to_discontinuous(fixture.dof_handler_cut, level_set);
+
+      // change at the nodes on the upper faces (x_{d-1} = 1 in unit coordinates)
+      {
+        dealii::Vector<number> values, values_initial;
+        for (const auto &cell : fixture.dof_handler_cut.active_cell_iterators())
+          {
+            if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+              continue;
+            values.reinit(cell->get_fe().n_dofs_per_cell());
+            values_initial.reinit(cell->get_fe().n_dofs_per_cell());
+            cell->get_dof_values(level_set, values);
+            cell->get_dof_values(level_set_initial, values_initial);
+            for (unsigned int i = 0; i < values.size(); ++i)
+              if (cell->get_fe().get_unit_support_points()[i][dim - 1] > 1. - 1e-12)
+                result.max_change_top =
+                  std::max<number>(result.max_change_top, std::abs(values[i] - values_initial[i]));
+          }
+        result.max_change_top = dealii::Utilities::MPI::max(result.max_change_top, MPI_COMM_WORLD);
+      }
 
       for (unsigned int i = 0; i < level_set.locally_owned_size(); ++i)
         result.max_change = std::max<number>(result.max_change,
@@ -2139,7 +2171,8 @@ namespace MeltPoolDG::LevelSet
     /**
      * Rotating circle (radius 0.3, center (0.4, 0), rigid rotation by a quarter turn in 25 time
      * steps, semi-Lagrangian band, p = 1, 32^2 cells on [-1,1]^2, reinitialization in every time
-     * step) with the interface penalty term of the reinitialization at the zero level set or at
+     * step, or sub-cycling of the level-set update) with the interface penalty term of the
+     * reinitialization at the zero level set or at
      * the advected interface points (new points from the level set given by @p point_insertion),
      * in the level set space @p level_set_space (with the closed-interface correction for the
      * continuous space). Returns the mean signed radial deviation int_Gamma_h (|x - c| - R) ds /
@@ -2150,12 +2183,13 @@ namespace MeltPoolDG::LevelSet
     compute_rotating_circle_radial_deviation(
       const NarrowBandReinitializationInterface reinitialization_interface,
       const NarrowBandLevelSetSpace  level_set_space = NarrowBandLevelSetSpace::discontinuous,
-      const NarrowBandPointInsertion point_insertion = NarrowBandPointInsertion::final_level_set)
+      const NarrowBandPointInsertion point_insertion = NarrowBandPointInsertion::final_level_set,
+      const number                   time_step       = 0.01,
+      const number                   level_set_update_cfl = 0.)
     {
       const unsigned int fe_degree = 1;
       const number       radius    = 0.3;
       const number       omega     = 2. * dealii::numbers::PI;
-      const number       time_step = 0.01;
 
       dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
       dealii::GridGenerator::hyper_cube(triangulation, -1., 1.);
@@ -2169,6 +2203,7 @@ namespace MeltPoolDG::LevelSet
       narrow_band_data.reinitialization_interface      = reinitialization_interface;
       narrow_band_data.level_set_space                 = level_set_space;
       narrow_band_data.advected_points.point_insertion = point_insertion;
+      narrow_band_data.level_set_update_cfl            = level_set_update_cfl;
 
       ReinitializationData<number> reinit_data;
       reinit_data.enable                                      = true;
@@ -2197,7 +2232,7 @@ namespace MeltPoolDG::LevelSet
       const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, radius);
       operation.set_initial_condition(sphere);
 
-      const unsigned int n_time_steps = 25;
+      const unsigned int n_time_steps = static_cast<unsigned int>(std::round(0.25 / time_step));
       for (unsigned int n = 0; n < n_time_steps; ++n)
         {
           velocity->set_time(n * time_step);
@@ -3119,6 +3154,34 @@ namespace MeltPoolDG::LevelSet
     EXPECT_LT(std::abs(deviation_continuous), 0.2 * std::abs(deviation_zero_level_set));
   }
 
+  TEST(NarrowBandLevelSetTest, SemiLagrangianSubcycling2D)
+  {
+    // Rotating circle (quarter turn, continuous level set with the closed-interface correction,
+    // advected points, p = 1): the mean radial deviation does not depend on the time step, with
+    // the update in every time step (the circle is resolved; observed: -1.0917e-3 for dt = 0.01
+    // and 0.001) and with sub-cycling (update, once the displacement since the reference exceeds
+    // 0.5 h; observed: -1.8064e-3 for dt = 0.001, where the last level set is evaluated from the
+    // reference without reinitialization, and -1.0917e-3 for dt = 0.01, where every time step
+    // is an update).
+    const auto deviation = [](const number time_step, const number cfl) {
+      return compute_rotating_circle_radial_deviation<2>(
+        NarrowBandReinitializationInterface::advected_points,
+        NarrowBandLevelSetSpace::continuous,
+        NarrowBandPointInsertion::final_level_set,
+        time_step,
+        cfl);
+    };
+    const number reference   = deviation(0.01, 0.);
+    const number small_steps = deviation(0.001, 0.);
+    const number subcycling  = deviation(0.001, 0.5);
+    const number large_steps = deviation(0.01, 0.5);
+
+    EXPECT_LT(std::abs(reference), 2e-3);
+    EXPECT_NEAR(small_steps, reference, 1e-6);
+    EXPECT_LT(std::abs(subcycling), 2. * std::abs(reference));
+    EXPECT_NEAR(large_steps, reference, 1e-12);
+  }
+
   TEST(NarrowBandLevelSetTest, ReinitializationPrescribedDoFs2D)
   {
     // The prescribed DoFs keep their values, and the other cut cells are reinitialized with the
@@ -3232,44 +3295,55 @@ namespace MeltPoolDG::LevelSet
       {
         const auto result = test_closed_interface<2>(fe_degree, 0.);
         EXPECT_EQ(result.statistics.n_faces, 16U);
-        EXPECT_EQ(result.statistics.n_clamped_dofs, 0U);
-        EXPECT_EQ(result.statistics.n_linearized_faces, 0U);
+        EXPECT_EQ(result.statistics.n_lifted_faces, 0U);
+        EXPECT_EQ(result.n_cells_behind_open_faces, 0U);
         EXPECT_EQ(result.statistics.max_correction, 0.);
         EXPECT_LT(result.max_change, 1e-14);
         EXPECT_NEAR(result.min_value, 0.4, 1e-12);
       }
 
-    // perturbed plane (a = 0.2): the interface leaves the cut cells through these faces; after
-    // the correction, the level set has the sign of the neighbor cell on the whole faces (observed
-    // minimum: the offset 0.01 h at the nodes) and is continuous; there are no conflicting nodes.
-    // The Bernstein test fails on faces, whose clamped nodes leave a dip between the nodes, which
-    // are then linearized (p >= 2). Maximum correction: 0.41 h (phi = 0.1 -> -0.01 h at the
-    // bottom faces). Observed numbers of clamped nodes and linearized faces (identical on 1 and 3
-    // processes): p = 1: 4, 0; p = 2: 8, 8; p = 3: 12, 8.
-    const std::array<std::array<unsigned int, 2>, 3> n_corrected{{{{4, 0}}, {{8, 8}}, {{12, 8}}}};
+    // perturbed plane (a = 0.2): the interface leaves the cut cells through faces to the cells
+    // above and below; these faces are lifted, after which the level set has the sign of the
+    // neighbor cell on the whole faces (minimum at least the offset 0.01 h) and is continuous;
+    // there are no conflicting nodes. Maximum correction: 0.41 h at the bottom faces (minimum
+    // -0.4 h, lifted to 0.01 h).
     for (const unsigned int fe_degree : {1U, 2U, 3U})
       {
         const auto result = test_closed_interface<2>(fe_degree, 0.2);
         EXPECT_EQ(result.statistics.n_faces, 16U);
-        EXPECT_EQ(result.statistics.n_clamped_dofs, n_corrected[fe_degree - 1][0]);
-        EXPECT_EQ(result.statistics.n_linearized_faces, n_corrected[fe_degree - 1][1]);
+        EXPECT_GT(result.statistics.n_lifted_faces, 0U);
+        EXPECT_EQ(result.n_cells_behind_open_faces, result.statistics.n_lifted_faces);
         EXPECT_EQ(result.statistics.n_conflicting_dofs, 0U);
         EXPECT_EQ(result.statistics.n_open_faces, 0U);
-        EXPECT_NEAR(result.statistics.max_correction, 0.41, 1e-10);
-        EXPECT_GT(result.min_value, 0.);
+        EXPECT_NEAR(result.statistics.max_correction, 0.41, 1e-3);
+        EXPECT_GT(result.min_value, 0.01 - 1e-6);
         EXPECT_LT(result.jump, 1e-12);
       }
 
+    // parabola phi = y - 0.25 + 0.5 (x - 0.125)^2 (p = 2, represented exactly): it touches the
+    // upper face of the cell [0, 0.25] at its midpoint and crosses the lower faces for
+    // |x - 0.125| > 1/sqrt(2), i.e., on the three faces [-1, -0.75], [-0.75, -0.5] and [0.75, 1].
+    // Only these are lifted; the touching face and all upper faces keep their values.
+    {
+      const auto result = test_closed_interface<2>(2, 0., [](const dealii::Point<2> &p) {
+        return p[1] - 0.25 + 0.5 * (p[0] - 0.125) * (p[0] - 0.125);
+      });
+      EXPECT_EQ(result.statistics.n_lifted_faces, 3U);
+      EXPECT_EQ(result.n_cells_behind_open_faces, 3U);
+      EXPECT_EQ(result.statistics.n_open_faces, 0U);
+      EXPECT_EQ(result.max_change_top, 0.);
+      EXPECT_GE(result.min_value, -1e-14);
+      EXPECT_LT(result.jump, 1e-12);
+    }
+
     // 3D (a = 0.2, p = 2): the nodes of the edges are shared by the faces of adjacent cells
-    // (observed: 80 clamped nodes, 64 linearized faces)
     {
       const auto result = test_closed_interface<3>(2, 0.2);
       EXPECT_EQ(result.statistics.n_faces, 128U);
-      EXPECT_EQ(result.statistics.n_clamped_dofs, 80U);
-      EXPECT_EQ(result.statistics.n_linearized_faces, 64U);
+      EXPECT_GT(result.statistics.n_lifted_faces, 0U);
       EXPECT_EQ(result.statistics.n_conflicting_dofs, 0U);
       EXPECT_EQ(result.statistics.n_open_faces, 0U);
-      EXPECT_GT(result.min_value, 0.);
+      EXPECT_GT(result.min_value, 0.01 - 1e-6);
       EXPECT_LT(result.jump, 1e-12);
     }
   }

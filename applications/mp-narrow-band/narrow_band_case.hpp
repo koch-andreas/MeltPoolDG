@@ -165,5 +165,15 @@ namespace MeltPoolDG::LevelSet
     {
       return {};
     }
+
+    /**
+     * @brief Return true, if the initial level set is reinitialized when it is set (see
+     * NarrowBandLevelSetOperation::set_initial_condition()). By default, it is not reinitialized.
+     */
+    virtual bool
+    reinitialize_initial_condition() const
+    {
+      return false;
+    }
   };
 } // namespace MeltPoolDG::LevelSet

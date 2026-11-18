@@ -330,9 +330,23 @@ namespace MeltPoolDG::LevelSet
     /// cells, which are not cut (see NarrowBandContinuousReinitialization::close_interface()).
     bool closed_interface_correction = true;
 
-    /// Closed-interface correction: minimum magnitude of the nodal values on the faces between
-    /// the cut cells and the cells, which are not cut, relative to the cell size.
+    /// Closed-interface correction: cells, which are not cut, behind faces, on which the level set
+    /// does not have their sign, are added to the cut cells (with the level set of the
+    /// semi-Lagrangian step on their other nodes), before the remaining faces are lifted.
+    bool closed_interface_activation = true;
+
+    /// Closed-interface correction: minimum of the level set relative to the cell size on a
+    /// lifted face (distance of the corrected interface from the face).
     number closed_interface_offset = 0.01;
+
+    /// Semi-Lagrangian band: sub-cycling of the level-set update. If positive, the level set of a
+    /// time step is evaluated from the last reference level set (backward integration of the
+    /// characteristics over all time steps since the reference), and the reinitialization, the
+    /// insertion of new interface points and the update of the reference are only performed,
+    /// once the maximum displacement of the nodes since the reference exceeds this value times
+    /// the cell size. Thus, the number of these operations per unit time does not depend on the
+    /// time-step size. Zero: update in every time step.
+    number level_set_update_cfl = 0.;
 
     /// Interface, at which the reinitialization on the cut cells enforces phi = 0 weakly
     /// (interface penalty term): the zero level set of the level set before the reinitialization

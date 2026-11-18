@@ -44,7 +44,8 @@ namespace MeltPoolDG::LevelSet
     const std::vector<int>        &cell_signs,
     dealii::Function<dim>         &velocity,
     const number                   time,
-    const number                   time_step) const
+    const number                   time_step,
+    const unsigned int             n_substeps) const
   {
     using namespace NarrowBand;
     using namespace NarrowBand::internal;
@@ -237,14 +238,20 @@ namespace MeltPoolDG::LevelSet
         result[d] = velocity.value(x, d);
       return result;
     };
+    AssertThrow(n_substeps > 0, dealii::ExcMessage("At least one substep is required."));
     const auto foot_point = [&](const dealii::Point<dim> &x) {
-      const number h  = -time_step;
-      const number t1 = time + time_step;
-      const auto   k1 = u(x, t1);
-      const auto   k2 = u(x + 0.5 * h * k1, t1 + 0.5 * h);
-      const auto   k3 = u(x + 0.5 * h * k2, t1 + 0.5 * h);
-      const auto   k4 = u(x + h * k3, t1 + h);
-      return dealii::Point<dim>(x + (h / 6.) * (k1 + 2. * k2 + 2. * k3 + k4));
+      const number       h = -time_step / n_substeps;
+      dealii::Point<dim> y = x;
+      for (unsigned int s = 0; s < n_substeps; ++s)
+        {
+          const number t1 = time + time_step + s * h;
+          const auto   k1 = u(y, t1);
+          const auto   k2 = u(y + 0.5 * h * k1, t1 + 0.5 * h);
+          const auto   k3 = u(y + 0.5 * h * k2, t1 + 0.5 * h);
+          const auto   k4 = u(y + h * k3, t1 + h);
+          y += (h / 6.) * (k1 + 2. * k2 + 2. * k3 + k4);
+        }
+      return y;
     };
 
     // 3) Evaluation of the back-traced level set at the nodes of the locally owned candidate cells

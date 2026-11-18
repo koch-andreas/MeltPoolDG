@@ -82,13 +82,17 @@ namespace MeltPoolDG::LevelSet
    * @param vector_name Name of the level-set vector in @p generic_data_out.
    * @param mpi_communicator MPI communicator.
    * @param label Label of the printed line.
+   * @param area_precision Number of digits after the decimal point of the area (scientific
+   * format). For the default of four digits, all measures are printed in one line; for more
+   * digits, the area is printed in a separate line (the line width of the output is limited).
    */
   template <int dim, typename number>
   void
   print_interface_measures(const GenericDataOut<dim, number> &generic_data_out,
                            const std::string                 &vector_name,
                            const MPI_Comm                     mpi_communicator,
-                           const std::string                 &label)
+                           const std::string                 &label,
+                           const unsigned int                 area_precision = 4)
   {
     const auto &dof_handler = generic_data_out.get_dof_handler(vector_name);
     const auto &level_set   = generic_data_out.get_vector(vector_name);
@@ -154,12 +158,21 @@ namespace MeltPoolDG::LevelSet
                                      dealii::Utilities::MPI::this_mpi_process(mpi_communicator) ==
                                        0);
 
+    std::ostringstream area_str;
+    area_str << std::scientific << std::setprecision(area_precision) << "area (phi>0): " << volume;
+
     std::ostringstream str;
-    str << std::scientific << std::setprecision(4) << "area (phi>0): " << volume
-        << "  interface length: " << interface_measure;
+    str << std::scientific << std::setprecision(4) << "interface length: " << interface_measure;
     if (dim > 1 and interface_measure > 0.)
       str << "  circularity: " << sphere_surface_measure / interface_measure;
-    Journal::print_line(pcout, str.str(), label);
+
+    if (area_precision <= 4)
+      Journal::print_line(pcout, area_str.str() + "  " + str.str(), label);
+    else
+      {
+        Journal::print_line(pcout, area_str.str(), label);
+        Journal::print_line(pcout, str.str(), label);
+      }
   }
 
   /**

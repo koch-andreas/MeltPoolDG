@@ -177,15 +177,20 @@ namespace MeltPoolDG::Simulation::NarrowBandZalesakDisk
                                                           "level_set_band",
                                                           this->mpi_communicator,
                                                           "zalesak_disk");
+      // area with ten digits after the decimal point (exact area of the default disk:
+      // pi R^2 - w (h - R) - (w/2 sqrt(R^2 - w^2/4) + R^2 asin(w / (2 R))) = 0.2328828122)
+      const unsigned int area_precision = 10;
       LevelSet::print_interface_measures<dim, number>(generic_data_out,
                                                       "level_set",
                                                       this->mpi_communicator,
-                                                      "zalesak_disk");
+                                                      "zalesak_disk",
+                                                      area_precision);
       if (this->parameters.narrow_band.continuous_level_set.enable)
         LevelSet::print_interface_measures<dim, number>(generic_data_out,
                                                         "level_set_cg",
                                                         this->mpi_communicator,
-                                                        "level_set_cg");
+                                                        "level_set_cg",
+                                                        area_precision);
 
       // the exact solution is the initial disk after full revolutions
       const number period = 2. * dealii::numbers::PI / std::abs(angular_velocity);

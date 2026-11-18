@@ -96,6 +96,10 @@ namespace MeltPoolDG::LevelSet
      * @param velocity Advection velocity (dim components). Its time is restored on exit.
      * @param time Time $t^n$.
      * @param time_step Time-step size $\Delta t$.
+     * @param n_substeps Number of steps of the backward integration of the characteristics from
+     * $t^n + \Delta t$ to $t^n$ (classical fourth-order Runge-Kutta method with the step size
+     * $\Delta t / n_s$), e.g., the number of time steps since $t^n$, if the level set is evaluated
+     * from the level set at an earlier time $t^n$ (sub-cycling).
      */
     Statistics
     advect(const dealii::DoFHandler<dim> &dof_handler_cut,
@@ -105,7 +109,8 @@ namespace MeltPoolDG::LevelSet
            const std::vector<int>        &cell_signs,
            dealii::Function<dim>         &velocity,
            const number                   time,
-           const number                   time_step) const;
+           const number                   time_step,
+           const unsigned int             n_substeps = 1) const;
 
   private:
     /// Output stream.

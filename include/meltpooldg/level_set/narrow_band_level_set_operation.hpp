@@ -31,6 +31,7 @@
 #include <meltpooldg/time_integration/time_integrator_base.hpp>
 
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -351,6 +352,41 @@ namespace MeltPoolDG::LevelSet
     update_cell_signs(const std::vector<bool> &is_cut_cell, const dealii::Function<dim> *function);
 
     /**
+     * @brief As above, with the candidate cells of @p dof_handler_band and the level set
+     * @p level_set_band on them.
+     */
+    void
+    update_cell_signs(const std::vector<bool>       &is_cut_cell,
+                      const dealii::Function<dim>   *function,
+                      const dealii::DoFHandler<dim> &dof_handler_band,
+                      const VectorType              &level_set_band);
+
+    /**
+     * @brief Closed-interface correction with activation: store the level set of the locally
+     * owned candidate cells (cells with DoFs of @p dof_handler_candidates), which are not cut, in
+     * candidate_cell_values.
+     */
+    void
+    store_candidate_cell_values(const dealii::DoFHandler<dim> &dof_handler_candidates,
+                                const VectorType              &level_set_candidates,
+                                const std::vector<bool>       &is_cut_cell);
+
+    /**
+     * @brief Return true for the semi-Lagrangian band with sub-cycling of the level-set update
+     * (NarrowBandData::level_set_update_cfl > 0).
+     */
+    bool
+    is_subcycling() const;
+
+    /**
+     * @brief Sub-cycling: store the current level set of the cut cells, the signs of the cells and
+     * the time @p time as the reference, from which the level set of the following time steps
+     * is evaluated, and distribute the DoFs of its cut cells and candidate cells.
+     */
+    void
+    set_reference(const number time);
+
+    /**
      * @brief Return true for the semi-Lagrangian band (NarrowBandType::semi_lagrangian).
      */
     bool
@@ -462,6 +498,24 @@ namespace MeltPoolDG::LevelSet
     /// changes if the interface passes through it, i.e., the signs are updated on the candidate
     /// cells in each time step.
     std::vector<int> cell_signs;
+
+    /// Closed-interface correction: level set of the semi-Lagrangian step on the locally owned
+    /// candidate cells, which are not cut (indexed by the active cell index; empty vectors for
+    /// the other cells), for the cells added to the cut cells behind open faces.
+    std::vector<dealii::Vector<number>> candidate_cell_values;
+
+    /// Sub-cycling (NarrowBandData::level_set_update_cfl): reference level set on its cut cells,
+    /// level set evaluated from it on the candidate cells of the reference, signs of the cells at
+    /// the reference time, reference time (NaN until the first time step), number of time steps
+    /// since the reference and number of updates of the reference.
+    dealii::DoFHandler<dim> dof_handler_cut_reference;
+    dealii::DoFHandler<dim> dof_handler_band_reference;
+    VectorType              level_set_reference;
+    VectorType              level_set_band_reference;
+    std::vector<int>        cell_signs_reference;
+    number                  time_reference          = std::numeric_limits<number>::quiet_NaN();
+    unsigned int            n_steps_since_reference = 0;
+    unsigned int            n_reference_updates     = 0;
 
     /// Advection operator on the band.
     NarrowBandAdvectionDGOperator<dim, number> advection_operator;

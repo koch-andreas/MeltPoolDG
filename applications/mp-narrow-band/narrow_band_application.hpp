@@ -38,6 +38,11 @@ namespace MeltPoolDG::LevelSet
     void
     initialize();
 
+    /**
+     * @brief Write the output (paraview, if enabled) and do the user-defined postprocessing at the
+     * output times. With @p force_output, the output is written regardless of the output interval;
+     * this is used after the last time step.
+     */
     void
     output_results(const unsigned int time_step, const number time, const bool force_output);
 
