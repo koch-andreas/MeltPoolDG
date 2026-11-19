@@ -188,17 +188,16 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
                                                           "level_set_band",
                                                           this->mpi_communicator,
                                                           "vortex_bubble");
-      LevelSet::print_interface_measures<dim, number>(generic_data_out,
-                                                      "level_set",
-                                                      this->mpi_communicator,
-                                                      "vortex_bubble");
+      // area with ten digits after the decimal point (exact area of the default bubble:
+      // pi R^2 = 0.0706858347; in 3D, the exact volume is 4/3 pi R^3 = 0.0141371669)
+      const unsigned int area_precision = 10;
+      LevelSet::print_interface_measures<dim, number>(
+        generic_data_out, "level_set", this->mpi_communicator, "vortex_bubble", area_precision);
 
       // continuous level set of the narrow band (closed interface)
       if (this->parameters.narrow_band.continuous_level_set.enable)
-        LevelSet::print_interface_measures<dim, number>(generic_data_out,
-                                                        "level_set_cg",
-                                                        this->mpi_communicator,
-                                                        "level_set_cg");
+        LevelSet::print_interface_measures<dim, number>(
+          generic_data_out, "level_set_cg", this->mpi_communicator, "level_set_cg", area_precision);
 
       // the exact solution is known at multiples of the period
       const number n_periods =
