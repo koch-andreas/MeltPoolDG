@@ -1596,6 +1596,56 @@
         }
       },
       "additionalProperties": false
+    },
+    "restart": {
+      "type": "object",
+      "properties": {
+        "save": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647,
+          "description": "Set this parameter to any number >= 0 to specify how many restart files should be kept. -1 means no restart save.",
+          "default": -1
+        },
+        "load": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647,
+          "description": "Set this parameter to any number >= 0 to specify which restart file should be loaded. -1 means no restart load.",
+          "default": -1
+        },
+        "write time step size": {
+          "type": "number",
+          "description": "Write restart output every given time step size. If this parameter is set, the specified parameter for write frequency is overwritten.",
+          "default": 0.0
+        },
+        "time type": {
+          "type": "string",
+          "enum": [
+            "real",
+            "simulation"
+          ],
+          "description": "Choose the type of time measure to write",
+          "default": "real"
+        },
+        "directory": {
+          "type": "string",
+          "description": "Write restart directory",
+          "default": ""
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Write restart prefix",
+          "default": "restart"
+        },
+        "max wall time": {
+          "type": "number",
+          "minimum": 0.0,
+          "description": "Maximum wall-clock time in seconds (zero: no limit). After the first time step, at whose end the elapsed wall-clock time exceeds this value, the restart files are written and the simulation stops, such that it can be continued with 'load' = 0. Set it to the time limit of the job minus a margin for the last time step and for writing the restart files. Requires 'save' >= 0.",
+          "default": 0.0
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,

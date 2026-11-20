@@ -14,6 +14,7 @@
 #include <meltpooldg/post_processing/output_data.hpp>
 #include <meltpooldg/time_integration/time_stepping_data.hpp>
 #include <meltpooldg/utilities/profiling_data.hpp>
+#include <meltpooldg/utilities/restart_data.hpp>
 
 #include <limits>
 #include <string>
@@ -98,6 +99,21 @@ namespace MeltPoolDG::LevelSet
       output.add_parameters(prm);
       stage_output.add_parameters(prm);
       profiling.add_parameters(prm);
+      restart.add_parameters(prm);
+
+      prm.enter_subsection("restart");
+      {
+        prm.add_parameter(
+          "max wall time",
+          max_wall_time,
+          "Maximum wall-clock time in seconds (zero: no limit). After the first time step, at "
+          "whose end the elapsed wall-clock time exceeds this value, the restart files are "
+          "written and the simulation stops, such that it can be continued with 'load' = 0. "
+          "Set it to the time limit of the job minus a margin for the last time step and for "
+          "writing the restart files. Requires 'save' >= 0.",
+          dealii::Patterns::Double(0.));
+      }
+      prm.leave_subsection();
     }
 
     void
@@ -107,6 +123,7 @@ namespace MeltPoolDG::LevelSet
       normal_vector.post(base.verbosity_level);
       curvature.post(base.verbosity_level);
       output.post(time_stepping.time_step_size, parameter_filename);
+      restart.post(output.directory);
 
       // check input parameters for validity
       AssertThrow(base.fe.type == FiniteElementType::FE_DGQ,
@@ -120,6 +137,10 @@ namespace MeltPoolDG::LevelSet
       reinit.check_input_parameters(reinit.linear_solver.do_matrix_free);
       narrow_band.check_input_parameters(base.fe.degree);
       profiling.check_input_parameters(time_stepping.time_step_size);
+      restart.check_input_parameters(time_stepping.time_step_size);
+      AssertThrow(max_wall_time <= 0. or restart.save >= 0,
+                  dealii::ExcMessage("The parameter 'restart/max wall time' requires "
+                                     "'restart/save' >= 0."));
     }
 
   public:
@@ -134,6 +155,14 @@ namespace MeltPoolDG::LevelSet
     OutputData<number>                output;
     NarrowBandStageOutputData<number> stage_output;
     Profiling::ProfilingData<number>  profiling;
+    /// Restart (subsection restart): 'save' >= 0 writes restart files (the number of kept sets of
+    /// files) every 'write time step size' (wall-clock seconds or simulation time, see 'time
+    /// type'; default: every hour) and after the last time step; 'load' >= 0 continues the
+    /// simulation from the restart files with this number (0: the latest).
+    Restart::RestartData<number> restart;
+    /// Maximum wall-clock time in seconds, after which the restart files are written and the
+    /// simulation stops (zero: no limit).
+    number max_wall_time = 0.;
   };
 
   /**

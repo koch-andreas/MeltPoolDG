@@ -44,13 +44,19 @@
 #include <meltpooldg/level_set/reinitialization_data.hpp>
 #include <meltpooldg/level_set/reinitialization_elliptic_operation.hpp>
 
+#include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
+
 #include <array>
 #include <cmath>
+#include <filesystem>
 #include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
+#include <sstream>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -2301,6 +2307,156 @@ namespace MeltPoolDG::LevelSet
     };
 
     /**
+     * Restart: rotating circle; the level set is advanced by @p n_steps_before time steps, the
+     * state is saved (archive and triangulation files), and it is advanced by @p n_steps_after
+     * further time steps. Then, the state is loaded into a new triangulation and a new operation
+     * and advanced by @p n_steps_after time steps. Returns the maximum difference of the DoF
+     * values of the level set on the cut cells and on the band between both runs (-1, if the cut
+     * cells or the band differ).
+     */
+    template <int dim>
+    number
+    compute_restart_difference(const NarrowBandData<number> &narrow_band_data,
+                               const number                  time_step,
+                               const unsigned int            n_steps_before,
+                               const unsigned int            n_steps_after,
+                               const std::string            &basename)
+    {
+      const unsigned int fe_degree = 1;
+
+      ReinitializationData<number> reinit_data;
+      reinit_data.enable                                      = true;
+      reinit_data.modeltype                                   = ModelType::elliptic;
+      reinit_data.fe.type                                     = FiniteElementType::FE_DGQ;
+      reinit_data.fe.degree                                   = fe_degree;
+      reinit_data.elliptic.intersected_cells_only             = true;
+      reinit_data.elliptic.penalty_parameter                  = 1e4;
+      reinit_data.elliptic.nlsolve.max_nonlinear_iterations   = 1000;
+      reinit_data.elliptic.nlsolve.residual_tolerance         = 1e-6;
+      reinit_data.elliptic.nlsolve.field_correction_tolerance = 1e-6;
+      reinit_data.elliptic.nlsolve.verbosity_level            = 0;
+      reinit_data.linear_solver.solver_type                   = LinearSolverType::CG;
+      reinit_data.linear_solver.preconditioner_type           = PreconditionerType::ILU;
+      reinit_data.linear_solver.rel_tolerance                 = 1e-10;
+      reinit_data.linear_solver.abs_tolerance                 = 1e-20;
+      reinit_data.linear_solver.max_iterations                = 1000;
+
+      auto velocity = std::make_shared<RotationVelocity<dim>>(2. * dealii::numbers::PI);
+
+      dealii::Point<dim> center;
+      center[0] = 0.4;
+      const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, 0.3);
+
+      const auto advance = [&](NarrowBandLevelSetOperation<dim, number> &operation,
+                               const unsigned int                        first,
+                               const unsigned int                        n_steps) {
+        for (unsigned int n = first; n < first + n_steps; ++n)
+          {
+            velocity->set_time(n * time_step);
+            operation.advance_time_step(n * time_step, time_step, n + 1);
+          }
+      };
+
+      // DoF values of the level set on the cut cells and on the band of the locally owned cells
+      using CellValues =
+        std::map<dealii::CellId, std::pair<std::vector<number>, std::vector<number>>>;
+      const auto collect = [](const NarrowBandLevelSetOperation<dim, number> &operation) {
+        CellValues             cell_values;
+        dealii::Vector<number> values;
+        const auto             get_values =
+          [&](const auto &cell, const VectorType &vector, std::vector<number> &result) {
+            values.reinit(cell->get_fe().n_dofs_per_cell());
+            if (values.size() > 0)
+              cell->get_dof_values(vector, values);
+            result.assign(values.begin(), values.end());
+          };
+        for (const auto &cell : operation.get_dof_handler_cut().active_cell_iterators())
+          if (cell->is_locally_owned())
+            {
+              auto &[cut_values, band_values] = cell_values[cell->id()];
+              get_values(cell, operation.get_level_set(), cut_values);
+              get_values(cell->as_dof_handler_iterator(operation.get_dof_handler_band()),
+                         operation.get_level_set_band(),
+                         band_values);
+            }
+        return cell_values;
+      };
+
+      std::stringstream archive_stream;
+      CellValues        values_continued, values_restarted;
+      {
+        dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
+        dealii::GridGenerator::hyper_cube(triangulation, -1., 1.);
+        triangulation.refine_global(5);
+
+        ScratchData<dim, dim, number> scratch_data(MPI_COMM_WORLD, 0, true);
+        scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
+        NarrowBandLevelSetOperation<dim, number> operation(
+          scratch_data, triangulation, narrow_band_data, reinit_data, fe_degree, velocity);
+
+        operation.set_initial_condition(sphere);
+        advance(operation, 0, n_steps_before);
+
+        {
+          boost::archive::binary_oarchive archive(archive_stream);
+          archive << static_cast<const NarrowBandLevelSetOperation<dim, number> &>(operation);
+        }
+        operation.prepare_for_serialization();
+        triangulation.save(basename);
+
+        advance(operation, n_steps_before, n_steps_after);
+        values_continued = collect(operation);
+      }
+      {
+        dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
+        dealii::GridGenerator::hyper_cube(triangulation, -1., 1.);
+        triangulation.load(basename);
+
+        ScratchData<dim, dim, number> scratch_data(MPI_COMM_WORLD, 0, true);
+        scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
+        NarrowBandLevelSetOperation<dim, number> operation(
+          scratch_data, triangulation, narrow_band_data, reinit_data, fe_degree, velocity);
+
+        {
+          boost::archive::binary_iarchive archive(archive_stream);
+          archive >> operation;
+        }
+        operation.deserialize();
+
+        advance(operation, n_steps_before, n_steps_after);
+        values_restarted = collect(operation);
+      }
+
+      MPI_Barrier(MPI_COMM_WORLD);
+      if (dealii::Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0)
+        for (const std::string suffix : {"", ".info", "_fixed.data", "_variable.data"})
+          std::filesystem::remove(basename + suffix);
+
+      bool   same_cells     = values_continued.size() == values_restarted.size();
+      number max_difference = 0.;
+      for (const auto &[id, values] : values_continued)
+        {
+          const auto it = values_restarted.find(id);
+          if (it == values_restarted.end() or it->second.first.size() != values.first.size() or
+              it->second.second.size() != values.second.size())
+            {
+              same_cells = false;
+              continue;
+            }
+          for (unsigned int i = 0; i < values.first.size(); ++i)
+            max_difference =
+              std::max(max_difference, std::abs(values.first[i] - it->second.first[i]));
+          for (unsigned int i = 0; i < values.second.size(); ++i)
+            max_difference =
+              std::max(max_difference, std::abs(values.second[i] - it->second.second[i]));
+        }
+
+      if (dealii::Utilities::MPI::min(same_cells ? 1 : 0, MPI_COMM_WORLD) == 0)
+        return -1.;
+      return dealii::Utilities::MPI::max(max_difference, MPI_COMM_WORLD);
+    }
+
+    /**
      * Two circles of the radius r = 0.25 with the initial distance D_0 = 0.6 of their centers
      * (0 -+ D_0 / 2, 0.013) move towards each other with the velocity U = 0.25 (ConvergingVelocity)
      * and merge at t = 0.2 (continuous level set space with the closed-interface correction, p = 2,
@@ -2324,14 +2480,14 @@ namespace MeltPoolDG::LevelSet
       scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
 
       NarrowBandData<number> narrow_band_data;
-      narrow_band_data.type            = NarrowBandType::semi_lagrangian;
-      narrow_band_data.level_set_space = NarrowBandLevelSetSpace::continuous;
+      narrow_band_data.type                   = NarrowBandType::semi_lagrangian;
+      narrow_band_data.level_set_space        = NarrowBandLevelSetSpace::continuous;
       narrow_band_data.reinitialization_faces = NarrowBandReinitializationFaces::interface_faces;
       narrow_band_data.reinitialization_interface =
         NarrowBandReinitializationInterface::advected_points;
       narrow_band_data.advected_points.unresolved_cells =
         NarrowBandUnresolvedCells::subcell_distance;
-      narrow_band_data.advected_points.subcell_coupling = NarrowBandSubcellCoupling::prescribed;
+      narrow_band_data.advected_points.subcell_coupling     = NarrowBandSubcellCoupling::prescribed;
       narrow_band_data.advected_points.points_per_direction = 3;
       narrow_band_data.advected_points.merge_distance       = merge_distance;
 
@@ -3915,6 +4071,42 @@ namespace MeltPoolDG::LevelSet
                                          NarrowBandLimiterType::sign);
       EXPECT_GT(n_perturbed_cells, 0U);
       EXPECT_EQ(n_limited_cells, n_perturbed_cells);
+    }
+  }
+
+  TEST(NarrowBandLevelSetTest, RestartReproducesContinuedRun2D)
+  {
+    // The restarted simulation continues exactly as the simulation, which saved the state, for
+    // the semi-Lagrangian band (advected interface points, continuous level set space, with and
+    // without sub-cycling; the restart between two updates of the reference), the extension
+    // band (with the downstream neighbor activation and small cut cells) and the advected band.
+    {
+      NarrowBandData<number> data;
+      data.type                       = NarrowBandType::semi_lagrangian;
+      data.reinitialization_interface = NarrowBandReinitializationInterface::advected_points;
+      data.level_set_space            = NarrowBandLevelSetSpace::continuous;
+      EXPECT_EQ(compute_restart_difference<2>(data, 0.01, 6, 6, "restart_test_semi_lagrangian"),
+                0.);
+    }
+    {
+      NarrowBandData<number> data;
+      data.type                       = NarrowBandType::semi_lagrangian;
+      data.reinitialization_interface = NarrowBandReinitializationInterface::advected_points;
+      data.level_set_space            = NarrowBandLevelSetSpace::continuous;
+      data.level_set_update_cfl       = 0.5;
+      EXPECT_EQ(compute_restart_difference<2>(data, 0.002, 7, 9, "restart_test_subcycling"), 0.);
+    }
+    {
+      NarrowBandData<number> data;
+      data.type                = NarrowBandType::extension;
+      data.neighbor_activation = NarrowBandNeighborActivation::downstream_face_neighbors;
+      data.neighbor_activation_volume_fraction = 0.1;
+      EXPECT_EQ(compute_restart_difference<2>(data, 0.002, 5, 5, "restart_test_extension"), 0.);
+    }
+    {
+      NarrowBandData<number> data;
+      data.type = NarrowBandType::advected_layers;
+      EXPECT_EQ(compute_restart_difference<2>(data, 0.002, 5, 5, "restart_test_layers"), 0.);
     }
   }
 } // namespace MeltPoolDG::LevelSet

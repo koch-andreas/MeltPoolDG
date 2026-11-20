@@ -18,6 +18,8 @@
 
 #include <deal.II/non_matching/immersed_surface_quadrature.h>
 
+#include <boost/serialization/vector.hpp>
+
 #include <functional>
 #include <optional>
 #include <vector>
@@ -238,6 +240,32 @@ namespace MeltPoolDG::LevelSet
      */
     bool
     is_located() const;
+
+    /**
+     * @brief Write or read the points (positions, weights, normal vectors) and the length scale
+     * (restart). The points are the same on all processes. After reading, the points are not
+     * assigned to the cells (as after seed()).
+     */
+    template <class Archive>
+    void
+    serialize(Archive &ar, const unsigned int /*version*/)
+    {
+      ar &points;
+      ar &weights;
+      ar &normals;
+      ar &length_scale;
+
+      if constexpr (Archive::is_loading::value)
+        {
+          AssertThrow(weights.size() == points.size() and normals.size() == points.size(),
+                      dealii::ExcMessage("The restart data of the interface points is invalid."));
+          approach.clear();
+          convergence.clear();
+          points_of_cell.clear();
+          is_unresolved.clear();
+          located = false;
+        }
+    }
 
     /**
      * @brief Surface quadrature (unit points, reference weights and reference normal vectors) of

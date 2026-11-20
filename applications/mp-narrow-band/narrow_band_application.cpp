@@ -11,6 +11,12 @@
 #include <meltpooldg/utilities/journal.hpp>
 #include <meltpooldg/utilities/scoped_name.hpp>
 
+#include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
+#include <boost/serialization/string.hpp>
+#include <boost/serialization/utility.hpp>
+#include <boost/serialization/vector.hpp>
+
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -27,7 +33,8 @@ namespace MeltPoolDG::LevelSet
     ScopedName                 sc("run");
     dealii::TimerOutput::Scope scope(scratch_data->get_timer(), sc);
 
-    while (not time_iterator->is_finished())
+    bool stop = false;
+    while (not time_iterator->is_finished() and not stop)
       {
         const number time_step = time_iterator->compute_next_time_increment();
         time_iterator->print_me(scratch_data->get_pcout(1));
@@ -82,6 +89,32 @@ namespace MeltPoolDG::LevelSet
                        time_iterator->get_current_time(),
                        time_iterator->is_finished());
 
+        // restart: the decisions of the root process (wall-clock times) are taken by all
+        // processes
+        if (restart_monitor and param.restart.save >= 0)
+          {
+            const MPI_Comm mpi_comm = scratch_data->get_mpi_comm();
+            bool           save     = restart_monitor->do_save();
+            bool           wall_time_reached =
+              param.max_wall_time > 0. and elapsed_wall_time() >= param.max_wall_time;
+            save              = dealii::Utilities::MPI::broadcast(mpi_comm, save, 0);
+            wall_time_reached = dealii::Utilities::MPI::broadcast(mpi_comm, wall_time_reached, 0);
+
+            if (save or wall_time_reached or time_iterator->is_finished())
+              save_restart();
+
+            if (wall_time_reached and not time_iterator->is_finished())
+              {
+                std::ostringstream str;
+                str << "maximum wall time of " << param.max_wall_time
+                    << " s reached: the simulation stops at t = " << std::scientific
+                    << std::setprecision(4) << time_iterator->get_current_time()
+                    << " (continue with restart/load = 0)";
+                Journal::print_line(scratch_data->get_pcout(0), str.str(), "restart");
+                stop = true;
+              }
+          }
+
         if (profiling_monitor and profiling_monitor->now())
           profiling_monitor->print(scratch_data->get_pcout(1),
                                    scratch_data->get_timer(),
@@ -112,6 +145,11 @@ namespace MeltPoolDG::LevelSet
 
     time_iterator = std::make_unique<TimeIntegration::TimeIterator<number>>(param.time_stepping);
 
+    // restart: mesh of the saved state (before the DoFHandlers are created)
+    const bool do_load = param.restart.load >= 0;
+    if (do_load)
+      load_triangulation();
+
     // The narrow-band operation attaches its DoFHandlers and its quadrature rule to the scratch
     // data.
     narrow_band_operation = std::make_unique<NarrowBandLevelSetOperation<dim, number>>(
@@ -124,11 +162,6 @@ namespace MeltPoolDG::LevelSet
       &param.normal_vector,
       &param.curvature);
 
-    const auto &initial_condition = *simulation_case->get_initial_condition("level_set");
-    narrow_band_operation->set_initial_condition(initial_condition,
-                                                 simulation_case->reinitialize_initial_condition(),
-                                                 simulation_case->get_cellwise_initial_condition());
-
     post_processor = std::make_unique<Postprocessor<dim, number>>(scratch_data->get_mpi_comm(),
                                                                   param.output,
                                                                   param.time_stepping,
@@ -136,12 +169,150 @@ namespace MeltPoolDG::LevelSet
                                                                   *simulation_case->triangulation,
                                                                   scratch_data->get_pcout(2));
 
-    // output of the initial state
-    output_results(0, param.time_stepping.start_time, false);
+    if (do_load)
+      load_state();
+    else
+      {
+        const auto &initial_condition = *simulation_case->get_initial_condition("level_set");
+        narrow_band_operation->set_initial_condition(
+          initial_condition,
+          simulation_case->reinitialize_initial_condition(),
+          simulation_case->get_cellwise_initial_condition());
+
+        // output of the initial state
+        output_results(0, param.time_stepping.start_time, false);
+      }
+
+    // restart: the intervals of the restart files start at the initial or the restored time
+    if (param.restart.save >= 0 or do_load)
+      restart_monitor =
+        std::make_unique<Restart::RestartMonitor<number>>(param.restart, *time_iterator);
 
     if (param.profiling.verbosity != Profiling::ProfilingVerbosity::none)
       profiling_monitor =
         std::make_unique<Profiling::ProfilingMonitor<number>>(param.profiling, *time_iterator);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandApplication<dim, number>::save_restart()
+  {
+    ScopedName                 sc("save_restart");
+    dealii::TimerOutput::Scope scope(scratch_data->get_timer(), sc);
+
+    namespace fs            = std::filesystem;
+    const MPI_Comm mpi_comm = scratch_data->get_mpi_comm();
+    const bool     is_root  = dealii::Utilities::MPI::this_mpi_process(mpi_comm) == 0;
+
+    // keep the previous states: the files i are copied to i + 1 (root process)
+    restart_monitor->prepare_save();
+    MPI_Barrier(mpi_comm);
+
+    const std::string prefix = param.restart.prefix + "_0";
+
+    // state, which is the same on all processes (written to a temporary file, which replaces
+    // the file of the previous state once all files have been written)
+    if (is_root)
+      {
+        std::ofstream file(prefix + "_problem.restart.tmp", std::ios::binary);
+        AssertThrow(file,
+                    dealii::ExcMessage("The restart file " + prefix +
+                                       "_problem.restart.tmp could not be opened."));
+        boost::archive::binary_oarchive archive(file);
+        archive << static_cast<const TimeIntegration::TimeIterator<number> &>(*time_iterator);
+        archive << static_cast<const Postprocessor<dim, number> &>(*post_processor);
+        archive << static_cast<const std::vector<std::pair<double, std::string>> &>(
+          stage_times_and_names);
+        archive << static_cast<const NarrowBandLevelSetOperation<dim, number> &>(
+          *narrow_band_operation);
+      }
+
+    // mesh and cell-wise state of the narrow band (all processes)
+    narrow_band_operation->prepare_for_serialization();
+    simulation_case->triangulation->save(prefix + "_tria");
+
+    MPI_Barrier(mpi_comm);
+    if (is_root)
+      fs::rename(prefix + "_problem.restart.tmp", prefix + "_problem.restart");
+    MPI_Barrier(mpi_comm);
+
+    std::ostringstream str;
+    str << "write restart files " << prefix << "_* (t = " << std::scientific << std::setprecision(4)
+        << time_iterator->get_current_time() << ", time step "
+        << time_iterator->get_current_time_step_number() << ")";
+    Journal::print_line(scratch_data->get_pcout(0), str.str(), "restart");
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandApplication<dim, number>::load_triangulation()
+  {
+    ScopedName                 sc("load_restart");
+    dealii::TimerOutput::Scope scope(scratch_data->get_timer(), sc);
+
+    namespace fs             = std::filesystem;
+    const std::string prefix = param.restart.prefix + "_" + std::to_string(param.restart.load);
+    AssertThrow(fs::exists(prefix + "_problem.restart") and fs::exists(prefix + "_tria"),
+                dealii::ExcMessage("The restart files " + prefix + "_* do not exist."));
+
+    // Triangulation::load() requires the coarse mesh: the refinement of the case is removed
+    auto &triangulation = *simulation_case->triangulation;
+    for (unsigned int n = 0; triangulation.n_global_levels() > 1; ++n)
+      {
+        AssertThrow(n < 64,
+                    dealii::ExcMessage("The mesh of the case could not be coarsened to its "
+                                       "coarse mesh before loading the restart files."));
+        for (const auto &cell : triangulation.active_cell_iterators())
+          if (cell->is_locally_owned() and cell->level() > 0)
+            cell->set_coarsen_flag();
+        triangulation.execute_coarsening_and_refinement();
+      }
+
+    triangulation.load(prefix + "_tria");
+
+    Journal::print_line(scratch_data->get_pcout(0),
+                        "load restart files " + prefix + "_*",
+                        "restart");
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandApplication<dim, number>::load_state()
+  {
+    ScopedName                 sc("load_restart");
+    dealii::TimerOutput::Scope scope(scratch_data->get_timer(), sc);
+
+    const std::string prefix = param.restart.prefix + "_" + std::to_string(param.restart.load);
+
+    // state, which is the same on all processes (read by all processes)
+    {
+      std::ifstream file(prefix + "_problem.restart", std::ios::binary);
+      AssertThrow(file,
+                  dealii::ExcMessage("The restart file " + prefix +
+                                     "_problem.restart could not be opened."));
+      boost::archive::binary_iarchive archive(file);
+      archive >> *time_iterator;
+      archive >> *post_processor;
+      archive >> stage_times_and_names;
+      archive >> *narrow_band_operation;
+    }
+
+    // cell-wise state of the narrow band
+    narrow_band_operation->deserialize();
+
+    std::ostringstream str;
+    str << "restart at t = " << std::scientific << std::setprecision(4)
+        << time_iterator->get_current_time() << " (time step "
+        << time_iterator->get_current_time_step_number() << ")";
+    Journal::print_line(scratch_data->get_pcout(0), str.str(), "restart");
+  }
+
+  template <int dim, typename number>
+  double
+  NarrowBandApplication<dim, number>::elapsed_wall_time() const
+  {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_time_start)
+      .count();
   }
 
   template <int dim, typename number>

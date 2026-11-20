@@ -23,6 +23,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <map>
 #include <optional>
@@ -45,6 +47,79 @@ namespace MeltPoolDG::LevelSet
       AssertThrow(dealii::Utilities::MPI::sum(n_cut_cells, mpi_comm) > 0,
                   dealii::ExcMessage("The narrow band contains no cut cells: the interface has "
                                      "vanished or does not intersect the domain."));
+    }
+
+    /**
+     * Restart: append the bytes of a value of a trivially copyable type to a buffer.
+     */
+    template <typename T>
+    void
+    append_bytes(std::vector<char> &buffer, const T &value)
+    {
+      const char *begin = reinterpret_cast<const char *>(&value);
+      buffer.insert(buffer.end(), begin, begin + sizeof(T));
+    }
+
+    /**
+     * Restart: append the number of values and the values to a buffer.
+     */
+    template <typename number>
+    void
+    append_values(std::vector<char> &buffer, const dealii::Vector<number> &values)
+    {
+      append_bytes(buffer, static_cast<std::uint32_t>(values.size()));
+      for (const number value : values)
+        append_bytes(buffer, value);
+    }
+
+    /**
+     * Restart: read a value of a trivially copyable type from a buffer and advance the position.
+     */
+    template <typename T>
+    T
+    read_bytes(std::vector<char>::const_iterator      &position,
+               const std::vector<char>::const_iterator end)
+    {
+      AssertThrow(end - position >= static_cast<std::ptrdiff_t>(sizeof(T)),
+                  dealii::ExcMessage("The cell-wise restart data of the narrow band is invalid."));
+      T value;
+      std::memcpy(&value, &*position, sizeof(T));
+      position += sizeof(T);
+      return value;
+    }
+
+    /**
+     * Restart: read the number of values and the values written by append_values().
+     */
+    template <typename number>
+    std::vector<number>
+    read_values(std::vector<char>::const_iterator      &position,
+                const std::vector<char>::const_iterator end)
+    {
+      const auto          n_values = read_bytes<std::uint32_t>(position, end);
+      std::vector<number> values(n_values);
+      for (auto &value : values)
+        value = read_bytes<number>(position, end);
+      return values;
+    }
+
+    /**
+     * Restart: set the DoF values of a cell from the restart data.
+     */
+    template <typename CellIteratorType, typename VectorType>
+    void
+    set_restart_values(const CellIteratorType                             &cell,
+                       const std::vector<typename VectorType::value_type> &values,
+                       VectorType                                         &vector)
+    {
+      AssertThrow(values.size() == cell->get_fe().n_dofs_per_cell(),
+                  dealii::ExcMessage("The restart data does not match the DoFs of the narrow "
+                                     "band."));
+      if (values.empty())
+        return;
+      const dealii::Vector<typename VectorType::value_type> cell_values(values.begin(),
+                                                                        values.end());
+      cell->set_dof_values(cell_values, vector);
     }
   } // namespace
 
@@ -1148,13 +1223,23 @@ namespace MeltPoolDG::LevelSet
       }
 
     // communicate the signs of the locally owned cells to the ghost cells
+    exchange_cell_signs(cell_signs);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::exchange_cell_signs(std::vector<int> &signs) const
+  {
+    const auto &triangulation = dof_handler_cut.get_triangulation();
+    AssertDimension(signs.size(), triangulation.n_active_cells());
+
     if (dynamic_cast<const dealii::parallel::TriangulationBase<dim> *>(&triangulation) != nullptr)
       dealii::GridTools::exchange_cell_data_to_ghosts<int, dealii::Triangulation<dim>>(
         triangulation,
         [&](const typename dealii::Triangulation<dim>::active_cell_iterator &cell)
-          -> std::optional<int> { return cell_signs[cell->active_cell_index()]; },
+          -> std::optional<int> { return signs[cell->active_cell_index()]; },
         [&](const typename dealii::Triangulation<dim>::active_cell_iterator &cell, const int &s) {
-          cell_signs[cell->active_cell_index()] = s;
+          signs[cell->active_cell_index()] = s;
         });
   }
 
@@ -1430,6 +1515,213 @@ namespace MeltPoolDG::LevelSet
                                                                const number time_step) const
   {
     return advection_operator.compute_cfl_number(time, time_step);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::update_restart_flags()
+  {
+    has_small_cut_cells_on_restart = not is_small_cut_cell.empty();
+    has_cell_signs_on_restart      = not cell_signs.empty();
+    has_reference_on_restart = is_subcycling() and dof_handler_cut_reference.has_active_dofs();
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::prepare_for_serialization()
+  {
+    update_restart_flags();
+
+    std::vector<const VectorType *> band_vectors;
+    solution_history_band.apply([&](VectorType &vector) { band_vectors.push_back(&vector); });
+
+    // Note: the callback is called by Triangulation::save() for each locally owned cell.
+    auto &triangulation =
+      const_cast<dealii::Triangulation<dim> &>(dof_handler_cut.get_triangulation());
+    triangulation.register_data_attach(
+      [this, band_vectors](const typename dealii::Triangulation<dim>::cell_iterator &cell,
+                           const dealii::CellStatus                                  status) {
+        AssertThrow(status == dealii::CellStatus::cell_will_persist, dealii::ExcNotImplemented());
+
+        const unsigned int index     = cell->active_cell_index();
+        const auto         cell_cut  = cell->as_dof_handler_iterator(dof_handler_cut);
+        const auto         cell_band = cell->as_dof_handler_iterator(dof_handler_band);
+        const bool         is_cut    = cell_cut->get_fe().n_dofs_per_cell() > 0;
+        const bool         is_reference =
+          has_reference_on_restart and
+          cell->as_dof_handler_iterator(dof_handler_cut_reference)->get_fe().n_dofs_per_cell() > 0;
+
+        std::uint8_t flags = 0;
+        if (is_cut)
+          flags |= 1;
+        if (has_small_cut_cells_on_restart and is_small_cut_cell[index])
+          flags |= 2;
+        if (is_reference)
+          flags |= 4;
+
+        std::vector<char> buffer;
+        append_bytes(buffer, flags);
+        append_bytes(buffer,
+                     static_cast<std::int8_t>(has_cell_signs_on_restart ? cell_signs[index] : 0));
+        append_bytes(buffer,
+                     static_cast<std::int8_t>(
+                       has_reference_on_restart ? cell_signs_reference[index] : 0));
+        append_bytes(buffer, static_cast<std::uint8_t>(cell_band->active_fe_index()));
+
+        dealii::Vector<number> values;
+        const auto             append_cell_values = [&](const auto &dof_cell, const VectorType &v) {
+          values.reinit(dof_cell->get_fe().n_dofs_per_cell());
+          if (values.size() > 0)
+            dof_cell->get_dof_values(v, values);
+          append_values(buffer, values);
+        };
+
+        append_cell_values(cell_cut, level_set);
+        append_bytes(buffer, static_cast<std::uint8_t>(band_vectors.size()));
+        for (const VectorType *vector : band_vectors)
+          append_cell_values(cell_band, *vector);
+        if (has_reference_on_restart)
+          append_cell_values(cell->as_dof_handler_iterator(dof_handler_cut_reference),
+                             level_set_reference);
+        else
+          append_values(buffer, dealii::Vector<number>());
+
+        return buffer;
+      },
+      /*returns_variable_size_data=*/true);
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandLevelSetOperation<dim, number>::deserialize()
+  {
+    ScopedName                 sc("narrow_band::deserialize");
+    dealii::TimerOutput::Scope scope(scratch_data.get_timer(), sc);
+
+    auto &triangulation =
+      const_cast<dealii::Triangulation<dim> &>(dof_handler_cut.get_triangulation());
+    const unsigned int n_cells = triangulation.n_active_cells();
+
+    // cell-wise data of the locally owned cells
+    std::vector<bool>                             is_cut_cell(n_cells, false);
+    std::vector<bool>                             is_small(n_cells, false);
+    std::vector<bool>                             is_reference(n_cells, false);
+    std::vector<int>                              signs(n_cells, 0);
+    std::vector<int>                              signs_reference(n_cells, 0);
+    std::vector<unsigned int>                     band_fe_indices(n_cells, 0);
+    std::vector<std::vector<number>>              cut_values(n_cells);
+    std::vector<std::vector<number>>              reference_values(n_cells);
+    std::vector<std::vector<std::vector<number>>> band_values(n_cells);
+
+    // Note: the handle is obtained by registering the data as in prepare_for_serialization().
+    const unsigned int handle = triangulation.register_data_attach(
+      [](const typename dealii::Triangulation<dim>::cell_iterator &, const dealii::CellStatus) {
+        return std::vector<char>();
+      },
+      /*returns_variable_size_data=*/true);
+    triangulation.notify_ready_to_unpack(
+      handle,
+      [&](const typename dealii::Triangulation<dim>::cell_iterator       &cell,
+          const dealii::CellStatus                                        status,
+          const boost::iterator_range<std::vector<char>::const_iterator> &data) {
+        AssertThrow(status == dealii::CellStatus::cell_will_persist, dealii::ExcNotImplemented());
+
+        const unsigned int index    = cell->active_cell_index();
+        auto               position = data.begin();
+        const auto         end      = data.end();
+
+        const auto flags       = read_bytes<std::uint8_t>(position, end);
+        is_cut_cell[index]     = (flags & 1) != 0;
+        is_small[index]        = (flags & 2) != 0;
+        is_reference[index]    = (flags & 4) != 0;
+        signs[index]           = read_bytes<std::int8_t>(position, end);
+        signs_reference[index] = read_bytes<std::int8_t>(position, end);
+        band_fe_indices[index] = read_bytes<std::uint8_t>(position, end);
+
+        cut_values[index]         = read_values<number>(position, end);
+        const auto n_band_vectors = read_bytes<std::uint8_t>(position, end);
+        band_values[index].resize(n_band_vectors);
+        for (auto &values : band_values[index])
+          values = read_values<number>(position, end);
+        reference_values[index] = read_values<number>(position, end);
+      });
+
+    // DoF system of the restored cut cells and band (for the downstream neighbor activation with
+    // the restored times of the activation)
+    setup_dof_system(is_cut_cell, has_small_cut_cells_on_restart ? is_small : std::vector<bool>());
+
+    unsigned int n_band_mismatches = 0;
+    for (const auto &cell : dof_handler_band.active_cell_iterators())
+      if (cell->is_locally_owned() and
+          cell->active_fe_index() != band_fe_indices[cell->active_cell_index()])
+        ++n_band_mismatches;
+    AssertThrow(dealii::Utilities::MPI::sum(n_band_mismatches, scratch_data.get_mpi_comm()) == 0,
+                dealii::ExcMessage("The band of the restart data could not be restored (the "
+                                   "parameters of the neighbor activation have changed)."));
+
+    // DoF values of the cut cells and the band
+    std::vector<VectorType *> band_vectors;
+    solution_history_band.apply([&](VectorType &vector) { band_vectors.push_back(&vector); });
+    for (const auto &cell : dof_handler_cut.active_cell_iterators())
+      {
+        if (not cell->is_locally_owned())
+          continue;
+        const unsigned int index = cell->active_cell_index();
+        set_restart_values(cell, cut_values[index], level_set);
+
+        const auto cell_band = cell->as_dof_handler_iterator(dof_handler_band);
+        for (unsigned int i = 0; i < std::min(band_vectors.size(), band_values[index].size()); ++i)
+          set_restart_values(cell_band, band_values[index][i], *band_vectors[i]);
+      }
+
+    // signs of the cells, which are not cut (semi-Lagrangian band)
+    if (has_cell_signs_on_restart)
+      {
+        cell_signs = signs;
+        exchange_cell_signs(cell_signs);
+      }
+
+    // sub-cycling: reference (or a new reference, if the restart data has none)
+    if (is_subcycling())
+      {
+        if (has_reference_on_restart)
+          {
+            NarrowBand::distribute_dofs_layered(is_reference,
+                                                1,
+                                                dof_handler_cut_reference,
+                                                fe_collection_cut,
+                                                dof_handler_band_reference,
+                                                fe_collection_band);
+
+            const MPI_Comm mpi_comm = scratch_data.get_mpi_comm();
+            level_set_reference.reinit(dof_handler_cut_reference.locally_owned_dofs(),
+                                       dealii::DoFTools::extract_locally_relevant_dofs(
+                                         dof_handler_cut_reference),
+                                       mpi_comm);
+            level_set_band_reference.reinit(dof_handler_band_reference.locally_owned_dofs(),
+                                            dealii::DoFTools::extract_locally_relevant_dofs(
+                                              dof_handler_band_reference),
+                                            mpi_comm);
+            for (const auto &cell : dof_handler_cut_reference.active_cell_iterators())
+              if (cell->is_locally_owned())
+                set_restart_values(cell,
+                                   reference_values[cell->active_cell_index()],
+                                   level_set_reference);
+
+            cell_signs_reference = signs_reference;
+            exchange_cell_signs(cell_signs_reference);
+          }
+        else
+          set_reference(std::numeric_limits<number>::quiet_NaN());
+      }
+
+    candidate_cell_values.clear();
+
+    Journal::print_line(scratch_data.get_pcout(1),
+                        "restart: state of the narrow band restored",
+                        "narrow_band");
+    print_band_statistics();
+    update_continuous_level_set();
   }
 
   template class NarrowBandLevelSetOperation<1, double>;

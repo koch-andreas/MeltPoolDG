@@ -30,6 +30,8 @@
 #include <meltpooldg/time_integration/solution_history.hpp>
 #include <meltpooldg/time_integration/time_integrator_base.hpp>
 
+#include <boost/serialization/vector.hpp>
+
 #include <functional>
 #include <limits>
 #include <memory>
@@ -266,6 +268,70 @@ namespace MeltPoolDG::LevelSet
     number
     compute_cfl_number(const number time, const number time_step) const;
 
+    /**
+     * @brief Restart: attach the cell-wise state of the narrow band to the triangulation, such
+     * that it is written by the next call of Triangulation::save(). For each locally owned cell,
+     * the cut-cell flag, the flag of the cut cells without activated face neighbors, the active FE
+     * index of the band, the signs of the cell (semi-Lagrangian band) and the DoF values of the
+     * level set on the cut cells and on the band (all vectors of the solution history) are
+     * stored; with sub-cycling, also the cut-cell flag, the sign and the level set of the
+     * reference. The state, which is the same on all processes (e.g., the advected interface
+     * points), is written by serialize().
+     */
+    void
+    prepare_for_serialization();
+
+    /**
+     * @brief Restart: restore the state of the narrow band (instead of set_initial_condition())
+     * after the triangulation has been loaded by Triangulation::load() from the files written
+     * after prepare_for_serialization() and after the state, which is the same on all processes,
+     * has been read by serialize(). The DoF system is set up for the restored cut cells and
+     * band, the DoF values are set, and the continuous level set (if enabled) is computed. The
+     * next time step continues exactly as the time step after the one, in which the state was
+     * saved (with the same number of processes).
+     */
+    void
+    deserialize();
+
+    /**
+     * @brief Restart: write or read the state of the narrow band, which is the same on all
+     * processes (times of the downstream neighbor activation, sub-cycling counters and time of
+     * the reference, flags of the cell-wise data and the advected interface points). It is
+     * written on one process and read on all processes before deserialize().
+     */
+    template <class Archive>
+    void
+    serialize(Archive &ar, const unsigned int /*version*/)
+    {
+      // parameters, which determine the layout of the cell-wise data
+      unsigned int type   = static_cast<unsigned int>(narrow_band_data.type);
+      unsigned int degree = fe_degree;
+      bool         points = static_cast<bool>(interface_points);
+      ar          &type;
+      ar          &degree;
+      ar          &points;
+      AssertThrow(type == static_cast<unsigned int>(narrow_band_data.type) and degree == fe_degree,
+                  dealii::ExcMessage("The restart data was written with a different type of the "
+                                     "narrow band or a different polynomial degree."));
+      AssertThrow(points == static_cast<bool>(interface_points),
+                  dealii::ExcMessage(
+                    "The restart data was written with a different reinitialization interface "
+                    "(advected interface points with and without)."));
+
+      if constexpr (Archive::is_saving::value)
+        update_restart_flags();
+
+      ar &neighbor_activation_times;
+      ar &time_reference;
+      ar &n_steps_since_reference;
+      ar &n_reference_updates;
+      ar &has_small_cut_cells_on_restart;
+      ar &has_cell_signs_on_restart;
+      ar &has_reference_on_restart;
+      if (interface_points)
+        ar &*interface_points;
+    }
+
   private:
     /**
      * @brief Distribute the DoFs of the cut and the band DoFHandler for the given cut cells,
@@ -409,6 +475,18 @@ namespace MeltPoolDG::LevelSet
     redistance_layers();
 
     /**
+     * @brief Restart: set the flags of the cell-wise data from the current state.
+     */
+    void
+    update_restart_flags();
+
+    /**
+     * @brief Communicate the signs of the locally owned cells to the ghost cells (see cell_signs).
+     */
+    void
+    exchange_cell_signs(std::vector<int> &signs) const;
+
+    /**
      * @brief Print the size of the narrow band.
      */
     void
@@ -516,6 +594,13 @@ namespace MeltPoolDG::LevelSet
     number                  time_reference          = std::numeric_limits<number>::quiet_NaN();
     unsigned int            n_steps_since_reference = 0;
     unsigned int            n_reference_updates     = 0;
+
+    /// Restart: flags of the cell-wise data (see prepare_for_serialization() and serialize()):
+    /// the flags of the cut cells without activated face neighbors, the signs of the cells and the
+    /// reference of the sub-cycling are stored.
+    bool has_small_cut_cells_on_restart = false;
+    bool has_cell_signs_on_restart      = false;
+    bool has_reference_on_restart       = false;
 
     /// Advection operator on the band.
     NarrowBandAdvectionDGOperator<dim, number> advection_operator;
