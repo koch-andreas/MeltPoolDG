@@ -76,7 +76,23 @@ namespace MeltPoolDG::LevelSet
    *   (back to back, i.e., the gap between the two parts has closed within the time step). Thin
    *   filaments (both sides face each other) and gaps wider than $\delta$ are kept. After the
    *   removal, the advected level set determines the interface in these cells, and new points
-   *   are inserted from the merged interface.
+   *   are inserted from the merged interface,
+   * - break-up rule (topology change, also for $c_m > 0$): the same on the inner side of the
+   *   points, where the phase between two parts of the interface vanishes (e.g., a neck, which
+   *   pinches off): with the approach $a = \Delta t \max(0, (\boldsymbol{u}(\boldsymbol{x}) -
+   *   \boldsymbol{u}(\boldsymbol{x} + h \boldsymbol{n})) \cdot \boldsymbol{n})$ of the flow on
+   *   the inner side, a supported point in a flow converging on its inner side is removed,
+   *   (a) if the advected level set at the probe $\boldsymbol{x} + \delta \boldsymbol{n}$ is
+   *   smaller than the value at the point by more than $\delta / 4$ (for a point on the
+   *   interface, it increases by about $\delta$), i.e., the point lies in the other phase or at
+   *   a part of the phase thinner than about $\delta$, or (b) if a point of a
+   *   different orientation is closer than the sum of the approaches and each of them lies on
+   *   the inner side of the other one (face to face, i.e., the part of the phase between them
+   *   has vanished within the time step). In addition, a point is removed, if it has crossed a
+   *   line of converging characteristics within the time step, i.e., if the velocity at its new
+   *   position points against the velocity at its old position (at the same time; impossible for
+   *   a Lipschitz-continuous velocity with $\Delta t |\nabla \boldsymbol{u}| < 1$), e.g., the
+   *   points of the two sides of a tip, which are squeezed together tangentially.
    * The reinitialization then enforces $\phi_h = 0$ weakly at the points
    * (get_surface_quadrature()) instead of at the zero level set of the advected level set in the
    * cut cells containing usable points (see below). The cut cells are still determined from the
@@ -261,6 +277,9 @@ namespace MeltPoolDG::LevelSet
                       dealii::ExcMessage("The restart data of the interface points is invalid."));
           approach.clear();
           convergence.clear();
+          inner_approach.clear();
+          inner_convergence.clear();
+          crossed.clear();
           points_of_cell.clear();
           is_unresolved.clear();
           located = false;
@@ -561,6 +580,15 @@ namespace MeltPoolDG::LevelSet
     /// velocity difference over the length scale divided by the speed (merge rule, computed in
     /// advect(), empty after the seeding).
     std::vector<double> convergence;
+
+    /// Approach of the flow on the inner side of each point within the last time step and its
+    /// convergence ratio (break-up rule, computed in advect(), empty after the seeding).
+    std::vector<double> inner_approach;
+    std::vector<double> inner_convergence;
+
+    /// Points, which have crossed a line of converging characteristics within the last time step
+    /// (break-up rule, computed in advect(), empty after the seeding).
+    std::vector<bool> crossed;
 
     /// The points are assigned to the cells.
     bool located = false;

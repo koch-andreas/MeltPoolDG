@@ -1089,8 +1089,11 @@ namespace MeltPoolDG::LevelSet
         candidate_cell_values.size() == triangulation.n_active_cells())
       for (unsigned int round = 0; round < 2; ++round)
         {
-          // cells behind open faces of all processes (CellIds in binary form)
-          std::vector<unsigned int> local_ids;
+          // cells behind open faces of all processes (CellIds in binary form; the value type of
+          // the binary representation depends on the deal.II version: unsigned int up to 9.7,
+          // std::uint64_t afterwards, where the child indices are stored in the upper 32 bits)
+          using BinaryValue = typename dealii::CellId::binary_type::value_type;
+          std::vector<BinaryValue> local_ids;
           for (const auto &id : cg.find_cells_behind_open_faces(cell_signs))
             for (const auto value : id.template to_binary<dim>())
               local_ids.push_back(value);

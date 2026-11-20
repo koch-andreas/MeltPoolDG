@@ -23,6 +23,7 @@
 #include <meltpooldg/utilities/journal.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iterator>
 #include <limits>
@@ -257,6 +258,9 @@ namespace MeltPoolDG::LevelSet
 
     approach.clear();
     convergence.clear();
+    inner_approach.clear();
+    inner_convergence.clear();
+    crossed.clear();
     points_of_cell.clear();
     is_unresolved.clear();
     located = false;
@@ -301,7 +305,8 @@ namespace MeltPoolDG::LevelSet
       return StateType{u, dealii::trace(grad_u) * m - dealii::transpose(grad_u) * m};
     };
 
-    const number h = time_step;
+    const number                          h          = time_step;
+    const std::vector<dealii::Point<dim>> old_points = points;
     for (unsigned int k = 0; k < points.size(); ++k)
       {
         const dealii::Point<dim>     x = points[k];
@@ -323,26 +328,54 @@ namespace MeltPoolDG::LevelSet
     // approach of the flow on the outer side of each point within one time step (merge rule):
     // dt max(0, (u(x - l n) - u(x)) . n) at t^{n+1} with the length scale l, i.e., the
     // displacement, by which a part of the interface on the outer side approaches the point
-    // within one time step (nonzero for converging flows, zero for rigid-body motions)
-    // and the convergence ratio of this normal velocity difference and the speed
+    // within one time step (nonzero for converging flows, zero for rigid-body motions),
+    // and the convergence ratio of this normal velocity difference and the speed; the same on
+    // the inner side (break-up rule: the phase between two parts of the interface is squeezed)
     approach.assign(points.size(), 0.);
     convergence.assign(points.size(), 0.);
+    inner_approach.assign(points.size(), 0.);
+    inner_convergence.assign(points.size(), 0.);
+    crossed.assign(points.size(), false);
     if (merge_distance > 0.)
       {
+        // points, which have crossed a line of converging characteristics within the time step:
+        // the velocity at the new position points against the velocity at the old position (at
+        // the same time t^{n+1/2}), which is impossible for a Lipschitz-continuous velocity with
+        // dt |grad u| < 1 (e.g., the points of the two sides of a tip, which are squeezed
+        // together tangentially, cf. the pair test for the normal collisions)
+        velocity.set_time(time + 0.5 * h);
+        for (unsigned int k = 0; k < points.size(); ++k)
+          {
+            dealii::Tensor<1, dim> u_old, u_new;
+            for (unsigned int d = 0; d < dim; ++d)
+              {
+                u_old[d] = velocity.value(old_points[k], d);
+                u_new[d] = velocity.value(points[k], d);
+              }
+            crossed[k] = u_old * u_new < 0.;
+          }
+
         velocity.set_time(time + h);
         for (unsigned int k = 0; k < points.size(); ++k)
           {
             const dealii::Point<dim> outer = points[k] - length_scale * normals[k];
-            dealii::Tensor<1, dim>   u_point, u_outer;
+            const dealii::Point<dim> inner = points[k] + length_scale * normals[k];
+            dealii::Tensor<1, dim>   u_point, u_outer, u_inner;
             for (unsigned int d = 0; d < dim; ++d)
               {
                 u_point[d] = velocity.value(points[k], d);
                 u_outer[d] = velocity.value(outer, d);
+                u_inner[d] = velocity.value(inner, d);
               }
             const double rate  = (u_outer - u_point) * normals[k];
             const double speed = std::max(u_point.norm(), u_outer.norm());
             approach[k]        = h * std::max(0., rate);
             convergence[k]     = speed > 0. ? std::max(0., rate) / speed : 0.;
+
+            const double inner_rate  = (u_point - u_inner) * normals[k];
+            const double inner_speed = std::max(u_point.norm(), u_inner.norm());
+            inner_approach[k]        = h * std::max(0., inner_rate);
+            inner_convergence[k] = inner_speed > 0. ? std::max(0., inner_rate) / inner_speed : 0.;
           }
       }
 
@@ -428,121 +461,160 @@ namespace MeltPoolDG::LevelSet
   {
     const MPI_Comm mpi_comm = dof_handler_band.get_mpi_communicator();
 
-    // only points in a converging flow are candidates (the positive part of the normal velocity
-    // difference over h on the outer side exceeds half of the local speed, e.g., two parts of the
-    // interface pushed against each other), i.e., not the points of thin gaps or filaments in
-    // stretching or rotating flows, which the level set does not resolve (the points are the same
-    // on all processes, i.e., all processes take the same decisions)
-    const auto is_candidate = [&](const unsigned int k) {
-      return status[k] == 1 and convergence.size() == points.size() and convergence[k] > 0.5;
-    };
-    bool any_candidate = false;
-    for (unsigned int k = 0; k < points.size(); ++k)
-      any_candidate = any_candidate or is_candidate(k);
-    if (not any_candidate)
-      return;
-
-    const auto approach_of = [&](const unsigned int k) {
-      return approach.size() == points.size() ? approach[k] : 0.;
-    };
-
-    // distance of the merge rule: c_m h plus the approach of the flow on the outer side within
-    // one time step (collisions within the time step)
-    std::vector<double> distances(points.size());
-    for (unsigned int k = 0; k < points.size(); ++k)
-      distances[k] = merge_distance * cell_sizes[k] + approach_of(k);
-
-    // (a) ray test: the advected level set at the probe x - delta n, i.e., on the outer side of
-    // the point, exceeds the value at the point by more than delta / 4 (for a point on the
-    // interface, it decreases by about delta)
-    std::vector<dealii::Point<dim>> probes(points.size());
-    for (unsigned int k = 0; k < points.size(); ++k)
-      probes[k] = is_candidate(k) ? points[k] - distances[k] * normals[k] : points[k];
-
-    const auto locations = find_cells(dof_handler_band, probes);
-
-    std::vector<std::vector<unsigned int>> probes_of_cell(
-      dof_handler_band.get_triangulation().n_active_cells());
-    for (unsigned int k = 0; k < points.size(); ++k)
-      if (is_candidate(k) and locations[k] and locations[k]->is_locally_owned)
-        probes_of_cell[locations[k]->active_cell_index].push_back(k);
-
-    std::vector<double> probe_values(points.size(), 0.), probe_found(points.size(), 0.);
+    // Both rules consider a side of each point: the outer side (merge rule: the other phase
+    // between two parts of the interface vanishes, e.g., merging droplets) and the inner side
+    // (break-up rule: the phase between two parts of the interface vanishes, e.g., a neck, which
+    // pinches off). Only points in a flow, which converges on this side, are candidates (the
+    // positive part of the normal velocity difference over h on this side exceeds half of the
+    // local speed, e.g., two parts of the interface pushed against each other), i.e., not the
+    // points of thin gaps or filaments in stretching or rotating flows, which the level set does
+    // not resolve (the points are the same on all processes, i.e., all processes take the same
+    // decisions).
+    struct Side
     {
-      dealii::Vector<number> values;
-      for (const auto &cell : dof_handler_band.active_cell_iterators())
-        {
-          if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
-            continue;
+      // +1: outer side (merge rule), -1: inner side (break-up rule)
+      double                     orientation;
+      const std::vector<double> *approach;
+      const std::vector<double> *convergence;
+    };
+    const std::array<Side, 2> sides{
+      {Side{1., &approach, &convergence}, Side{-1., &inner_approach, &inner_convergence}}};
 
-          const auto &cell_probes = probes_of_cell[cell->active_cell_index()];
-          if (cell_probes.empty())
-            continue;
-
-          const auto              &fe = cell->get_fe();
-          const AffineCellMap<dim> map(cell);
-          values.reinit(fe.n_dofs_per_cell());
-          cell->get_dof_values(level_set_band, values);
-
-          for (const unsigned int k : cell_probes)
-            {
-              const dealii::Point<dim> unit_point = map.to_unit(probes[k]);
-              double                   value      = 0.;
-              for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
-                value += values[i] * fe.shape_value(i, unit_point);
-              probe_values[k] = value;
-              probe_found[k]  = 1.;
-            }
-        }
-    }
-    dealii::Utilities::MPI::sum(probe_values, mpi_comm, probe_values);
-    dealii::Utilities::MPI::sum(probe_found, mpi_comm, probe_found);
-
+    // points, which have crossed a line of converging characteristics (see advect())
     std::vector<bool> is_collided(points.size(), false);
-    for (unsigned int k = 0; k < points.size(); ++k)
-      if (is_candidate(k) and probe_found[k] > 0.5 and
-          probe_values[k] - values_at_points[k] > 0.25 * distances[k])
-        is_collided[k] = true;
+    if (crossed.size() == points.size())
+      for (unsigned int k = 0; k < points.size(); ++k)
+        is_collided[k] = status[k] == 1 and crossed[k];
 
-    // (b) pair test: a point of a different orientation (n_i . n_j < 1/2) is closer than the sum
-    // of the approaches of the flow of the two points within the time step, and each of the two
-    // points lies on the outer side of the other one (back to back, i.e., the gap between the two
-    // parts of the interface has closed within the time step)
-    std::vector<std::pair<dealii::Point<dim>, unsigned int>> indexed_points;
-    for (unsigned int k = 0; k < points.size(); ++k)
-      if (status[k] != 0)
-        indexed_points.emplace_back(points[k], k);
-    const auto point_tree = dealii::pack_rtree(indexed_points);
-
-    double max_approach = 0.;
-    for (unsigned int k = 0; k < points.size(); ++k)
-      max_approach = std::max(max_approach, approach_of(k));
-
-    std::vector<std::pair<dealii::Point<dim>, unsigned int>> neighbors;
-    for (unsigned int k = 0; k < points.size(); ++k)
+    for (const Side &side : sides)
       {
-        if (not is_candidate(k) or is_collided[k])
+        const auto is_candidate = [&](const unsigned int k) {
+          return status[k] == 1 and not is_collided[k] and
+                 side.convergence->size() == points.size() and (*side.convergence)[k] > 0.5;
+        };
+        bool any_candidate = false;
+        for (unsigned int k = 0; k < points.size(); ++k)
+          any_candidate = any_candidate or is_candidate(k);
+        if (not any_candidate)
           continue;
 
-        const double       radius = approach_of(k) + max_approach;
-        dealii::Point<dim> lower = points[k], upper = points[k];
-        for (unsigned int d = 0; d < dim; ++d)
+        const auto approach_of = [&](const unsigned int k) {
+          return side.approach->size() == points.size() ? (*side.approach)[k] : 0.;
+        };
+
+        // direction from the point to the considered side
+        const auto direction = [&](const unsigned int k) { return -side.orientation * normals[k]; };
+
+        // distance of the rule: c_m h plus the approach of the flow on the side within one time
+        // step (collisions within the time step)
+        std::vector<double> distances(points.size());
+        for (unsigned int k = 0; k < points.size(); ++k)
+          distances[k] = merge_distance * cell_sizes[k] + approach_of(k);
+
+        // (a) ray test: towards the side, i.e., at the probe x + delta d (d: direction to the
+        // side), the advected level set changes by less than delta / 4 in the direction of the
+        // phase on this side (for a point on the interface, it decreases by about delta on the
+        // outer side and increases by about delta on the inner side), i.e., the point lies
+        // inside of the other phase or at a gap (merge rule) or a part of the phase (break-up
+        // rule) thinner than about delta
+        std::vector<dealii::Point<dim>> probes(points.size());
+        std::vector<bool>               candidates(points.size(), false);
+        for (unsigned int k = 0; k < points.size(); ++k)
           {
-            lower[d] -= radius;
-            upper[d] += radius;
+            candidates[k] = is_candidate(k);
+            probes[k]     = candidates[k] ? points[k] + distances[k] * direction(k) : points[k];
           }
-        neighbors.clear();
-        point_tree.query(boost::geometry::index::intersects(
-                           dealii::BoundingBox<dim>(std::make_pair(lower, upper))),
-                         std::back_inserter(neighbors));
-        for (const auto &[point, j] : neighbors)
-          if (j != k and point.distance(points[k]) < approach_of(k) + approach_of(j) and
-              normals[k] * normals[j] < 0.5 and normals[k] * (points[j] - points[k]) <= 0. and
-              normals[j] * (points[k] - points[j]) <= 0.)
+
+        const auto locations = find_cells(dof_handler_band, probes);
+
+        std::vector<std::vector<unsigned int>> probes_of_cell(
+          dof_handler_band.get_triangulation().n_active_cells());
+        for (unsigned int k = 0; k < points.size(); ++k)
+          if (candidates[k] and locations[k] and locations[k]->is_locally_owned)
+            probes_of_cell[locations[k]->active_cell_index].push_back(k);
+
+        std::vector<double> probe_values(points.size(), 0.), probe_found(points.size(), 0.);
+        {
+          dealii::Vector<number> values;
+          for (const auto &cell : dof_handler_band.active_cell_iterators())
             {
-              is_collided[k] = true;
-              break;
+              if (not cell->is_locally_owned() or cell->get_fe().n_dofs_per_cell() == 0)
+                continue;
+
+              const auto &cell_probes = probes_of_cell[cell->active_cell_index()];
+              if (cell_probes.empty())
+                continue;
+
+              const auto              &fe = cell->get_fe();
+              const AffineCellMap<dim> map(cell);
+              values.reinit(fe.n_dofs_per_cell());
+              cell->get_dof_values(level_set_band, values);
+
+              for (const unsigned int k : cell_probes)
+                {
+                  const dealii::Point<dim> unit_point = map.to_unit(probes[k]);
+                  double                   value      = 0.;
+                  for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
+                    value += values[i] * fe.shape_value(i, unit_point);
+                  probe_values[k] = value;
+                  probe_found[k]  = 1.;
+                }
             }
+        }
+        dealii::Utilities::MPI::sum(probe_values, mpi_comm, probe_values);
+        dealii::Utilities::MPI::sum(probe_found, mpi_comm, probe_found);
+
+        std::vector<bool> is_collided_side(points.size(), false);
+        for (unsigned int k = 0; k < points.size(); ++k)
+          if (candidates[k] and probe_found[k] > 0.5 and
+              side.orientation * (probe_values[k] - values_at_points[k]) > 0.25 * distances[k])
+            is_collided_side[k] = true;
+
+        // (b) pair test: a point of a different orientation (n_i . n_j < 1/2) is closer than the
+        // sum of the approaches of the flow of the two points within the time step, and each of
+        // the two points lies on the considered side of the other one (merge rule: back to back,
+        // i.e., the gap between the two parts of the interface has closed within the time step;
+        // break-up rule: face to face, i.e., the part of the phase between them has vanished)
+        std::vector<std::pair<dealii::Point<dim>, unsigned int>> indexed_points;
+        for (unsigned int k = 0; k < points.size(); ++k)
+          if (status[k] != 0)
+            indexed_points.emplace_back(points[k], k);
+        const auto point_tree = dealii::pack_rtree(indexed_points);
+
+        double max_approach = 0.;
+        for (unsigned int k = 0; k < points.size(); ++k)
+          max_approach = std::max(max_approach, approach_of(k));
+
+        std::vector<std::pair<dealii::Point<dim>, unsigned int>> neighbors;
+        for (unsigned int k = 0; k < points.size(); ++k)
+          {
+            if (not candidates[k] or is_collided_side[k])
+              continue;
+
+            const double       radius = approach_of(k) + max_approach;
+            dealii::Point<dim> lower = points[k], upper = points[k];
+            for (unsigned int d = 0; d < dim; ++d)
+              {
+                lower[d] -= radius;
+                upper[d] += radius;
+              }
+            neighbors.clear();
+            point_tree.query(boost::geometry::index::intersects(
+                               dealii::BoundingBox<dim>(std::make_pair(lower, upper))),
+                             std::back_inserter(neighbors));
+            for (const auto &[point, j] : neighbors)
+              if (j != k and point.distance(points[k]) < approach_of(k) + approach_of(j) and
+                  normals[k] * normals[j] < 0.5 and direction(k) * (points[j] - points[k]) >= 0. and
+                  direction(j) * (points[k] - points[j]) >= 0.)
+                {
+                  is_collided_side[k] = true;
+                  break;
+                }
+          }
+
+        for (unsigned int k = 0; k < points.size(); ++k)
+          if (is_collided_side[k])
+            is_collided[k] = true;
       }
 
     for (unsigned int k = 0; k < points.size(); ++k)

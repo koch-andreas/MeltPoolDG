@@ -2307,6 +2307,130 @@ namespace MeltPoolDG::LevelSet
     };
 
     /**
+     * Velocity u = -U sign(y) e_y (sign(0) = 1): both halves of the domain move rigidly towards
+     * the axis y = 0 (dim components).
+     */
+    template <int dim>
+    class SqueezingVelocity : public dealii::Function<dim>
+    {
+    public:
+      explicit SqueezingVelocity(const number velocity)
+        : dealii::Function<dim>(dim)
+        , velocity(velocity)
+      {}
+
+      number
+      value(const dealii::Point<dim> &p, const unsigned int component) const override
+      {
+        if (component != 1)
+          return 0.;
+        return p[1] >= 0. ? -velocity : velocity;
+      }
+
+    private:
+      const number velocity;
+    };
+
+    /**
+     * Break-up of two overlapping circles (radius r = 0.24, distance D = 0.46 of the centers on
+     * the axis y = 0), which are squeezed towards the axis with u = -U sign(y) e_y (U = 0.25): the
+     * neck pinches off at t = sqrt(r^2 - D^2/4) / U = 0.274, and the two parts are lenses with
+     * the length 2 * 2 r (pi - 2 asin(U t / r)) of their boundaries. Returns the relative error of
+     * the length of the zero level set at t = 0.6 (advected points, subcell distance, 32^2 cells).
+     */
+    template <int dim>
+    number
+    compute_breakup_circles_length_error(const number merge_distance)
+    {
+      const unsigned int fe_degree = 2;
+      const number       radius = 0.24, distance = 0.46, velocity = 0.25, time_step = 0.01;
+      const unsigned int n_time_steps = 60;
+
+      dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
+      dealii::GridGenerator::hyper_cube(triangulation, -1., 1.);
+      triangulation.refine_global(5);
+
+      ScratchData<dim, dim, number> scratch_data(MPI_COMM_WORLD, 0, true);
+      scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
+
+      NarrowBandData<number> narrow_band_data;
+      narrow_band_data.type                   = NarrowBandType::semi_lagrangian;
+      narrow_band_data.level_set_space        = NarrowBandLevelSetSpace::continuous;
+      narrow_band_data.reinitialization_faces = NarrowBandReinitializationFaces::interface_faces;
+      narrow_band_data.reinitialization_interface =
+        NarrowBandReinitializationInterface::advected_points;
+      narrow_band_data.advected_points.unresolved_cells =
+        NarrowBandUnresolvedCells::subcell_distance;
+      narrow_band_data.advected_points.subcell_coupling     = NarrowBandSubcellCoupling::prescribed;
+      narrow_band_data.advected_points.points_per_direction = 3;
+      narrow_band_data.advected_points.merge_distance       = merge_distance;
+
+      ReinitializationData<number> reinit_data;
+      reinit_data.enable                                      = true;
+      reinit_data.modeltype                                   = ModelType::elliptic;
+      reinit_data.fe.type                                     = FiniteElementType::FE_DGQ;
+      reinit_data.fe.degree                                   = fe_degree;
+      reinit_data.elliptic.intersected_cells_only             = true;
+      reinit_data.elliptic.penalty_parameter                  = 1e4;
+      reinit_data.elliptic.nlsolve.max_nonlinear_iterations   = 1000;
+      reinit_data.elliptic.nlsolve.residual_tolerance         = 1e-6;
+      reinit_data.elliptic.nlsolve.field_correction_tolerance = 1e-6;
+      reinit_data.elliptic.nlsolve.verbosity_level            = 0;
+      reinit_data.linear_solver.solver_type                   = LinearSolverType::CG;
+      reinit_data.linear_solver.preconditioner_type           = PreconditionerType::ILU;
+      reinit_data.linear_solver.rel_tolerance                 = 1e-10;
+      reinit_data.linear_solver.abs_tolerance                 = 1e-20;
+      reinit_data.linear_solver.max_iterations                = 1000;
+
+      auto velocity_function = std::make_shared<SqueezingVelocity<dim>>(velocity);
+
+      NarrowBandLevelSetOperation<dim, number> operation(
+        scratch_data, triangulation, narrow_band_data, reinit_data, fe_degree, velocity_function);
+
+      // signed distance of the union of the two overlapping disks (outside and away from the neck)
+      dealii::Point<dim> center_minus, center_plus;
+      center_minus[0] = 0.013 - 0.5 * distance;
+      center_plus[0]  = 0.013 + 0.5 * distance;
+      const dealii::ScalarFunctionFromFunctionObject<dim> initial_condition(
+        [&](const dealii::Point<dim> &p) {
+          return radius - std::min(p.distance(center_minus), p.distance(center_plus));
+        });
+      operation.set_initial_condition(initial_condition);
+
+      for (unsigned int n = 0; n < n_time_steps; ++n)
+        {
+          velocity_function->set_time(n * time_step);
+          operation.advance_time_step(n * time_step, time_step, n + 1);
+        }
+
+      const auto &dof_handler = operation.get_dof_handler_cut();
+      const auto &level_set   = operation.get_level_set();
+      level_set.update_ghost_values();
+      // Note: the generator keeps a pointer to the quadrature collection
+      const dealii::hp::QCollection<1> q_collection{dealii::QGauss<1>(fe_degree + 2)};
+      dealii::NonMatching::DiscreteQuadratureGenerator<dim> generator(q_collection,
+                                                                      dof_handler,
+                                                                      level_set);
+
+      number length = 0.;
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        if (cell->is_locally_owned() and cell->get_fe().n_dofs_per_cell() > 0)
+          {
+            generator.generate(cell);
+            const auto  &quadrature = generator.get_surface_quadrature();
+            const number h          = cell->vertex(1)[0] - cell->vertex(0)[0];
+            for (unsigned int q = 0; q < quadrature.size(); ++q)
+              length += quadrature.weight(q) * std::pow(h, dim - 1);
+          }
+      length = dealii::Utilities::MPI::sum(length, MPI_COMM_WORLD);
+
+      const number squeeze = velocity * n_time_steps * time_step;
+      const number exact_length =
+        4. * radius * (dealii::numbers::PI - 2. * std::asin(squeeze / radius));
+      return (length - exact_length) / exact_length;
+    }
+
+    /**
      * Restart: rotating circle; the level set is advanced by @p n_steps_before time steps, the
      * state is saved (archive and triangulation files), and it is advanced by @p n_steps_after
      * further time steps. Then, the state is loaded into a new triangulation and a new operation
@@ -3476,6 +3600,21 @@ namespace MeltPoolDG::LevelSet
 
     EXPECT_GT(std::abs(error_without_rule), 2e-2);
     EXPECT_LT(std::abs(error_with_rule), 2e-3);
+  }
+
+  TEST(NarrowBandLevelSetTest, BreakupCircles2D)
+  {
+    // Two overlapping circles are squeezed towards their axis, and the neck pinches off
+    // (topology change). Without the merge and break-up rules, the advected interface points of
+    // the two sides of the neck and of the tips, which are pushed against each other at the axis,
+    // remain there and keep a thin film between the two parts by the subcell distance (observed:
+    // relative length error 1.7e-1 at t = 0.6); the break-up rule removes them (observed:
+    // 2.0e-2).
+    const number error_without_rule = compute_breakup_circles_length_error<2>(0.);
+    const number error_with_rule    = compute_breakup_circles_length_error<2>(0.05);
+
+    EXPECT_GT(std::abs(error_without_rule), 8e-2);
+    EXPECT_LT(std::abs(error_with_rule), 4e-2);
   }
 
   TEST(NarrowBandLevelSetTest, ReinitializationPrescribedDoFs2D)
