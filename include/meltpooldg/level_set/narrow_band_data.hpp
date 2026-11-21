@@ -140,6 +140,18 @@ namespace MeltPoolDG::LevelSet
               // the closed-interface correction)
               final_level_set)
 
+  BETTER_ENUM(NarrowBandSubcyclingCharacteristics,
+              char,
+              // backward integration of the characteristics from the current time to the time of
+              // the reference over all time steps since the reference (requires the velocity at
+              // all these times)
+              integration,
+              // characteristic map: the displacement since the reference is stored as a continuous
+              // field on the candidate cells of the reference and composed in each time step with
+              // the backward characteristic of the time step (requires only the velocity of the
+              // time step, see NarrowBandCharacteristicMap)
+              map)
+
   BETTER_ENUM(NarrowBandGhostPenaltyFaces,
               char,
               // all interior faces of the narrow band with at least one adjacent neighbor cell,
@@ -340,13 +352,21 @@ namespace MeltPoolDG::LevelSet
     number closed_interface_offset = 0.01;
 
     /// Semi-Lagrangian band: sub-cycling of the level-set update. If positive, the level set of a
-    /// time step is evaluated from the last reference level set (backward integration of the
-    /// characteristics over all time steps since the reference), and the reinitialization, the
-    /// insertion of new interface points and the update of the reference are only performed,
-    /// once the maximum displacement of the nodes since the reference exceeds this value times
-    /// the cell size. Thus, the number of these operations per unit time does not depend on the
-    /// time-step size. Zero: update in every time step.
+    /// time step is evaluated from the last reference level set at the foot points of the nodes
+    /// at the time of the reference (see level_set_update_characteristics), and the
+    /// reinitialization, the insertion of new interface points and the update of the reference
+    /// are only performed, once the maximum displacement of the nodes since the reference exceeds
+    /// this value times the cell size. Thus, the number of these operations per unit time does not
+    /// depend on the time-step size. Zero: update in every time step.
     number level_set_update_cfl = 0.;
+
+    /// Sub-cycling: computation of the foot points of the nodes at the time of the reference,
+    /// either by the backward integration of the characteristics over all time steps since the
+    /// reference or by the characteristic map, which is composed in each time step with the
+    /// backward characteristic of the time step (only the velocity of the current time step is
+    /// required, see NarrowBandCharacteristicMap).
+    NarrowBandSubcyclingCharacteristics level_set_update_characteristics =
+      NarrowBandSubcyclingCharacteristics::integration;
 
     /// Interface, at which the reinitialization on the cut cells enforces phi = 0 weakly
     /// (interface penalty term): the zero level set of the level set before the reinitialization

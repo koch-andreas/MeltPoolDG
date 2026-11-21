@@ -16,6 +16,7 @@
 #include <meltpooldg/level_set/curvature_data.hpp>
 #include <meltpooldg/level_set/narrow_band_advection_DG_operator.hpp>
 #include <meltpooldg/level_set/narrow_band_bound_preserving_limiter.hpp>
+#include <meltpooldg/level_set/narrow_band_characteristic_map.hpp>
 #include <meltpooldg/level_set/narrow_band_closest_point_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_continuous_level_set.hpp>
 #include <meltpooldg/level_set/narrow_band_continuous_reinitialization.hpp>
@@ -275,8 +276,9 @@ namespace MeltPoolDG::LevelSet
      * index of the band, the signs of the cell (semi-Lagrangian band) and the DoF values of the
      * level set on the cut cells and on the band (all vectors of the solution history) are
      * stored; with sub-cycling, also the cut-cell flag, the sign and the level set of the
-     * reference. The state, which is the same on all processes (e.g., the advected interface
-     * points), is written by serialize().
+     * reference and, with the characteristic map, the displacement since the reference on the
+     * candidate cells of the reference. The state, which is the same on all processes (e.g., the
+     * advected interface points), is written by serialize().
      */
     void
     prepare_for_serialization();
@@ -594,6 +596,10 @@ namespace MeltPoolDG::LevelSet
     number                  time_reference          = std::numeric_limits<number>::quiet_NaN();
     unsigned int            n_steps_since_reference = 0;
     unsigned int            n_reference_updates     = 0;
+
+    /// Sub-cycling with the characteristic map (NarrowBandData::level_set_update_characteristics):
+    /// displacement of the nodes of the candidate cells of the reference since the reference.
+    std::unique_ptr<NarrowBandCharacteristicMap<dim, number>> characteristic_map;
 
     /// Restart: flags of the cell-wise data (see prepare_for_serialization() and serialize()):
     /// the flags of the cut cells without activated face neighbors, the signs of the cells and the

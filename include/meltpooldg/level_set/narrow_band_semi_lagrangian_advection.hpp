@@ -7,6 +7,7 @@
 
 #include <deal.II/lac/la_parallel_vector.h>
 
+#include <functional>
 #include <vector>
 
 namespace MeltPoolDG::LevelSet
@@ -111,6 +112,32 @@ namespace MeltPoolDG::LevelSet
            const number                   time,
            const number                   time_step,
            const unsigned int             n_substeps = 1) const;
+
+    /**
+     * @brief Foot point of a node: arguments are the candidate cell (band DoFHandler), the unit
+     * coordinates of the node in this cell and its real coordinates.
+     */
+    using FootPointFunction = std::function<
+      dealii::Point<dim>(const typename dealii::DoFHandler<dim>::active_cell_iterator &,
+                         const dealii::Point<dim> &,
+                         const dealii::Point<dim> &)>;
+
+    /**
+     * @brief Evaluate the level set on the candidate cells at the given foot points of their
+     * nodes (e.g., from a characteristic map, see NarrowBandCharacteristicMap), instead of the
+     * backward integration of the characteristics. The arguments are the same as for the other
+     * overload.
+     *
+     * @param foot_point Foot point of a node, which needs to be the same for all cells sharing the
+     * node, such that the level set is continuous for a continuous level set at $t^n$.
+     */
+    Statistics
+    advect(const dealii::DoFHandler<dim> &dof_handler_cut,
+           const VectorType              &level_set_cut,
+           const dealii::DoFHandler<dim> &dof_handler_band,
+           VectorType                    &level_set_band,
+           const std::vector<int>        &cell_signs,
+           const FootPointFunction       &foot_point) const;
 
   private:
     /// Output stream.

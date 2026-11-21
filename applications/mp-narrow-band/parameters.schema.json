@@ -524,8 +524,17 @@
           "type": "number",
           "minimum": 0.0,
           "maximum": 0.9,
-          "description": "Semi-Lagrangian band: sub-cycling of the level-set update for small time steps. If positive, the level set of a time step is evaluated from the last reference level set by the backward integration of the characteristics over all time steps since the reference (one fourth-order Runge-Kutta step per time step) and the evaluation of the reference level set at the foot points, i.e., without accumulating the interpolation errors of the intermediate time steps; these level sets are only corrected by the closed-interface correction. The reinitialization, the insertion of new interface points and the update of the reference are performed, once the maximum displacement of the nodes since the reference exceeds this value times the cell size (the reinitialization frequency then counts these updates). Thus, the number of these operations, whose errors accumulate, does not grow with the number of time steps. Recommended: 0.5 (at most 0.9, since the interface must not leave the candidate cells of the reference). Zero: update in every time step.",
+          "description": "Semi-Lagrangian band: sub-cycling of the level-set update for small time steps. If positive, the level set of a time step is evaluated from the last reference level set at the foot points of the nodes at the time of the reference (backward integration of the characteristics over all time steps since the reference or characteristic map, see 'level set update characteristics'), i.e., without accumulating the interpolation errors of the intermediate time steps; these level sets are only corrected by the closed-interface correction. The reinitialization, the insertion of new interface points and the update of the reference are performed, once the maximum displacement of the nodes since the reference exceeds this value times the cell size (the reinitialization frequency then counts these updates). Thus, the number of these operations, whose errors accumulate, does not grow with the number of time steps. Recommended: 0.5 (at most 0.9, since the interface must not leave the candidate cells of the reference). Zero: update in every time step.",
           "default": 0.0
+        },
+        "level set update characteristics": {
+          "type": "string",
+          "enum": [
+            "integration",
+            "map"
+          ],
+          "description": "Sub-cycling of the level-set update (level set update cfl > 0): computation of the foot points of the nodes at the time of the reference. integration: backward integration of the characteristics from the current time to the time of the reference (one fourth-order Runge-Kutta step per time step since the reference), which requires the velocity at all these times. map: characteristic map, i.e., the displacement D(x) = x - X(t_ref; x, t) of the nodes since the reference is stored as a continuous (FE_Q) field on the candidate cells of the reference and composed in each time step with the backward characteristic of the time step, D^{n+1}(x) = x - y + D^n(y) with y = X(t^n; x, t^{n+1}) (one fourth-order Runge-Kutta step), which only requires the velocity of the current time step. The interpolation error of D^n at y is proportional to the displacement of the time step, i.e., it does not accumulate with the number of time steps.",
+          "default": "integration"
         },
         "reinitialization interface": {
           "type": "string",

@@ -1,0 +1,22 @@
+| t = 0.0000e+00: 20 cut cells, 40 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0688254452e-02                                                     vortex_bubble |
+| interface length: 9.4251e-01  circularity: 9.9998e-01                              vortex_bubble |
+| rel. L2 error signed distance: 2.3308e-03  L2 error |grad phi|-1: 4.6329e-03       vortex_bubble |
+| interface error L2: 7.7402e-05  max: 1.8029e-04  rel. error measure: 3.6647e-05    vortex_bubble |
+| t = 1.0000e-01: 20 cut cells, 39 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0702879061e-02                                                     vortex_bubble |
+| interface length: 9.5891e-01  circularity: 9.8298e-01                              vortex_bubble |
+| t = 2.0000e-01: 20 cut cells, 37 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0675912757e-02                                                     vortex_bubble |
+| interface length: 9.8970e-01  circularity: 9.5222e-01                              vortex_bubble |
+| t = 3.0000e-01: 20 cut cells, 37 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0675694213e-02                                                     vortex_bubble |
+| interface length: 9.8970e-01  circularity: 9.5222e-01                              vortex_bubble |
+| t = 4.0000e-01: 20 cut cells, 39 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0693619311e-02                                                     vortex_bubble |
+| interface length: 9.5882e-01  circularity: 9.8301e-01                              vortex_bubble |
+| t = 5.0000e-01: 20 cut cells, 40 neighbor cells                                    vortex_bubble |
+| area (phi>0): 7.0688211322e-02                                                     vortex_bubble |
+| interface length: 9.4251e-01  circularity: 9.9998e-01                              vortex_bubble |
+| rel. L2 error signed distance: 2.5009e-03  L2 error |grad phi|-1: 4.2342e-03       vortex_bubble |
+| interface error L2: 7.7682e-05  max: 1.7850e-04  rel. error measure: 3.6854e-05    vortex_bubble |

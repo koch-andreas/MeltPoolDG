@@ -220,6 +220,16 @@ namespace MeltPoolDG::LevelSet
           fe_collection_cut,
           scratch_data.get_pcout(1));
 
+    // sub-cycling with the characteristic map
+    if (narrow_band_data.type == NarrowBandType::semi_lagrangian and
+        narrow_band_data.level_set_update_cfl > 0. and
+        narrow_band_data.level_set_update_characteristics ==
+          NarrowBandSubcyclingCharacteristics::map)
+      characteristic_map =
+        std::make_unique<NarrowBandCharacteristicMap<dim, number>>(triangulation,
+                                                                   fe_degree,
+                                                                   scratch_data.get_pcout(1));
+
     // continuous level set on the cut cells: its DoFHandler is attached to the scratch data after
     // the band and the cut DoFHandler
     if (narrow_band_data.continuous_level_set.enable)
@@ -521,8 +531,25 @@ namespace MeltPoolDG::LevelSet
 
       // semi-Lagrangian band: evaluation of the back-traced level set of the cut cells on the
       // candidate cells; with sub-cycling, of the reference level set on the candidate cells of
-      // the reference (backward integration over all time steps since the reference)
-      if (is_subcycling())
+      // the reference (foot points at the time of the reference from the characteristic map,
+      // which is composed with the backward characteristic of this time step, or by the backward
+      // integration over all time steps since the reference)
+      if (characteristic_map)
+        {
+          characteristic_map->advance(*velocity_function, time, time_step);
+          sl_statistics = semi_lagrangian_advection.advect(
+            dof_handler_cut_reference,
+            level_set_reference,
+            dof_handler_band_reference,
+            level_set_band_reference,
+            cell_signs_reference,
+            [&](const typename dealii::DoFHandler<dim>::active_cell_iterator &cell,
+                const dealii::Point<dim>                                     &unit_point,
+                const dealii::Point<dim>                                     &x) {
+              return x - characteristic_map->displacement(cell, unit_point);
+            });
+        }
+      else if (is_subcycling())
         sl_statistics = semi_lagrangian_advection.advect(dof_handler_cut_reference,
                                                          level_set_reference,
                                                          dof_handler_band_reference,
@@ -1320,6 +1347,10 @@ namespace MeltPoolDG::LevelSet
     cell_signs_reference    = cell_signs;
     time_reference          = time;
     n_steps_since_reference = 0;
+
+    // characteristic map: identity on the candidate cells of the reference
+    if (characteristic_map)
+      characteristic_map->reset(dof_handler_band_reference);
   }
 
   template <int dim, typename number>
@@ -1589,6 +1620,13 @@ namespace MeltPoolDG::LevelSet
         else
           append_values(buffer, dealii::Vector<number>());
 
+        // characteristic map: displacement on the candidate cells of the reference
+        if (has_reference_on_restart and characteristic_map)
+          {
+            const std::vector<number> map_values = characteristic_map->get_cell_values(cell);
+            append_values(buffer, dealii::Vector<number>(map_values.begin(), map_values.end()));
+          }
+
         return buffer;
       },
       /*returns_variable_size_data=*/true);
@@ -1614,6 +1652,8 @@ namespace MeltPoolDG::LevelSet
     std::vector<unsigned int>                     band_fe_indices(n_cells, 0);
     std::vector<std::vector<number>>              cut_values(n_cells);
     std::vector<std::vector<number>>              reference_values(n_cells);
+    std::vector<std::vector<number>>              map_values(n_cells);
+    unsigned int                                  n_cells_with_map = 0;
     std::vector<std::vector<std::vector<number>>> band_values(n_cells);
 
     // Note: the handle is obtained by registering the data as in prepare_for_serialization().
@@ -1647,6 +1687,13 @@ namespace MeltPoolDG::LevelSet
         for (auto &values : band_values[index])
           values = read_values<number>(position, end);
         reference_values[index] = read_values<number>(position, end);
+
+        // characteristic map (only written with the characteristic map)
+        if (position != end)
+          {
+            map_values[index] = read_values<number>(position, end);
+            ++n_cells_with_map;
+          }
       });
 
     // DoF system of the restored cut cells and band (for the downstream neighbor activation with
@@ -1713,6 +1760,25 @@ namespace MeltPoolDG::LevelSet
 
             cell_signs_reference = signs_reference;
             exchange_cell_signs(cell_signs_reference);
+
+            // characteristic map: displacement since the reference (zero, if the reference has
+            // been updated in the time step, in which the state was saved)
+            if (characteristic_map)
+              {
+                AssertThrow(n_steps_since_reference == 0 or
+                              dealii::Utilities::MPI::sum(n_cells_with_map, mpi_comm) > 0,
+                            dealii::ExcMessage(
+                              "The restart data does not contain the characteristic map of the "
+                              "sub-cycling (written with level set update characteristics = "
+                              "integration)."));
+                characteristic_map->reset(dof_handler_band_reference);
+                for (const auto &cell : dof_handler_band_reference.active_cell_iterators())
+                  if (cell->is_locally_owned() and
+                      not map_values[cell->active_cell_index()].empty())
+                    characteristic_map->set_cell_values(cell,
+                                                        map_values[cell->active_cell_index()]);
+                characteristic_map->finish_set_cell_values();
+              }
           }
         else
           set_reference(std::numeric_limits<number>::quiet_NaN());

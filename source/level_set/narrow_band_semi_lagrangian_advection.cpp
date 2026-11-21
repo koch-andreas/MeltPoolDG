@@ -47,11 +47,58 @@ namespace MeltPoolDG::LevelSet
     const number                   time_step,
     const unsigned int             n_substeps) const
   {
+    AssertThrow(velocity.n_components == dim,
+                dealii::ExcMessage("The velocity function needs dim components."));
+    AssertThrow(n_substeps > 0, dealii::ExcMessage("At least one substep is required."));
+
+    // backward integration of the characteristic dx/dt = u(x, t) from t^{n+1} to t^n with the
+    // classical fourth-order Runge-Kutta method
+    const number old_time = velocity.get_time();
+    const auto   u        = [&](const dealii::Point<dim> &x, const number t) {
+      velocity.set_time(t);
+      dealii::Tensor<1, dim> result;
+      for (unsigned int d = 0; d < dim; ++d)
+        result[d] = velocity.value(x, d);
+      return result;
+    };
+    const auto foot_point = [&](const typename dealii::DoFHandler<dim>::active_cell_iterator &,
+                                const dealii::Point<dim> &,
+                                const dealii::Point<dim> &x) {
+      const number       h = -time_step / n_substeps;
+      dealii::Point<dim> y = x;
+      for (unsigned int s = 0; s < n_substeps; ++s)
+        {
+          const number t1 = time + time_step + s * h;
+          const auto   k1 = u(y, t1);
+          const auto   k2 = u(y + 0.5 * h * k1, t1 + 0.5 * h);
+          const auto   k3 = u(y + 0.5 * h * k2, t1 + 0.5 * h);
+          const auto   k4 = u(y + h * k3, t1 + h);
+          y += (h / 6.) * (k1 + 2. * k2 + 2. * k3 + k4);
+        }
+      return y;
+    };
+
+    const Statistics statistics = advect(
+      dof_handler_cut, level_set_cut, dof_handler_band, level_set_band, cell_signs, foot_point);
+
+    velocity.set_time(old_time);
+
+    return statistics;
+  }
+
+  template <int dim, typename number>
+  typename NarrowBandSemiLagrangianAdvection<dim, number>::Statistics
+  NarrowBandSemiLagrangianAdvection<dim, number>::advect(
+    const dealii::DoFHandler<dim> &dof_handler_cut,
+    const VectorType              &level_set_cut,
+    const dealii::DoFHandler<dim> &dof_handler_band,
+    VectorType                    &level_set_band,
+    const std::vector<int>        &cell_signs,
+    const FootPointFunction       &foot_point) const
+  {
     using namespace NarrowBand;
     using namespace NarrowBand::internal;
 
-    AssertThrow(velocity.n_components == dim,
-                dealii::ExcMessage("The velocity function needs dim components."));
     AssertDimension(cell_signs.size(), dof_handler_band.get_triangulation().n_active_cells());
     AssertThrow(not dof_handler_cut.get_triangulation().has_hanging_nodes(),
                 dealii::ExcMessage("The semi-Lagrangian advection does not support hanging "
@@ -228,32 +275,6 @@ namespace MeltPoolDG::LevelSet
     const auto vertex_to_cells =
       dealii::GridTools::vertex_to_cell_map(dof_handler_band.get_triangulation());
 
-    // backward integration of the characteristic dx/dt = u(x, t) from t^{n+1} to t^n with the
-    // classical fourth-order Runge-Kutta method
-    const number old_time = velocity.get_time();
-    const auto   u        = [&](const dealii::Point<dim> &x, const number t) {
-      velocity.set_time(t);
-      dealii::Tensor<1, dim> result;
-      for (unsigned int d = 0; d < dim; ++d)
-        result[d] = velocity.value(x, d);
-      return result;
-    };
-    AssertThrow(n_substeps > 0, dealii::ExcMessage("At least one substep is required."));
-    const auto foot_point = [&](const dealii::Point<dim> &x) {
-      const number       h = -time_step / n_substeps;
-      dealii::Point<dim> y = x;
-      for (unsigned int s = 0; s < n_substeps; ++s)
-        {
-          const number t1 = time + time_step + s * h;
-          const auto   k1 = u(y, t1);
-          const auto   k2 = u(y + 0.5 * h * k1, t1 + 0.5 * h);
-          const auto   k3 = u(y + 0.5 * h * k2, t1 + 0.5 * h);
-          const auto   k4 = u(y + h * k3, t1 + h);
-          y += (h / 6.) * (k1 + 2. * k2 + 2. * k3 + k4);
-        }
-      return y;
-    };
-
     // 3) Evaluation of the back-traced level set at the nodes of the locally owned candidate cells
     for (const auto &cell : dof_handler_band.active_cell_iterators())
       {
@@ -279,7 +300,7 @@ namespace MeltPoolDG::LevelSet
         for (unsigned int i = 0; i < n_dofs; ++i)
           {
             const dealii::Point<dim> x      = map.to_real(unit_support_points[i]);
-            const dealii::Point<dim> x_foot = foot_point(x);
+            const dealii::Point<dim> x_foot = foot_point(cell, unit_support_points[i], x);
 
             ++statistics.n_nodes;
             statistics.max_displacement =
@@ -343,8 +364,6 @@ namespace MeltPoolDG::LevelSet
 
         cell->set_dof_values(values, level_set_band);
       }
-
-    velocity.set_time(old_time);
 
     statistics.n_nodes         = dealii::Utilities::MPI::sum(statistics.n_nodes, mpi_comm);
     statistics.n_nodes_outside = dealii::Utilities::MPI::sum(statistics.n_nodes_outside, mpi_comm);

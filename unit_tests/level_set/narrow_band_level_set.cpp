@@ -33,7 +33,9 @@
 #include <meltpooldg/core/scratch_data.hpp>
 #include <meltpooldg/level_set/narrow_band_advection_DG_operator.hpp>
 #include <meltpooldg/level_set/narrow_band_bound_preserving_limiter.hpp>
+#include <meltpooldg/level_set/narrow_band_characteristic_map.hpp>
 #include <meltpooldg/level_set/narrow_band_closest_point_extension.hpp>
+#include <meltpooldg/level_set/narrow_band_closest_point_tools.hpp>
 #include <meltpooldg/level_set/narrow_band_continuous_reinitialization.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
@@ -1814,6 +1816,138 @@ namespace MeltPoolDG::LevelSet
     };
 
     /**
+     * Time-reversed single-vortex velocity on the unit square (2 components), u = cos(pi t / T)
+     * (-2 sin^2(pi x) sin(pi y) cos(pi y), 2 sin(pi x) cos(pi x) sin^2(pi y)).
+     */
+    class SingleVortexVelocity : public dealii::Function<2>
+    {
+    public:
+      explicit SingleVortexVelocity(const number period)
+        : dealii::Function<2>(2)
+        , period(period)
+      {}
+
+      number
+      value(const dealii::Point<2> &p, const unsigned int component) const override
+      {
+        const number pi     = dealii::numbers::PI;
+        const number factor = std::cos(pi * this->get_time() / period);
+        if (component == 0)
+          return -2. * factor * std::pow(std::sin(pi * p[0]), 2) * std::sin(pi * p[1]) *
+                 std::cos(pi * p[1]);
+        return 2. * factor * std::sin(pi * p[0]) * std::cos(pi * p[0]) *
+               std::pow(std::sin(pi * p[1]), 2);
+      }
+
+    private:
+      const number period;
+    };
+
+    /**
+     * Errors of the foot points at t = 0 of the nodes (FE_DGQ(2) support points) of all cells of
+     * the unit square (32^2 cells) at the time @p end_time in the single-vortex flow (T = 4),
+     * computed with the characteristic map (composition of the backward characteristics of the
+     * time steps of size @p time_step) and by the backward integration over all time steps (one
+     * Runge-Kutta step per time step), with respect to the backward integration with 4000
+     * Runge-Kutta steps.
+     */
+    struct CharacteristicMapResult
+    {
+      /// Maximum error of the foot points of the characteristic map.
+      number error_map = 0.;
+
+      /// Maximum error of the foot points of the backward integration.
+      number error_integration = 0.;
+
+      /// Maximum difference of the foot points of the vertices computed from different cells.
+      number max_vertex_mismatch = 0.;
+
+      /// Number of extrapolated nodes in the last time step.
+      unsigned int n_nodes_extrapolated = 0;
+    };
+
+    CharacteristicMapResult
+    compute_characteristic_map_errors(const number time_step, const number end_time)
+    {
+      constexpr int                                     dim = 2;
+      dealii::parallel::distributed::Triangulation<dim> triangulation(MPI_COMM_WORLD);
+      dealii::GridGenerator::hyper_cube(triangulation, 0., 1.);
+      triangulation.refine_global(5);
+
+      // band: all cells
+      const dealii::FE_DGQ<dim> fe(2);
+      dealii::DoFHandler<dim>   dof_handler(triangulation);
+      dof_handler.distribute_dofs(fe);
+
+      SingleVortexVelocity velocity(4.);
+
+      NarrowBandCharacteristicMap<dim, number> map(triangulation,
+                                                   2,
+                                                   dealii::ConditionalOStream(std::cout, false));
+      map.reset(dof_handler);
+
+      const unsigned int      n_steps = static_cast<unsigned int>(std::round(end_time / time_step));
+      CharacteristicMapResult result;
+      for (unsigned int n = 0; n < n_steps; ++n)
+        result.n_nodes_extrapolated =
+          map.advance(velocity, n * time_step, time_step).n_nodes_extrapolated;
+
+      const auto backward = [&](const dealii::Point<dim> &x, const unsigned int n_substeps) {
+        const number       h = -end_time / n_substeps;
+        dealii::Point<dim> y = x;
+        const auto         u = [&](const dealii::Point<dim> &p, const number t) {
+          velocity.set_time(t);
+          return dealii::Tensor<1, dim>({velocity.value(p, 0), velocity.value(p, 1)});
+        };
+        for (unsigned int s = 0; s < n_substeps; ++s)
+          {
+            const number t1 = end_time + s * h;
+            const auto   k1 = u(y, t1);
+            const auto   k2 = u(y + 0.5 * h * k1, t1 + 0.5 * h);
+            const auto   k3 = u(y + 0.5 * h * k2, t1 + 0.5 * h);
+            const auto   k4 = u(y + h * k3, t1 + h);
+            y += (h / 6.) * (k1 + 2. * k2 + 2. * k3 + k4);
+          }
+        return y;
+      };
+
+      std::map<unsigned int, dealii::Point<dim>> vertex_foot_points;
+      for (const auto &cell : dof_handler.active_cell_iterators())
+        {
+          if (not cell->is_locally_owned())
+            continue;
+          for (const auto &unit_point : fe.get_unit_support_points())
+            {
+              const dealii::Point<dim> x =
+                NarrowBand::internal::AffineCellMap<dim>(cell).to_real(unit_point);
+              const dealii::Point<dim> exact = backward(x, 4000);
+              result.error_map =
+                std::max(result.error_map, map.foot_point(cell, unit_point).distance(exact));
+              result.error_integration =
+                std::max(result.error_integration, backward(x, n_steps).distance(exact));
+            }
+          for (const unsigned int v : cell->vertex_indices())
+            {
+              dealii::Point<dim> unit_vertex;
+              for (unsigned int d = 0; d < dim; ++d)
+                unit_vertex[d] = (v >> d) & 1U;
+              const dealii::Point<dim> foot = map.foot_point(cell, unit_vertex);
+              const auto [entry, inserted] =
+                vertex_foot_points.emplace(cell->vertex_index(v), foot);
+              if (not inserted)
+                result.max_vertex_mismatch =
+                  std::max(result.max_vertex_mismatch, entry->second.distance(foot));
+            }
+        }
+      result.error_map = dealii::Utilities::MPI::max(result.error_map, MPI_COMM_WORLD);
+      result.error_integration =
+        dealii::Utilities::MPI::max(result.error_integration, MPI_COMM_WORLD);
+      result.max_vertex_mismatch =
+        dealii::Utilities::MPI::max(result.max_vertex_mismatch, MPI_COMM_WORLD);
+      return result;
+    }
+
+    /**
      * Statistics of the interface points of a circle (radius 0.3, signed distance function, p = 1,
      * 16^2 cells, narrow band of the circle with the extension band).
      */
@@ -2191,7 +2325,9 @@ namespace MeltPoolDG::LevelSet
       const NarrowBandLevelSetSpace  level_set_space = NarrowBandLevelSetSpace::discontinuous,
       const NarrowBandPointInsertion point_insertion = NarrowBandPointInsertion::final_level_set,
       const number                   time_step       = 0.01,
-      const number                   level_set_update_cfl = 0.)
+      const number                   level_set_update_cfl = 0.,
+      const NarrowBandSubcyclingCharacteristics characteristics =
+        NarrowBandSubcyclingCharacteristics::integration)
     {
       const unsigned int fe_degree = 1;
       const number       radius    = 0.3;
@@ -2205,11 +2341,12 @@ namespace MeltPoolDG::LevelSet
       scratch_data.set_mapping(std::make_shared<dealii::MappingQ<dim>>(1));
 
       NarrowBandData<number> narrow_band_data;
-      narrow_band_data.type                            = NarrowBandType::semi_lagrangian;
-      narrow_band_data.reinitialization_interface      = reinitialization_interface;
-      narrow_band_data.level_set_space                 = level_set_space;
-      narrow_band_data.advected_points.point_insertion = point_insertion;
-      narrow_band_data.level_set_update_cfl            = level_set_update_cfl;
+      narrow_band_data.type                             = NarrowBandType::semi_lagrangian;
+      narrow_band_data.reinitialization_interface       = reinitialization_interface;
+      narrow_band_data.level_set_space                  = level_set_space;
+      narrow_band_data.advected_points.point_insertion  = point_insertion;
+      narrow_band_data.level_set_update_cfl             = level_set_update_cfl;
+      narrow_band_data.level_set_update_characteristics = characteristics;
 
       ReinitializationData<number> reinit_data;
       reinit_data.enable                                      = true;
@@ -3569,23 +3706,60 @@ namespace MeltPoolDG::LevelSet
     // 0.5 h; observed: -1.8064e-3 for dt = 0.001, where the last level set is evaluated from the
     // reference without reinitialization, and -1.0917e-3 for dt = 0.01, where every time step
     // is an update).
-    const auto deviation = [](const number time_step, const number cfl) {
+    //
+    // With the characteristic map instead of the backward integration, the foot points are the
+    // same up to round-off errors: the displacement of the rotation is linear and represented
+    // exactly by the continuous field, and the composition of the Runge-Kutta steps of the time
+    // steps is the Runge-Kutta integration over all time steps.
+    const auto deviation = [](const number                              time_step,
+                              const number                              cfl,
+                              const NarrowBandSubcyclingCharacteristics characteristics =
+                                NarrowBandSubcyclingCharacteristics::integration) {
       return compute_rotating_circle_radial_deviation<2>(
         NarrowBandReinitializationInterface::advected_points,
         NarrowBandLevelSetSpace::continuous,
         NarrowBandPointInsertion::final_level_set,
         time_step,
-        cfl);
+        cfl,
+        characteristics);
     };
-    const number reference   = deviation(0.01, 0.);
-    const number small_steps = deviation(0.001, 0.);
-    const number subcycling  = deviation(0.001, 0.5);
-    const number large_steps = deviation(0.01, 0.5);
+    const number reference      = deviation(0.01, 0.);
+    const number small_steps    = deviation(0.001, 0.);
+    const number subcycling     = deviation(0.001, 0.5);
+    const number large_steps    = deviation(0.01, 0.5);
+    const number subcycling_map = deviation(0.001, 0.5, NarrowBandSubcyclingCharacteristics::map);
 
     EXPECT_LT(std::abs(reference), 2e-3);
     EXPECT_NEAR(small_steps, reference, 1e-6);
     EXPECT_LT(std::abs(subcycling), 2. * std::abs(reference));
     EXPECT_NEAR(large_steps, reference, 1e-12);
+    EXPECT_NEAR(subcycling_map, subcycling, 1e-10);
+  }
+
+  TEST(NarrowBandLevelSetTest, CharacteristicMap2D)
+  {
+    // Foot points at t = 0 of the nodes at t = 0.02 in the single-vortex flow (displacement up
+    // to 0.64 h, 32^2 cells, p = 2). The error of the characteristic map (interpolation of the
+    // displacement) does not grow with the number of time steps (observed: 1.39e-6 = 4.5e-5 h
+    // for 20 steps and 1.49e-6 for 200 steps; the backward integration over all time steps is
+    // exact up to 1e-13), the foot points of the vertices are the same for all cells (continuous
+    // field), and no node is extrapolated.
+    const CharacteristicMapResult coarse = compute_characteristic_map_errors(1e-3, 0.02);
+    const CharacteristicMapResult fine   = compute_characteristic_map_errors(1e-4, 0.02);
+
+    if (dealii::Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0)
+      std::cout << "characteristic map: error " << coarse.error_map << " (20 steps), "
+                << fine.error_map << " (200 steps); integration: " << coarse.error_integration
+                << ", " << fine.error_integration << "; vertex mismatch "
+                << std::max(coarse.max_vertex_mismatch, fine.max_vertex_mismatch) << std::endl;
+
+    EXPECT_LT(coarse.error_map, 1e-5);
+    EXPECT_LT(fine.error_map, 1e-5);
+    EXPECT_LT(fine.error_map, 2. * coarse.error_map);
+    EXPECT_LT(coarse.max_vertex_mismatch, 1e-14);
+    EXPECT_LT(fine.max_vertex_mismatch, 1e-14);
+    EXPECT_EQ(coarse.n_nodes_extrapolated, 0U);
+    EXPECT_EQ(fine.n_nodes_extrapolated, 0U);
   }
 
   TEST(NarrowBandLevelSetTest, MergingCircles2D)
@@ -4217,7 +4391,8 @@ namespace MeltPoolDG::LevelSet
   {
     // The restarted simulation continues exactly as the simulation, which saved the state, for
     // the semi-Lagrangian band (advected interface points, continuous level set space, with and
-    // without sub-cycling; the restart between two updates of the reference), the extension
+    // without sub-cycling by the backward integration or the characteristic map; the restart
+    // between two updates of the reference), the extension
     // band (with the downstream neighbor activation and small cut cells) and the advected band.
     {
       NarrowBandData<number> data;
@@ -4234,6 +4409,16 @@ namespace MeltPoolDG::LevelSet
       data.level_set_space            = NarrowBandLevelSetSpace::continuous;
       data.level_set_update_cfl       = 0.5;
       EXPECT_EQ(compute_restart_difference<2>(data, 0.002, 7, 9, "restart_test_subcycling"), 0.);
+    }
+    {
+      NarrowBandData<number> data;
+      data.type                             = NarrowBandType::semi_lagrangian;
+      data.reinitialization_interface       = NarrowBandReinitializationInterface::advected_points;
+      data.level_set_space                  = NarrowBandLevelSetSpace::continuous;
+      data.level_set_update_cfl             = 0.5;
+      data.level_set_update_characteristics = NarrowBandSubcyclingCharacteristics::map;
+      EXPECT_EQ(compute_restart_difference<2>(data, 0.002, 7, 9, "restart_test_subcycling_map"),
+                0.);
     }
     {
       NarrowBandData<number> data;
