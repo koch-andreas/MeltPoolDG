@@ -206,7 +206,8 @@ namespace MeltPoolDG::LevelSet
           scratch_data.get_pcout(1),
           narrow_band_data.advected_points.unresolved_distance,
           narrow_band_data.advected_points.support_tolerance,
-          narrow_band_data.advected_points.merge_distance);
+          narrow_band_data.advected_points.merge_distance,
+          narrow_band_data.advected_points.conservative_insertion);
       }
 
     // reinitialization in the continuous level set space
@@ -1047,16 +1048,21 @@ namespace MeltPoolDG::LevelSet
       narrow_band_data.advected_points.subcell_coupling == NarrowBandSubcellCoupling::prescribed;
 
     const auto project = [&]() {
+      const auto transfer = narrow_band_data.advected_points.subcell_transfer;
       const auto statistics =
         cg.project_subcell_distance(*interface_points,
                                     dof_handler_cut,
                                     level_set,
                                     narrow_band_data.advected_points.subcell_buffer,
-                                    narrow_band_data.advected_points.subcell_subdivisions);
+                                    narrow_band_data.advected_points.subcell_subdivisions,
+                                    transfer);
       if (statistics.n_cells + statistics.n_rejected_cells > 0)
         Journal::print_line(scratch_data.get_pcout(1),
                             "subcell distance (continuous): " + std::to_string(statistics.n_cells) +
-                              " unresolved cells projected, " +
+                              " unresolved cells " +
+                              (transfer == NarrowBandSubcellTransfer::interpolation ?
+                                 "interpolated, " :
+                                 "projected, ") +
                               std::to_string(statistics.n_rejected_cells) +
                               " rejected (sign check)",
                             "narrow_band");

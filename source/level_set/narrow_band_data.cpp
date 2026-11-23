@@ -254,9 +254,10 @@ namespace MeltPoolDG::LevelSet
         "discontinuous (FE_DGQ) or continuous (FE_Q of the same degree, continuous across the "
         "faces between cut cells). For the continuous space, the reinitialization (fixed-point "
         "iteration without face terms, direct solver) and the subcell distance (L2-projection on "
-        "the union of the unresolved cells with natural boundary conditions) are computed in the "
-        "continuous space; the semi-Lagrangian step maps a continuous level set to a continuous "
-        "level set. The subcell coupling excluded is not available for the continuous space.");
+        "the union of the unresolved cells with natural boundary conditions, or nodal "
+        "interpolation) are computed in the continuous space; the semi-Lagrangian step maps a "
+        "continuous level set to a continuous level set. The subcell coupling excluded is not "
+        "available for the continuous space.");
       prm.add_parameter(
         "closed interface correction",
         closed_interface_correction,
@@ -372,7 +373,9 @@ namespace MeltPoolDG::LevelSet
           "topology changes. Merge rule (e.g., merging droplets): with the approach a = dt max(0, "
           "(u(x - h n) - u(x)) . n) of the flow on the outer side of an advected interface point "
           "within one time step, a point in a converging flow (the positive part of the normal "
-          "velocity difference (u(x - h n) - u(x)) . n exceeds half of the local speed) is "
+          "velocity difference (u(x - h n) - u(x)) . n exceeds a quarter of the magnitude "
+          "|u(x - h n) - u(x)| of the velocity difference, independent of a superposed uniform "
+          "translation) is "
           "removed, if the advected level set at the distance c_m h + a on the outer side of the "
           "point (opposite to its normal vector) exceeds the value at the point by more than a "
           "quarter of this distance (the point lies inside of the phase or at a gap thinner than "
@@ -385,13 +388,15 @@ namespace MeltPoolDG::LevelSet
           "point of a different "
           "orientation within the sum of the approaches lies on the inner side, face to face); in "
           "addition, the points, which have crossed a line of converging characteristics within "
-          "the time step (the velocity at the new position points against the velocity at the old "
-          "position), are removed (e.g., the two sides of a tip, which are squeezed together). The "
+          "the time step (the velocity changes along the path by D = u(x^n, t^n) - u(x^{n+1}, "
+          "t^{n+1}), and the velocity at x^{n+1} - dt D differs from the velocity at the new "
+          "position by more than |D| / 2), are removed (e.g., the two sides of a tip, which are "
+          "squeezed together). The "
           "points move forward in time and cannot represent the disappearance of colliding parts "
           "of the interface, while the advected level set (backward characteristics) already "
           "contains the merged or broken-up interface. Wider gaps, thicker parts of the phase and "
-          "thin filaments in stretching flows are kept. Zero disables both rules. Only used for "
-          "reinitialization interface = advected_points.",
+          "thin filaments in shear or rotating flows are kept. Zero disables both rules. Only "
+          "used for reinitialization interface = advected_points.",
           dealii::Patterns::Double(0.0));
         prm.add_parameter(
           "points per direction",
@@ -418,6 +423,20 @@ namespace MeltPoolDG::LevelSet
           "level set of the advected level set in the cut cells without usable points. Only used "
           "for reinitialization interface = advected_points.");
         prm.add_parameter(
+          "conservative insertion",
+          advected_points.conservative_insertion,
+          "If false, a new advected interface point is added with the weight of its quadrature "
+          "point. Since the weights of the existing points grow with the stretching of the "
+          "interface (Nanson's formula), they already contain the area of the gap, in which the "
+          "new point is inserted, and this area is counted twice. If true, the weights of all "
+          "points of a cell with new points are scaled by W / (W + W*) with the sums W and W* of "
+          "the weights of the existing and the new points of the cell, i.e., the sum of the "
+          "weights of the cell is conserved; in cells without existing points (e.g., cells "
+          "emptied by the merge or break-up rules), the new points keep their weights. The sum of "
+          "the weights then approximates the area of the interface. The weights enter the penalty "
+          "term of the reinitialization and the size of the patches of the subcell distance. Only "
+          "used for reinitialization interface = advected_points.");
+        prm.add_parameter(
           "unresolved cells",
           advected_points.unresolved_cells,
           "Treatment of the cut cells, which contain unresolved points or are closer than "
@@ -435,7 +454,8 @@ namespace MeltPoolDG::LevelSet
           "reinitialized level set, if the signed distance has a different sign than the "
           "advected level set at a quadrature point farther than a quarter of the cell size from "
           "the points (the points do not create new parts of the interface); the coupling to the "
-          "reinitialization of the other cut cells is set by 'subcell coupling'. Only used for "
+          "reinitialization of the other cut cells is set by 'subcell coupling' and the nodal "
+          "interpolation instead of the projection by 'subcell transfer'. Only used for "
           "reinitialization interface = advected_points.");
         prm.add_parameter("subcell buffer",
                           advected_points.subcell_buffer,
@@ -445,7 +465,7 @@ namespace MeltPoolDG::LevelSet
         prm.add_parameter("subcell subdivisions",
                           advected_points.subcell_subdivisions,
                           "Number of subdivisions per direction of the iterated Gauss quadrature "
-                          "of the L2-projection of the subcell distance.",
+                          "of the L2-projection of the subcell distance and of the sign check.",
                           dealii::Patterns::Integer(1));
         prm.add_parameter(
           "subcell coupling",
@@ -463,6 +483,20 @@ namespace MeltPoolDG::LevelSet
           "conflicting terms of the unresolved cells and needs considerably fewer fixed-point "
           "iterations; with prescribed, errors of the projection (e.g., remnants at the tips of "
           "filaments) can spread into the adjacent cells.");
+        prm.add_parameter(
+          "subcell transfer",
+          advected_points.subcell_transfer,
+          "Representation of the signed distance to the advected points in the finite element "
+          "space of the unresolved cells. projection: L2-projection of the signed distance "
+          "evaluated at the points of the iterated Gauss quadrature with 'subcell subdivisions' "
+          "subdivisions per direction, which resolves the kink of the distance on the medial axis "
+          "of a thin filament inside the cells (best approximation by the polynomials of the "
+          "cells). interpolation: nodal interpolation, i.e., the signed distance is only evaluated "
+          "at the nodes of the cells (no linear system; the quadrature points are still used for "
+          "the sign check). The interpolation samples the kink of the distance only at the nodes, "
+          "which places the zeros of thin filaments less accurately and loses thin filaments "
+          "already at larger widths than the projection, depending on their position relative "
+          "to the nodes. Only available for the continuous level set space.");
         prm.add_parameter(
           "subcell orientation filter",
           advected_points.subcell_orientation_filter,
@@ -604,6 +638,10 @@ namespace MeltPoolDG::LevelSet
                                        "subcell distance are not available for the continuous "
                                        "level set space."));
       }
+    else
+      AssertThrow(advected_points.subcell_transfer == NarrowBandSubcellTransfer::projection,
+                  dealii::ExcMessage("The subcell transfer interpolation is only available for "
+                                     "the continuous level set space."));
 
     if (type == NarrowBandType::extension and
         extension.type == NarrowBandExtensionType::ghost_penalty)

@@ -2190,14 +2190,17 @@ namespace MeltPoolDG::LevelSet
      * projection of the subcell distance restores both zeros in each cut cell. The center and the
      * width of the strip are given relative to h, and the projection optionally uses the
      * orientation filter or the pinning penalty, or is computed in the continuous level set space
-     * (NarrowBandContinuousReinitialization, coupled projection on the projected cells).
+     * (NarrowBandContinuousReinitialization, coupled projection on the projected cells, or nodal
+     * interpolation of the signed distance for @p transfer = interpolation).
      */
     SubcellDistanceResult
-    test_subcell_distance_strip(const number relative_center    = 0.5,
-                                const number relative_width     = 0.4,
-                                const bool   orientation_filter = false,
-                                const number pinning_penalty    = 0.,
-                                const bool   continuous         = false)
+    test_subcell_distance_strip(
+      const number                    relative_center    = 0.5,
+      const number                    relative_width     = 0.4,
+      const bool                      orientation_filter = false,
+      const number                    pinning_penalty    = 0.,
+      const bool                      continuous         = false,
+      const NarrowBandSubcellTransfer transfer           = NarrowBandSubcellTransfer::projection)
     {
       constexpr int            dim = 2;
       const number             h = 0.25, width = relative_width * h, center = relative_center * h;
@@ -2283,7 +2286,7 @@ namespace MeltPoolDG::LevelSet
           continuous_reinitialization.interpolate_from_discontinuous(coarse.dof_handler_cut,
                                                                      level_set);
           result.statistics = continuous_reinitialization.project_subcell_distance(
-            interface_points, coarse.dof_handler_cut, level_set_advected, 1., 4);
+            interface_points, coarse.dof_handler_cut, level_set_advected, 1., 4, transfer);
           continuous_reinitialization.interpolate_to_discontinuous(coarse.dof_handler_cut,
                                                                    level_set);
         }
@@ -2305,6 +2308,96 @@ namespace MeltPoolDG::LevelSet
                  std::abs(interface_points.signed_distance(
                             dealii::Point<dim>(0.3, center + 0.5 * width + 0.7 * h), h) +
                           0.7 * h));
+      return result;
+    }
+
+    /**
+     * Result of test_conservative_insertion().
+     */
+    struct ConservativeInsertionResult
+    {
+      /// Total number of inserted points and sums of the weights of the new points and of the
+      /// increase of the total weight by the insertion over all time steps.
+      unsigned int n_inserted_points = 0;
+      number       inserted_weight   = 0.;
+      number       added_weight      = 0.;
+
+      /// Relative deviation of the total weight from the measure of the expanded interface.
+      number deviation = 0.;
+    };
+
+    /**
+     * Uniform expansion of a circle (sphere) of radius 0.2 about its center by a factor of three
+     * (x(t) = c + (x_0 - c) exp(a t), a t = ln 3) in 10 time steps with the insertion of new points
+     * in every time step: after each step, the points are located in the narrow band of the
+     * expanded circle (32^2 cells in 2D, 16^3 cells in 3D on [-1,1]^dim, polynomial degree
+     * @p fe_degree, @p n_points_1d points per direction). The spacing of the points grows, and
+     * new points are inserted into the gaps, while the weights of the advected points (Nanson's
+     * formula) already contain the stretched area. Without or with the conservative insertion.
+     */
+    template <int dim>
+    ConservativeInsertionResult
+    test_conservative_insertion(const bool         conservative_insertion,
+                                const unsigned int fe_degree   = 2,
+                                const unsigned int n_points_1d = 3)
+    {
+      const unsigned int n_refinements = dim == 2 ? 5 : 4;
+      const unsigned int n_steps       = 10;
+      const number       radius = 0.2, factor = 3.;
+      dealii::Point<dim> center;
+      center[0] = 0.04;
+      center[1] = -0.03;
+
+      ConservativeInsertionResult result;
+
+      const dealii::Functions::SignedDistance::Sphere<dim> sphere(center, radius);
+      NarrowBandFixture<dim> fixture(fe_degree, n_refinements, fe_degree, &sphere);
+      VectorType             level_set;
+      fixture.initialize_vector(fixture.dof_handler_cut, level_set);
+      dealii::VectorTools::interpolate(fixture.mapping, fixture.dof_handler_cut, sphere, level_set);
+
+      const dealii::ConditionalOStream       pcout(std::cout, false);
+      NarrowBandInterfacePoints<dim, number> interface_points(
+        pcout, 2.0, 0.2, 0., conservative_insertion);
+      interface_points.seed(fixture.dof_handler_cut, level_set, n_points_1d);
+
+      ContractionVelocity<dim> velocity(center, -std::log(factor));
+      const number             time_step = 1. / n_steps;
+      typename NarrowBandInterfacePoints<dim, number>::Statistics statistics;
+      for (unsigned int n = 0; n < n_steps; ++n)
+        {
+          interface_points.advect(velocity, n * time_step, time_step);
+
+          // narrow band of the expanded circle at t^{n+1}
+          const dealii::Functions::SignedDistance::Sphere<dim> sphere_expanded(
+            center, radius * std::pow(factor, (n + 1.) / n_steps));
+          NarrowBandFixture<dim> fixture_expanded(fe_degree,
+                                                  n_refinements,
+                                                  fe_degree,
+                                                  &sphere_expanded);
+          VectorType             level_set_expanded;
+          fixture_expanded.initialize_vector(fixture_expanded.dof_handler_band, level_set_expanded);
+          dealii::VectorTools::interpolate(fixture_expanded.mapping,
+                                           fixture_expanded.dof_handler_band,
+                                           sphere_expanded,
+                                           level_set_expanded);
+          const std::vector<bool> is_cut_cell =
+            NarrowBand::compute_cut_cells(fixture_expanded.dof_handler_band,
+                                          level_set_expanded,
+                                          fe_degree);
+          statistics = interface_points.locate(fixture_expanded.dof_handler_band,
+                                               level_set_expanded,
+                                               n_points_1d,
+                                               is_cut_cell);
+          result.n_inserted_points += statistics.n_inserted_points;
+          result.inserted_weight += statistics.inserted_weight;
+          result.added_weight += statistics.added_weight;
+        }
+
+      const number r = factor * radius;
+      const number measure =
+        dim == 2 ? 2. * dealii::numbers::PI * r : 4. * dealii::numbers::PI * r * r;
+      result.deviation = statistics.total_weight / measure - 1.;
       return result;
     }
 
@@ -2419,28 +2512,33 @@ namespace MeltPoolDG::LevelSet
     }
 
     /**
-     * Velocity u = -U sign(x) e_x (sign(0) = 1): both halves of the domain move rigidly towards
-     * the plane x = 0 (dim components).
+     * Velocity u = V - U sign(x - V_x t) e_x (sign(0) = 1) with the uniform velocity V (default:
+     * zero): both halves of the domain move rigidly towards the plane x = V_x t, which moves with
+     * the uniform velocity (dim components).
      */
     template <int dim>
     class ConvergingVelocity : public dealii::Function<dim>
     {
     public:
-      explicit ConvergingVelocity(const number velocity)
+      explicit ConvergingVelocity(const number                  velocity,
+                                  const dealii::Tensor<1, dim> &uniform_velocity = {})
         : dealii::Function<dim>(dim)
         , velocity(velocity)
+        , uniform_velocity(uniform_velocity)
       {}
 
       number
       value(const dealii::Point<dim> &p, const unsigned int component) const override
       {
         if (component != 0)
-          return 0.;
-        return p[0] >= 0. ? -velocity : velocity;
+          return uniform_velocity[component];
+        return uniform_velocity[0] +
+               (p[0] >= uniform_velocity[0] * this->get_time() ? -velocity : velocity);
       }
 
     private:
-      const number velocity;
+      const number                 velocity;
+      const dealii::Tensor<1, dim> uniform_velocity;
     };
 
     /**
@@ -2723,11 +2821,14 @@ namespace MeltPoolDG::LevelSet
      * and merge at t = 0.2 (continuous level set space with the closed-interface correction, p = 2,
      * advected points with the subcell distance, 32^2 cells, U dt = 0.04 h). Returns the relative
      * error of the length of the zero level set at t = 0.4 (exact: the boundary of the union of the
-     * two disks with D = 0.4) for the merge distance @p merge_distance.
+     * two disks with D = 0.4) for the merge distance @p merge_distance. With the uniform velocity
+     * @p uniform_velocity, the whole configuration moves with it, and the exact length is the
+     * same.
      */
     template <int dim>
     number
-    compute_merging_circles_length_error(const number merge_distance)
+    compute_merging_circles_length_error(const number                  merge_distance,
+                                         const dealii::Tensor<1, dim> &uniform_velocity = {})
     {
       const unsigned int fe_degree = 2;
       const number       radius = 0.25, distance = 0.6, velocity = 0.25, time_step = 0.01;
@@ -2769,7 +2870,8 @@ namespace MeltPoolDG::LevelSet
       reinit_data.linear_solver.abs_tolerance                 = 1e-20;
       reinit_data.linear_solver.max_iterations                = 1000;
 
-      auto velocity_function = std::make_shared<ConvergingVelocity<dim>>(velocity);
+      auto velocity_function =
+        std::make_shared<ConvergingVelocity<dim>>(velocity, uniform_velocity);
 
       NarrowBandLevelSetOperation<dim, number> operation(
         scratch_data, triangulation, narrow_band_data, reinit_data, fe_degree, velocity_function);
@@ -3617,6 +3719,37 @@ namespace MeltPoolDG::LevelSet
     EXPECT_LT(result.error_contraction, 0.01);
   }
 
+  TEST(NarrowBandLevelSetTest, ConservativeInsertion)
+  {
+    // uniform expansion of a circle and a sphere by a factor of three with the insertion of new
+    // points in every time step: the same points are inserted with and without the conservative
+    // insertion; without it, the weights of the new points are counted in addition to the
+    // stretched weights of the advected points (observed deviation of the total weight from the
+    // measure of the interface: 0.24 for p = 2, n = 3 and for p = 1, n = 2 in 2D, 0.42 in 3D);
+    // with it, the sums of the weights of the cells are conserved, and the total weight
+    // approximates the measure of the interface (0.038, 0.074 and 0.016; the remaining increase
+    // comes from new points in cells without existing points, which the interface enters within
+    // a time step)
+    const auto check = [](const ConservativeInsertionResult &plain,
+                          const ConservativeInsertionResult &conservative,
+                          const number                       max_deviation_conservative,
+                          const number                       min_deviation_plain) {
+      EXPECT_GT(plain.n_inserted_points, 0U);
+      EXPECT_EQ(conservative.n_inserted_points, plain.n_inserted_points);
+      EXPECT_NEAR(plain.added_weight, plain.inserted_weight, 1e-12);
+      EXPECT_NEAR(conservative.inserted_weight, plain.inserted_weight, 1e-12);
+      EXPECT_LT(conservative.added_weight, 0.5 * conservative.inserted_weight);
+      EXPECT_GT(plain.deviation, min_deviation_plain);
+      EXPECT_LT(std::abs(conservative.deviation), max_deviation_conservative);
+    };
+    check(test_conservative_insertion<2>(false), test_conservative_insertion<2>(true), 0.06, 0.2);
+    check(test_conservative_insertion<2>(false, 1, 2),
+          test_conservative_insertion<2>(true, 1, 2),
+          0.1,
+          0.2);
+    check(test_conservative_insertion<3>(false), test_conservative_insertion<3>(true), 0.03, 0.35);
+  }
+
   TEST(NarrowBandLevelSetTest, InterfacePointsPerDirection2D)
   {
     // Seeding with n = 2 (p + 1 for p = 1) and n = 4 Gauss points per direction on the circle of
@@ -3768,12 +3901,15 @@ namespace MeltPoolDG::LevelSet
     // stop at the plane of the collision inside of the merged phase. Without the merge rule, they
     // pin spurious parts of the interface inside of the merged phase (observed: relative length
     // error 8.0e-2 at t = 0.4); the merge rule removes them, and the merged interface is accurate
-    // (observed: -3.3e-4).
+    // (observed: -4.4e-3 with the conservative insertion, -3.3e-4 without: in the cells at the
+    // neck, from which the merge rule has removed only some of the points, the conservative
+    // insertion scales the weights of the remaining and the new points down, which shortens the
+    // patches of the subcell distance).
     const number error_without_rule = compute_merging_circles_length_error<2>(0.);
     const number error_with_rule    = compute_merging_circles_length_error<2>(0.05);
 
     EXPECT_GT(std::abs(error_without_rule), 2e-2);
-    EXPECT_LT(std::abs(error_with_rule), 2e-3);
+    EXPECT_LT(std::abs(error_with_rule), 6e-3);
   }
 
   TEST(NarrowBandLevelSetTest, BreakupCircles2D)
@@ -3783,12 +3919,35 @@ namespace MeltPoolDG::LevelSet
     // the two sides of the neck and of the tips, which are pushed against each other at the axis,
     // remain there and keep a thin film between the two parts by the subcell distance (observed:
     // relative length error 1.7e-1 at t = 0.6); the break-up rule removes them (observed:
-    // 2.0e-2).
+    // 2.4e-3 with the conservative insertion, 2.0e-2 without).
     const number error_without_rule = compute_breakup_circles_length_error<2>(0.);
     const number error_with_rule    = compute_breakup_circles_length_error<2>(0.05);
 
     EXPECT_GT(std::abs(error_without_rule), 8e-2);
-    EXPECT_LT(std::abs(error_with_rule), 4e-2);
+    EXPECT_LT(std::abs(error_with_rule), 1e-2);
+  }
+
+  TEST(NarrowBandLevelSetTest, TopologyChangeUniformVelocity2D)
+  {
+    // The merge rule is invariant under a superposed uniform velocity V, here along the plane of
+    // the collision (V = -/+ e_y, the jump of the velocity stays aligned with the mesh as without
+    // V): the candidates are selected by the ratio of the normal velocity difference and the
+    // magnitude of the velocity difference, and the crossing test compares velocity differences.
+    // With the former conditions (ratio of the normal velocity difference and the speed,
+    // velocities of opposite direction at the old and the new position), no point is a
+    // candidate for |V| > 0.97, and the spurious parts of the interface remain (observed relative
+    // length error 3.2e-2 for V = e_y). The errors are about the same as without V (observed:
+    // -3.5e-3 and -2.5e-3, without V: -4.4e-3). Note: the break-up test (BreakupCircles2D) is
+    // not suited for this check, since its error depends on the position of the configuration
+    // relative to the mesh already without V (observed for shifts of the circles along the axis
+    // by fractions of a cell: 1e-5 to 1.8e-1).
+    for (const double velocity : {-1., 1.})
+      {
+        dealii::Tensor<1, 2> uniform_velocity;
+        uniform_velocity[1] = velocity;
+        const number error = compute_merging_circles_length_error<2>(0.05, uniform_velocity);
+        EXPECT_LT(std::abs(error), 6e-3);
+      }
   }
 
   TEST(NarrowBandLevelSetTest, ReinitializationPrescribedDoFs2D)
@@ -3884,6 +4043,27 @@ namespace MeltPoolDG::LevelSet
     EXPECT_EQ(two_rows.statistics.n_cells, 16U);
     EXPECT_EQ(two_rows.min_n_zeros_projected, 1U);
     EXPECT_LT(two_rows.error_zeros_projected, 0.06 * 0.25);
+  }
+
+  TEST(NarrowBandLevelSetTest, SubcellDistanceInterpolation2D)
+  {
+    // Nodal interpolation of the subcell distance in the continuous level set space: the signed
+    // distance to the points is the exact distance to the strip at the nodes, i.e., the
+    // interpolated subcell distance reproduces the nodal interpolation of the exact strip
+    // (observed for the strip of width 0.4 h inside one row of cells: zeros 0.116 h from the
+    // exact zeros for both, the projection: 0.050 h). The selection of the cells (and the sign
+    // check) is the same as for the projection.
+    const auto projected    = test_subcell_distance_strip(0.5, 0.4, false, 0., true);
+    const auto interpolated = test_subcell_distance_strip(
+      0.5, 0.4, false, 0., true, NarrowBandSubcellTransfer::interpolation);
+
+    EXPECT_EQ(interpolated.statistics.n_cells, projected.statistics.n_cells);
+    EXPECT_EQ(interpolated.statistics.n_rejected_cells, projected.statistics.n_rejected_cells);
+    EXPECT_EQ(interpolated.min_n_zeros_projected, 2U);
+    EXPECT_NEAR(interpolated.error_zeros_projected,
+                interpolated.error_zeros_interpolated,
+                2e-3 * 0.25);
+    EXPECT_GT(interpolated.error_zeros_projected, 2. * projected.error_zeros_projected);
   }
 
   TEST(NarrowBandLevelSetTest, ContinuousReinitializationCircle2D)

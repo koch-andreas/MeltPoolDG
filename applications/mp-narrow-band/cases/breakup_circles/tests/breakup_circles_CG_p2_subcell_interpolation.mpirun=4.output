@@ -1,0 +1,48 @@
+| t = 0.0000e+00: 52 cut cells, 100 neighbor cells                                 breakup_circles |
+| area (phi>0): 3.6069497125e-01                                                   breakup_circles |
+| interface length: 2.6403e+00  circularity: 8.0635e-01                            breakup_circles |
+| exact area: 3.6007554315e-01  rel. error area: 1.7203e-03                        breakup_circles |
+| exact length: 2.7378e+00  rel. error length: -3.5623e-02                         breakup_circles |
+| gap: 0.0000e+00 (exact: 0.0000e+00)  neck: 1.0061e-01 (exact: 6.8557e-02)        breakup_circles |
+| rel. L2 error signed distance: 4.8257e-02  L2 error |grad phi|-1: 9.8026e-02     breakup_circles |
+| interface error L2: 9.6826e-04  max: 7.6418e-03  rel. error measure: -3.5623e-02 breakup_circles |
+| t = 1.0000e-01: 52 cut cells, 100 neighbor cells                                 breakup_circles |
+| area (phi>0): 3.1387662271e-01                                                   breakup_circles |
+| interface length: 2.5280e+00  circularity: 7.8562e-01                            breakup_circles |
+| exact area: 3.1311901684e-01  rel. error area: 2.4195e-03                        breakup_circles |
+| exact length: 2.6376e+00  rel. error length: -4.1577e-02                         breakup_circles |
+| gap: 0.0000e+00 (exact: 0.0000e+00)  neck: 8.1375e-02 (exact: 4.3557e-02)        breakup_circles |
+| rel. L2 error signed distance: 5.6887e-02  L2 error |grad phi|-1: 7.6846e-02     breakup_circles |
+| interface error L2: 1.6682e-03  max: 1.2884e-02  rel. error measure: -4.1577e-02 breakup_circles |
+| t = 2.0000e-01: 58 cut cells, 92 neighbor cells                                  breakup_circles |
+| area (phi>0): 2.6722947079e-01                                                   breakup_circles |
+| interface length: 2.4349e+00  circularity: 7.5259e-01                            breakup_circles |
+| exact area: 2.6642506173e-01  rel. error area: 3.0193e-03                        breakup_circles |
+| exact length: 2.5364e+00  rel. error length: -3.9989e-02                         breakup_circles |
+| gap: 0.0000e+00 (exact: 0.0000e+00)  neck: 5.6078e-02 (exact: 1.8557e-02)        breakup_circles |
+| rel. L2 error signed distance: 1.2932e-01  L2 error |grad phi|-1: 1.5604e-01     breakup_circles |
+| interface error L2: 2.0104e-03  max: 2.4553e-02  rel. error measure: -3.9989e-02 breakup_circles |
+| t = 3.0000e-01: 52 cut cells, 86 neighbor cells                                  breakup_circles |
+| area (phi>0): 2.2100129341e-01                                                   breakup_circles |
+| interface length: 2.4018e+00  circularity: 6.9385e-01                            breakup_circles |
+| exact area: 2.2029081362e-01  rel. error area: 3.2252e-03                        breakup_circles |
+| exact length: 2.4057e+00  rel. error length: -1.6199e-03                         breakup_circles |
+| gap: 0.0000e+00 (exact: 4.0395e-03)  neck: 2.8759e-02 (exact: 0.0000e+00)        breakup_circles |
+| rel. L2 error signed distance: 3.7142e-01  L2 error |grad phi|-1: 1.0600e-01     breakup_circles |
+| interface error L2: 7.3249e-03  max: 5.8189e-02  rel. error measure: -1.6199e-03 breakup_circles |
+| t = 4.0000e-01: 48 cut cells, 78 neighbor cells                                  breakup_circles |
+| area (phi>0): 1.7588091377e-01                                                   breakup_circles |
+| interface length: 2.2577e+00  circularity: 6.5848e-01                            breakup_circles |
+| exact area: 1.7562151740e-01  rel. error area: 1.4770e-03                        breakup_circles |
+| exact length: 2.1908e+00  rel. error length: 3.0566e-02                          breakup_circles |
+| gap: 0.0000e+00 (exact: 2.3652e-02)  neck: 7.0558e-03 (exact: 0.0000e+00)        breakup_circles |
+| rel. L2 error signed distance: 2.5472e-01  L2 error |grad phi|-1: 6.1944e-02     breakup_circles |
+| interface error L2: 3.8802e-03  max: 4.2197e-02  rel. error measure: 3.0566e-02  breakup_circles |
+| t = 5.0000e-01: 38 cut cells, 60 neighbor cells                                  breakup_circles |
+| area (phi>0): 1.3395141943e-01                                                   breakup_circles |
+| interface length: 2.0330e+00  circularity: 6.3818e-01                            breakup_circles |
+| exact area: 1.3325316099e-01  rel. error area: 5.2401e-03                        breakup_circles |
+| exact length: 1.9641e+00  rel. error length: 3.5067e-02                          breakup_circles |
+| gap: 4.9587e-02 (exact: 5.0244e-02)  neck: 0.0000e+00 (exact: 0.0000e+00)        breakup_circles |
+| rel. L2 error signed distance: 1.5927e-01  L2 error |grad phi|-1: 8.4775e-02     breakup_circles |
+| interface error L2: 3.7110e-03  max: 2.5899e-02  rel. error measure: 3.5067e-02  breakup_circles |

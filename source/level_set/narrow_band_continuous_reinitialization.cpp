@@ -392,10 +392,20 @@ namespace MeltPoolDG::LevelSet
     const dealii::DoFHandler<dim>                &dof_handler_cut,
     const VectorType                             &level_set_advected_dg,
     const double                                  buffer,
-    const unsigned int                            n_subdivisions)
+    const unsigned int                            n_subdivisions,
+    const NarrowBandSubcellTransfer               transfer)
   {
-    const MPI_Comm     mpi_comm = dof_handler.get_mpi_communicator();
-    const unsigned int n_dofs   = fe.n_dofs_per_cell();
+    const MPI_Comm     mpi_comm    = dof_handler.get_mpi_communicator();
+    const unsigned int n_dofs      = fe.n_dofs_per_cell();
+    const bool         interpolate = transfer == NarrowBandSubcellTransfer::interpolation;
+
+    // nodal interpolation: sum and number of the values of the unresolved cells at the nodes
+    VectorType nodal_sum, nodal_count;
+    if (interpolate)
+      {
+        nodal_sum.reinit(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+        nodal_count.reinit(nodal_sum);
+      }
 
     struct LocalSystem
     {
@@ -423,8 +433,24 @@ namespace MeltPoolDG::LevelSet
           const dealii::FEValues<dim> &,
           const std::vector<double> &distances,
           const std::vector<unsigned int> &,
-          const bool) {
-        const auto cell = cell_dg->as_dof_handler_iterator(dof_handler);
+          const bool,
+          const typename NarrowBandInterfacePoints<dim, number>::CellDistanceFunction
+            &distance_function) {
+        const auto cell                         = cell_dg->as_dof_handler_iterator(dof_handler);
+        is_projected[cell->active_cell_index()] = true;
+
+        if (interpolate)
+          {
+            std::vector<dealii::types::global_dof_index> dof_indices(n_dofs);
+            cell->get_dof_indices(dof_indices);
+            for (unsigned int i = 0; i < n_dofs; ++i)
+              {
+                nodal_sum(dof_indices[i]) += distance_function(fe.get_unit_support_points()[i]);
+                nodal_count(dof_indices[i]) += 1.;
+              }
+            return;
+          }
+
         fe_values.reinit(cell);
         AssertDimension(fe_values.n_quadrature_points, distances.size());
 
@@ -442,12 +468,24 @@ namespace MeltPoolDG::LevelSet
             }
         cell->get_dof_indices(system.dof_indices);
         local_systems.push_back(std::move(system));
-        is_projected[cell->active_cell_index()] = true;
       });
 
     mark_dofs(is_projected, prescribed_dofs);
     if (statistics.n_cells == 0)
       return statistics;
+
+    if (interpolate)
+      {
+        nodal_sum.compress(dealii::VectorOperation::add);
+        nodal_count.compress(dealii::VectorOperation::add);
+        level_set.zero_out_ghost_values();
+        for (const auto i : locally_owned_dofs)
+          if (nodal_count(i) > 0.)
+            level_set(i) = nodal_sum(i) / nodal_count(i);
+        hanging_node_constraints.distribute(level_set);
+        level_set.update_ghost_values();
+        return statistics;
+      }
 
     // all DoFs outside of the projected region keep their values
     constraints.clear();

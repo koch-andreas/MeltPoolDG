@@ -122,6 +122,15 @@ namespace MeltPoolDG::LevelSet
               // cells (natural boundary condition of the other cells at these faces)
               excluded)
 
+  BETTER_ENUM(NarrowBandSubcellTransfer,
+              char,
+              // L2-projection of the signed distance evaluated at the points of the iterated Gauss
+              // quadrature (resolves the kink of the distance inside the cells)
+              projection,
+              // nodal interpolation: the signed distance evaluated at the nodes of the cells
+              // (continuous level set space only)
+              interpolation)
+
   BETTER_ENUM(NarrowBandLevelSetSpace,
               char,
               // discontinuous level set (FE_DGQ) on the cut cells
@@ -430,6 +439,11 @@ namespace MeltPoolDG::LevelSet
       /// reinitialization and the closed-interface correction).
       NarrowBandPointInsertion point_insertion = NarrowBandPointInsertion::final_level_set;
 
+      /// Conservative insertion: the weights of the cells with new points are scaled, such that
+      /// the sum of the weights of each cell is conserved (see
+      /// NarrowBandInterfacePoints::conserve_cell_weights()).
+      bool conservative_insertion = true;
+
       /// Treatment of the cut cells with unresolved points (points of opposite orientation closer
       /// than the unresolved distance) and of the cut cells within the buffer around them.
       NarrowBandUnresolvedCells unresolved_cells = NarrowBandUnresolvedCells::zero_level_set;
@@ -445,6 +459,11 @@ namespace MeltPoolDG::LevelSet
       /// Subcell distance: coupling of the projected cells to the reinitialization of the other
       /// cut cells.
       NarrowBandSubcellCoupling subcell_coupling = NarrowBandSubcellCoupling::overwrite;
+
+      /// Subcell distance: representation of the signed distance in the finite element space,
+      /// L2-projection with the iterated Gauss quadrature or nodal interpolation (continuous
+      /// level set space only).
+      NarrowBandSubcellTransfer subcell_transfer = NarrowBandSubcellTransfer::projection;
 
       /// Subcell distance: in a cell, whose points all have the same orientation, the distance is
       /// only computed to the points of this orientation (branch of the cell).

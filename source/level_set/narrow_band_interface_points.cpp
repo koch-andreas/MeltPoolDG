@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -108,11 +109,13 @@ namespace MeltPoolDG::LevelSet
     const dealii::ConditionalOStream &pcout,
     const double                      unresolved_distance,
     const double                      support_tolerance,
-    const double                      merge_distance)
+    const double                      merge_distance,
+    const bool                        conservative_insertion)
     : pcout(pcout)
     , unresolved_distance(unresolved_distance)
     , support_tolerance(support_tolerance)
     , merge_distance(merge_distance)
+    , conservative_insertion(conservative_insertion)
   {
     AssertThrow(unresolved_distance >= 0. and support_tolerance > 0. and merge_distance >= 0.,
                 dealii::ExcMessage("The unresolved distance and the merge distance must not be "
@@ -177,6 +180,30 @@ namespace MeltPoolDG::LevelSet
             normals.push_back(normal);
           }
       }
+  }
+
+  template <int dim, typename number>
+  void
+  NarrowBandInterfacePoints<dim, number>::conserve_cell_weights(const std::size_t first_new_point,
+                                                                const MPI_Comm    mpi_comm)
+  {
+    // scaling factors of the points of the locally owned cells (zero: unchanged); every point is
+    // assigned to at most one locally owned cell of one process
+    std::vector<double> factors(points.size(), 0.);
+    for (const auto &cell_points : points_of_cell)
+      {
+        double old_weight = 0., new_weight = 0.;
+        for (const unsigned int k : cell_points)
+          (k < first_new_point ? old_weight : new_weight) += weights[k];
+        if (old_weight > 0. and new_weight > 0.)
+          for (const unsigned int k : cell_points)
+            factors[k] = old_weight / (old_weight + new_weight);
+      }
+    dealii::Utilities::MPI::sum(factors, mpi_comm, factors);
+
+    for (std::size_t k = 0; k < points.size(); ++k)
+      if (factors[k] > 0.)
+        weights[k] *= factors[k];
   }
 
   template <int dim, typename number>
@@ -329,8 +356,10 @@ namespace MeltPoolDG::LevelSet
     // dt max(0, (u(x - l n) - u(x)) . n) at t^{n+1} with the length scale l, i.e., the
     // displacement, by which a part of the interface on the outer side approaches the point
     // within one time step (nonzero for converging flows, zero for rigid-body motions),
-    // and the convergence ratio of this normal velocity difference and the speed; the same on
-    // the inner side (break-up rule: the phase between two parts of the interface is squeezed)
+    // and the convergence ratio of this normal velocity difference and the magnitude of the
+    // velocity difference (the cosine of the angle between the relative velocity of the flow on
+    // this side and the direction towards the point); the same on the inner side (break-up
+    // rule: the phase between two parts of the interface is squeezed)
     approach.assign(points.size(), 0.);
     convergence.assign(points.size(), 0.);
     inner_approach.assign(points.size(), 0.);
@@ -339,20 +368,37 @@ namespace MeltPoolDG::LevelSet
     if (merge_distance > 0.)
       {
         // points, which have crossed a line of converging characteristics within the time step:
-        // the velocity at the new position points against the velocity at the old position (at
-        // the same time t^{n+1/2}), which is impossible for a Lipschitz-continuous velocity with
-        // dt |grad u| < 1 (e.g., the points of the two sides of a tip, which are squeezed
-        // together tangentially, cf. the pair test for the normal collisions)
-        velocity.set_time(time + 0.5 * h);
+        // the velocity along the path of a point changes by Delta = u(x^n, t^n) -
+        // u(x^{n+1}, t^{n+1}), and the velocity field already changes by more than |Delta| / 2
+        // within the distance dt |Delta| from the new position in the direction -Delta, i.e., the
+        // point has passed a jump of the velocity, which pushes it back (e.g., the points of the
+        // two sides of a tip, which are squeezed together tangentially, cf. the pair test for the
+        // normal collisions). For a Lipschitz-continuous velocity with dt |grad u| < 1/2, the
+        // velocity changes by less than |Delta| / 2 over this distance, i.e., the test never
+        // applies. The test only uses differences of velocities and is invariant under a
+        // superposed uniform translation (in contrast to the condition u(x^n) . u(x^{n+1}) < 0).
+        std::vector<dealii::Tensor<1, dim>> u_old(points.size());
+        velocity.set_time(time);
+        for (unsigned int k = 0; k < points.size(); ++k)
+          for (unsigned int d = 0; d < dim; ++d)
+            u_old[k][d] = velocity.value(old_points[k], d);
+
+        velocity.set_time(time + h);
         for (unsigned int k = 0; k < points.size(); ++k)
           {
-            dealii::Tensor<1, dim> u_old, u_new;
+            dealii::Tensor<1, dim> u_new;
             for (unsigned int d = 0; d < dim; ++d)
-              {
-                u_old[d] = velocity.value(old_points[k], d);
-                u_new[d] = velocity.value(points[k], d);
-              }
-            crossed[k] = u_old * u_new < 0.;
+              u_new[d] = velocity.value(points[k], d);
+            const dealii::Tensor<1, dim> change = u_old[k] - u_new;
+            const double                 jump   = change.norm();
+            if (not(jump > 1e-12 * std::max(u_old[k].norm(), u_new.norm())))
+              continue;
+
+            const dealii::Point<dim> probe = points[k] - h * change;
+            dealii::Tensor<1, dim>   u_probe;
+            for (unsigned int d = 0; d < dim; ++d)
+              u_probe[d] = velocity.value(probe, d);
+            crossed[k] = (u_probe - u_new).norm() > 0.5 * jump;
           }
 
         velocity.set_time(time + h);
@@ -367,15 +413,25 @@ namespace MeltPoolDG::LevelSet
                 u_outer[d] = velocity.value(outer, d);
                 u_inner[d] = velocity.value(inner, d);
               }
-            const double rate  = (u_outer - u_point) * normals[k];
-            const double speed = std::max(u_point.norm(), u_outer.norm());
-            approach[k]        = h * std::max(0., rate);
-            convergence[k]     = speed > 0. ? std::max(0., rate) / speed : 0.;
+            // the convergence ratio relates the normal velocity difference to the magnitude of
+            // the velocity difference (not to the speed), so that it is invariant under a
+            // superposed uniform translation; relative velocities below the round-off level of
+            // the speed (e.g., a uniform translation) count as zero
+            const auto ratio = [](const double rate, const dealii::Tensor<1, dim> &difference,
+                                  const double speed) {
+              const double magnitude = difference.norm();
+              return magnitude > 1e-12 * speed ? std::max(0., rate) / magnitude : 0.;
+            };
 
-            const double inner_rate  = (u_point - u_inner) * normals[k];
-            const double inner_speed = std::max(u_point.norm(), u_inner.norm());
-            inner_approach[k]        = h * std::max(0., inner_rate);
-            inner_convergence[k] = inner_speed > 0. ? std::max(0., inner_rate) / inner_speed : 0.;
+            const double rate = (u_outer - u_point) * normals[k];
+            approach[k]       = h * std::max(0., rate);
+            convergence[k] =
+              ratio(rate, u_outer - u_point, std::max(u_point.norm(), u_outer.norm()));
+
+            const double inner_rate = (u_point - u_inner) * normals[k];
+            inner_approach[k]       = h * std::max(0., inner_rate);
+            inner_convergence[k] =
+              ratio(inner_rate, u_point - u_inner, std::max(u_point.norm(), u_inner.norm()));
           }
       }
 
@@ -465,11 +521,14 @@ namespace MeltPoolDG::LevelSet
     // between two parts of the interface vanishes, e.g., merging droplets) and the inner side
     // (break-up rule: the phase between two parts of the interface vanishes, e.g., a neck, which
     // pinches off). Only points in a flow, which converges on this side, are candidates (the
-    // positive part of the normal velocity difference over h on this side exceeds half of the
-    // local speed, e.g., two parts of the interface pushed against each other), i.e., not the
-    // points of thin gaps or filaments in stretching or rotating flows, which the level set does
-    // not resolve (the points are the same on all processes, i.e., all processes take the same
-    // decisions).
+    // positive part of the normal velocity difference over h on this side exceeds a quarter of
+    // the magnitude of the velocity difference, i.e., relative to the point, the flow on this
+    // side approaches it within an angle of about 75 degrees to the normal, e.g., two parts of
+    // the interface pushed against each other; this is the condition "half of the speed" in the
+    // frame of the mean velocity of the point and the probe and independent of a superposed
+    // uniform translation), i.e., not the points of thin gaps or filaments in shear or rotating
+    // flows, which the level set does not resolve (the points are the same on all processes,
+    // i.e., all processes take the same decisions).
     struct Side
     {
       // +1: outer side (merge rule), -1: inner side (break-up rule)
@@ -490,7 +549,7 @@ namespace MeltPoolDG::LevelSet
       {
         const auto is_candidate = [&](const unsigned int k) {
           return status[k] == 1 and not is_collided[k] and
-                 side.convergence->size() == points.size() and (*side.convergence)[k] > 0.5;
+                 side.convergence->size() == points.size() and (*side.convergence)[k] > 0.25;
         };
         bool any_candidate = false;
         for (unsigned int k = 0; k < points.size(); ++k)
@@ -806,11 +865,21 @@ namespace MeltPoolDG::LevelSet
     }
 
     const std::size_t n_points_old = points.size();
+    double            old_weight   = 0.;
+    for (const auto weight : weights)
+      old_weight += weight;
     append_points(new_points_local, mpi_comm);
     statistics.n_inserted_points = points.size() - n_points_old;
+    for (std::size_t k = n_points_old; k < points.size(); ++k)
+      statistics.inserted_weight += weights[k];
 
-    // 5) assignment of the updated points
+    // 5) assignment of the updated points, conservative insertion
     assign_points_to_cells(dof_handler_band);
+    if (conservative_insertion and statistics.n_inserted_points > 0)
+      conserve_cell_weights(n_points_old, mpi_comm);
+    for (const auto weight : weights)
+      statistics.added_weight += weight;
+    statistics.added_weight -= old_weight;
 
     // 6), 7) unresolved points and statistics of the cells
     last_statistics = statistics;
@@ -849,12 +918,22 @@ namespace MeltPoolDG::LevelSet
     }
 
     const std::size_t n_points_old = points.size();
+    double            old_weight   = 0.;
+    for (const auto weight : weights)
+      old_weight += weight;
     append_points(new_points_local, mpi_comm);
     last_statistics.n_inserted_points += points.size() - n_points_old;
+    for (std::size_t k = n_points_old; k < points.size(); ++k)
+      last_statistics.inserted_weight += weights[k];
 
-    // assignment of all points to the cells of the band, unresolved points and statistics of the
-    // cells (cut cells: cells with DoFs of dof_handler_cut)
+    // assignment of all points to the cells of the band, conservative insertion, unresolved points
+    // and statistics of the cells (cut cells: cells with DoFs of dof_handler_cut)
     assign_points_to_cells(dof_handler_band);
+    if (conservative_insertion and points.size() > n_points_old)
+      conserve_cell_weights(n_points_old, mpi_comm);
+    for (const auto weight : weights)
+      last_statistics.added_weight += weight;
+    last_statistics.added_weight -= old_weight;
 
     std::vector<bool> is_cut_cell(triangulation.n_active_cells(), false);
     for (const auto &cell : dof_handler_cut.active_cell_iterators())
@@ -948,6 +1027,11 @@ namespace MeltPoolDG::LevelSet
     statistics.n_unresolved_points =
       dealii::Utilities::MPI::sum(statistics.n_unresolved_points, mpi_comm);
 
+    // the points are stored on all processes
+    statistics.total_weight = 0.;
+    for (const auto weight : weights)
+      statistics.total_weight += weight;
+
     located = true;
   }
 
@@ -966,6 +1050,15 @@ namespace MeltPoolDG::LevelSet
         << statistics.n_cut_cells_without_points << " cut cells without points, "
         << statistics.n_unresolved_points << " unresolved points";
     Journal::print_line(pcout, str.str(), "narrow_band");
+
+    std::ostringstream str_weights;
+    str_weights << std::scientific << std::setprecision(6) << "interface points: total weight "
+                << statistics.total_weight;
+    if (statistics.n_inserted_points > 0)
+      str_weights << " (weight of the new points " << std::setprecision(3)
+                  << statistics.inserted_weight << ", increase of the total weight "
+                  << statistics.added_weight << ")";
+    Journal::print_line(pcout, str_weights.str(), "narrow_band");
   }
 
   template <int dim, typename number>
@@ -1149,8 +1242,21 @@ namespace MeltPoolDG::LevelSet
               }
           }
 
-        // signed distance at the quadrature points (sign of the advected level set beyond the
-        // edges of the patches); sign check against the advected level set away from the points
+        // signed distance at x with the advected level set at x (sign beyond the edges of the
+        // patches)
+        const auto distance = [&](const dealii::Point<dim> &x, const double advected) {
+          return signed_distance_to_patches<dim, number>(x,
+                                                         h,
+                                                         point_tree,
+                                                         normals,
+                                                         weights,
+                                                         advected > 0. ? 1. :
+                                                                         (advected < 0. ? -1. : 0.),
+                                                         orientation ? &*orientation : nullptr);
+        };
+
+        // signed distance at the quadrature points; sign check against the advected level set
+        // away from the points
         distances.resize(n_q_points);
         bool consistent = true;
         for (unsigned int q = 0; q < n_q_points; ++q)
@@ -1159,15 +1265,7 @@ namespace MeltPoolDG::LevelSet
             for (unsigned int i = 0; i < n_dofs; ++i)
               advected += values_advected[i] * fe_values->shape_value(i, q);
 
-            distances[q] =
-              signed_distance_to_patches<dim, number>(fe_values->quadrature_point(q),
-                                                      h,
-                                                      point_tree,
-                                                      normals,
-                                                      weights,
-                                                      advected > 0. ? 1. :
-                                                                      (advected < 0. ? -1. : 0.),
-                                                      orientation ? &*orientation : nullptr);
+            distances[q] = distance(fe_values->quadrature_point(q), advected);
 
             if (std::abs(distances[q]) > sign_check_distance * h and advected * distances[q] < 0.)
               consistent = false;
@@ -1179,7 +1277,15 @@ namespace MeltPoolDG::LevelSet
             continue;
           }
 
-        function(cell, *fe_values, distances, cell_points, one_orientation);
+        // signed distance at other points of the cell (unit coordinates)
+        const CellDistanceFunction distance_function = [&](const dealii::Point<dim> &unit_point) {
+          double advected = 0.;
+          for (unsigned int i = 0; i < n_dofs; ++i)
+            advected += values_advected[i] * fe.shape_value(i, unit_point);
+          return distance(mapping.transform_unit_to_real_cell(cell, unit_point), advected);
+        };
+
+        function(cell, *fe_values, distances, cell_points, one_orientation, distance_function);
 
         ++statistics.n_cells;
       }
@@ -1220,7 +1326,8 @@ namespace MeltPoolDG::LevelSet
           const dealii::FEValues<dim>                                  &fe_values,
           const std::vector<double>                                    &distances,
           const std::vector<unsigned int>                              &cell_points,
-          const bool                                                    one_orientation) {
+          const bool                                                    one_orientation,
+          const CellDistanceFunction &) {
         const auto        &fe         = cell->get_fe();
         const unsigned int n_dofs     = fe.n_dofs_per_cell();
         const unsigned int n_q_points = fe_values.n_quadrature_points;

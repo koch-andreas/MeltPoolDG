@@ -19,6 +19,7 @@
 
 #include <deal.II/non_matching/immersed_surface_quadrature.h>
 
+#include <meltpooldg/level_set/narrow_band_data.hpp>
 #include <meltpooldg/level_set/narrow_band_interface_points.hpp>
 #include <meltpooldg/level_set/reinitialization_data.hpp>
 
@@ -53,7 +54,9 @@ namespace MeltPoolDG::LevelSet
    * space on the union of the unresolved cells, with natural boundary conditions at the boundary
    * of this region. Since the projected cells share their boundary nodes with the adjacent cut
    * cells, the projection is a coupled problem on the region (instead of the cell-wise projection
-   * of the DG level set).
+   * of the DG level set). Alternatively, the signed distance is interpolated at the nodes of the
+   * unresolved cells (nodal interpolation, no linear system), which samples the kink of the
+   * distance on the medial axis of a thin filament only at the nodes.
    *
    * Closed interface (close_interface()): the zero level set of the cut cells is closed, if the
    * level set does not vanish on the faces between the cut cells and the cells, which are not cut
@@ -168,17 +171,25 @@ namespace MeltPoolDG::LevelSet
     /**
      * @brief Subcell distance: L2-projection of the signed distance to @p interface_points onto
      * the continuous level set on the union of the unresolved cells (natural boundary conditions
-     * at the boundary of the region; all other DoFs keep their values). The DoFs of the projected
-     * cells are marked as prescribed for reinitialize().
+     * at the boundary of the region; all other DoFs keep their values), or nodal interpolation of
+     * the signed distance on these cells (average of the values of the unresolved cells at shared
+     * nodes). The DoFs of the projected cells are marked as prescribed for reinitialize().
      *
      * @param level_set_advected_dg Advected (discontinuous) level set for the sign check.
+     * @param buffer Distance relative to the cell size, within which the cells around unresolved
+     * points are projected.
+     * @param n_subdivisions Number of subdivisions per direction of the iterated Gauss quadrature
+     * of the projection and of the sign check.
+     * @param transfer L2-projection or nodal interpolation of the signed distance.
      */
     typename NarrowBandInterfacePoints<dim, number>::ProjectionStatistics
-    project_subcell_distance(const NarrowBandInterfacePoints<dim, number> &interface_points,
-                             const dealii::DoFHandler<dim>                &dof_handler_cut,
-                             const VectorType                             &level_set_advected_dg,
-                             const double                                  buffer,
-                             const unsigned int                            n_subdivisions);
+    project_subcell_distance(
+      const NarrowBandInterfacePoints<dim, number> &interface_points,
+      const dealii::DoFHandler<dim>                &dof_handler_cut,
+      const VectorType                             &level_set_advected_dg,
+      const double                                  buffer,
+      const unsigned int                            n_subdivisions,
+      const NarrowBandSubcellTransfer transfer = NarrowBandSubcellTransfer::projection);
 
     /**
      * @brief Reinitialization of the continuous level set (fixed-point iteration). If

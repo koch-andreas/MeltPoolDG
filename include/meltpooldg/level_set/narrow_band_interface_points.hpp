@@ -48,7 +48,12 @@ namespace MeltPoolDG::LevelSet
    *   all points exceeds $h / n$ ($n$ points per direction of the surface quadrature), are added
    *   as new points (gaps of the point set due to the stretching of the interface); alternatively,
    *   the new points are taken from the zero level set of the level set at the end of the time
-   *   step, i.e., after the reinitialization (insert_points()),
+   *   step, i.e., after the reinitialization (insert_points()). A new point gets the weight of
+   *   its quadrature point. With the conservative insertion, the weights of all points of a cell
+   *   with new points are scaled such that their sum equals the sum of the weights of the existing
+   *   points of the cell (conserve_cell_weights()): since the weights of the existing points have
+   *   grown with the stretching, they already contain the area of the gap; in cells without
+   *   existing points (e.g., emptied by the merge rule), the new points keep their weights,
    * - in cells with more than $2 n^{d-1}$ points ($n$ points per direction of the surface
    *   quadrature), the closest pairs of points with the same orientation are merged by removing
    *   one point and adding its weight to the other one (compression of the interface),
@@ -63,9 +68,12 @@ namespace MeltPoolDG::LevelSet
    *   of a point within one time step (nonzero for converging flows, zero for rigid-body
    *   motions), a supported point in a converging flow (the positive part of the normal velocity
    *   difference $(\boldsymbol{u}(\boldsymbol{x} - h \boldsymbol{n}) -
-   *   \boldsymbol{u}(\boldsymbol{x})) \cdot \boldsymbol{n}$ exceeds half of the local speed,
-   *   e.g., two parts of the interface pushed against each other; not the points of thin gaps or
-   *   filaments in stretching or rotating flows, which the level set does not resolve) is
+   *   \boldsymbol{u}(\boldsymbol{x})) \cdot \boldsymbol{n}$ exceeds a quarter of the magnitude
+   *   $|\boldsymbol{u}(\boldsymbol{x} - h \boldsymbol{n}) - \boldsymbol{u}(\boldsymbol{x})|$
+   *   of the velocity difference, i.e., the flow on the outer side approaches the point within
+   *   an angle of about 75 degrees to the normal, independent of a superposed uniform
+   *   translation, e.g., two parts of the interface pushed against each other; not the points of
+   *   thin gaps or filaments in shear or rotating flows, which the level set does not resolve) is
    *   removed, (a) if the advected level set at the probe
    *   $\boldsymbol{x} - \delta \boldsymbol{n}$, $\delta = c_m h + a$, on its outer side
    *   exceeds the value at the point by more than $\delta / 4$ (for a point on the interface,
@@ -89,10 +97,15 @@ namespace MeltPoolDG::LevelSet
    *   different orientation is closer than the sum of the approaches and each of them lies on
    *   the inner side of the other one (face to face, i.e., the part of the phase between them
    *   has vanished within the time step). In addition, a point is removed, if it has crossed a
-   *   line of converging characteristics within the time step, i.e., if the velocity at its new
-   *   position points against the velocity at its old position (at the same time; impossible for
-   *   a Lipschitz-continuous velocity with $\Delta t |\nabla \boldsymbol{u}| < 1$), e.g., the
-   *   points of the two sides of a tip, which are squeezed together tangentially.
+   *   line of converging characteristics within the time step, i.e., if the velocity changes
+   *   along its path by $\Delta = \boldsymbol{u}(\boldsymbol{x}^n, t^n) -
+   *   \boldsymbol{u}(\boldsymbol{x}^{n+1}, t^{n+1})$, and the velocity at
+   *   $\boldsymbol{x}^{n+1} - \Delta t\, \Delta$ differs from the velocity at the new position
+   *   by more than $|\Delta| / 2$ (the point has passed a jump of the velocity, which pushes it
+   *   back; impossible for a Lipschitz-continuous velocity with
+   *   $\Delta t |\nabla \boldsymbol{u}| < 1/2$; independent of a superposed uniform
+   *   translation), e.g., the points of the two sides of a tip, which are squeezed together
+   *   tangentially.
    * The reinitialization then enforces $\phi_h = 0$ weakly at the points
    * (get_surface_quadrature()) instead of at the zero level set of the advected level set in the
    * cut cells containing usable points (see below). The cut cells are still determined from the
@@ -165,6 +178,16 @@ namespace MeltPoolDG::LevelSet
       /// Number of points with a point of opposite orientation (n_i . n_j < 0) closer than the
       /// unresolved distance, which are not used in the surface quadrature.
       unsigned int n_unresolved_points = 0;
+
+      /// Sum of the weights of the new points (weights of their quadrature points).
+      double inserted_weight = 0.;
+
+      /// Increase of the total weight by the insertion (equal to inserted_weight without the
+      /// conservative insertion).
+      double added_weight = 0.;
+
+      /// Sum of the weights of all points (after the repair of the point set).
+      double total_weight = 0.;
     };
 
     /**
@@ -177,11 +200,15 @@ namespace MeltPoolDG::LevelSet
      * relative to the cell size.
      * @param merge_distance Merge distance $c_m$ relative to the cell size of the merge rule
      * (zero: no merge rule), see the class documentation.
+     * @param conservative_insertion If true, the weights of the cells with new points are scaled
+     * such that the sum of the weights of each cell is conserved (see conserve_cell_weights());
+     * otherwise, the new points are added with the weights of their quadrature points.
      */
     explicit NarrowBandInterfacePoints(const dealii::ConditionalOStream &pcout,
                                        const double                      unresolved_distance = 2.0,
                                        const double                      support_tolerance   = 0.2,
-                                       const double                      merge_distance      = 0.);
+                                       const double                      merge_distance      = 0.,
+                                       const bool conservative_insertion = false);
 
     /**
      * @brief Seed the points on the zero level set of a level set (all previous points are
@@ -385,17 +412,26 @@ namespace MeltPoolDG::LevelSet
                             const double                   pinning_penalty    = 0.) const;
 
     /**
+     * @brief Signed distance at a point of the cell given in unit coordinates, with the same
+     * sign beyond the edges of the patches and the same points (orientation filter) as at the
+     * quadrature points (see for_each_unresolved_cell()).
+     */
+    using CellDistanceFunction = std::function<double(const dealii::Point<dim> &unit_point)>;
+
+    /**
      * @brief Function called for each cell of the subcell distance (see for_each_unresolved_cell())
      * with the cell, the FEValues of the iterated Gauss quadrature on the cell, the signed distance
-     * at its quadrature points, the indices of the points of the cell and whether all points of
-     * the cell have the same orientation.
+     * at its quadrature points, the indices of the points of the cell, whether all points of
+     * the cell have the same orientation, and the signed distance at other points of the cell
+     * (e.g., at the nodes).
      */
     using UnresolvedCellFunction =
       std::function<void(const typename dealii::DoFHandler<dim>::active_cell_iterator &cell,
                          const dealii::FEValues<dim>                                  &fe_values,
                          const std::vector<double>                                    &distances,
                          const std::vector<unsigned int>                              &cell_points,
-                         const bool one_orientation)>;
+                         const bool                  one_orientation,
+                         const CellDistanceFunction &distance_function)>;
 
     /**
      * @brief Selection of the cells of the subcell distance and evaluation of the signed distance
@@ -403,7 +439,8 @@ namespace MeltPoolDG::LevelSet
      * called for each locally owned cell of @p dof_handler with DoFs, which is closer than
      * @p buffer times the cell size to an unresolved point and passes the sign check against
      * @p level_set_advected. This allows other projections of the signed distance, e.g., onto a
-     * continuous finite element space. The returned statistics do not contain pinned cells.
+     * continuous finite element space, or other evaluation points (e.g., the nodal interpolation
+     * of the signed distance). The returned statistics do not contain pinned cells.
      */
     ProjectionStatistics
     for_each_unresolved_cell(const dealii::Mapping<dim>    &mapping,
@@ -474,6 +511,21 @@ namespace MeltPoolDG::LevelSet
      */
     void
     append_points(const std::vector<double> &local_data, const MPI_Comm mpi_comm);
+
+    /**
+     * @brief Conservative insertion: in each locally owned cell with new points (indices from
+     * @p first_new_point on) and existing points, the weights of all points of the cell are scaled
+     * by $W_K / (W_K + W_K^*)$ with the sums $W_K$ and $W_K^*$ of the weights of the existing and
+     * the new points of the cell, i.e., the sum of the weights of the cell is conserved. Since the
+     * weights of the existing points have grown with the stretching of the interface (Nanson's
+     * formula), they already contain the area of the gap, in which the new points are inserted. In
+     * cells without existing points (e.g., cells emptied by the merge or break-up rules), the new
+     * points keep the weights of their quadrature points (new parts of the point set). The points
+     * must be assigned to the cells (assign_points_to_cells()); the scaled weights are
+     * communicated to all processes.
+     */
+    void
+    conserve_cell_weights(const std::size_t first_new_point, const MPI_Comm mpi_comm);
 
     /**
      * @brief Append the quadrature points of the zero level set of @p level_set on the locally
@@ -569,6 +621,9 @@ namespace MeltPoolDG::LevelSet
     /// Merge distance relative to the cell size (zero: no merge rule).
     const double merge_distance;
 
+    /// Conservative insertion (see conserve_cell_weights()).
+    const bool conservative_insertion;
+
     /// Length scale of the finite differences of the velocity (minimum cell size at the seeding).
     double length_scale = 1.;
 
@@ -577,8 +632,8 @@ namespace MeltPoolDG::LevelSet
     std::vector<double> approach;
 
     /// Convergence ratio of the flow on the outer side of each point: positive part of the normal
-    /// velocity difference over the length scale divided by the speed (merge rule, computed in
-    /// advect(), empty after the seeding).
+    /// velocity difference over the length scale divided by the magnitude of the velocity
+    /// difference (merge rule, computed in advect(), empty after the seeding).
     std::vector<double> convergence;
 
     /// Approach of the flow on the inner side of each point within the last time step and its
