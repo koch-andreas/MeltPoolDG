@@ -161,6 +161,27 @@ namespace MeltPoolDG::LevelSet
               // time step, see NarrowBandCharacteristicMap)
               map)
 
+  BETTER_ENUM(NarrowBandRedistancing,
+              char,
+              // first-order Taylor expansion phi(y) + grad phi(y) . (x - y) from the closest point
+              // y on the discrete interface
+              taylor_expansion,
+              // signed distance s_K |x - y| to the closest point y on the discrete interface, where
+              // the side s_K of the cell is not taken from the cut cells but from the tracked sign
+              // of the cell (it only changes, if the interface passes through the cell)
+              signed_distance,
+              // as signed_distance, but scaled with the gradient magnitude at the closest point,
+              // s_K |grad phi(y)| |x - y| (the magnitude of the Taylor expansion, consistent with
+              // a level set of the cut cells, which is not a signed distance function)
+              scaled_signed_distance)
+
+  BETTER_ENUM(NarrowBandLayerRedistancing,
+              char,
+              // the layers of the advected band are redistanced after each reinitialization
+              after_reinitialization,
+              // the layers of the advected band are redistanced in every time step
+              every_time_step)
+
   BETTER_ENUM(NarrowBandGhostPenaltyFaces,
               char,
               // all interior faces of the narrow band with at least one adjacent neighbor cell,
@@ -197,7 +218,7 @@ namespace MeltPoolDG::LevelSet
     /// Type of the narrow band.
     NarrowBandType type = NarrowBandType::extension;
 
-    /// Number of layers of vertex neighbors around the cut cells (advected band).
+    /// Number of layers of vertex neighbors around the cut cells (advected band, at least one).
     unsigned int n_layers = 2;
 
     /// Parameters of the extension from the cut cells to the neighbor cells.
@@ -243,6 +264,38 @@ namespace MeltPoolDG::LevelSet
       /// only considered in the closest-point search, if no other cut cells are available. All
       /// neighbor cells remain active. A value of zero uses all cut cells as sources.
       number minimum_source_volume_fraction = 0.0;
+
+      /// Geometric redistancing of the cells of the advected band
+      /// (NarrowBandType::advected_layers), i.e., of the newly added cells and of all cells of the
+      /// layers after the reinitialization: first-order Taylor expansion from the closest point
+      /// (taylor_expansion) or signed distance to the closest point with the tracked sign of the
+      /// cell (signed_distance). In the latter case, the sign of each cell, which is not cut, is
+      /// tracked over time; the redistancing never changes the sign of a cell and, thus, never
+      /// creates an interface, even if the polynomial of the cut cell at the closest point is
+      /// under-resolved (e.g., at the tip of a thin filament): if the polynomial of a redistanced
+      /// cell changes its sign, it is shifted such that the minimum of |phi| is
+      /// sign_clamp_epsilon * h (if sign_clamp_epsilon is zero: 1/10 of the undershoot, such that
+      /// the modification vanishes with the undershoot). Cells without a sign change are not
+      /// modified, such that the interface can approach and enter them.
+      NarrowBandRedistancing redistancing = NarrowBandRedistancing::taylor_expansion;
+
+      /// Redistancing of all cells of the layers of the advected band: after each reinitialization
+      /// of the cut cells or in every time step. In the latter case, the reinitialization can be
+      /// performed less often (e.g., NarrowBandData::reinitialization_displacement), while the
+      /// layers, which provide the inflow data of the cut cells, do not degrade by the inflow
+      /// condition at the outer boundary of the band.
+      NarrowBandLayerRedistancing layer_redistancing =
+        NarrowBandLayerRedistancing::after_reinitialization;
+
+      /// Advected band with tracked signs: a cell, which is not cut, but at whose vertices or faces
+      /// an adjacent cut cell has the other sign (the interface passes through a corner or along
+      /// a face of the cell, which the discontinuous level set of the cell itself does not
+      /// resolve), is redistanced by the Taylor expansion from the closest point on the interface
+      /// of the cut cells (see NarrowBand::find_clipped_cells()). If the quadrature generator
+      /// finds no interface in it afterwards, it is excluded from the redistancing of the layers in
+      /// this time step. Cells cleared by the thin feature removal are excluded, until they are
+      /// cut again.
+      bool cut_clipped_cells = false;
 
       /// Linear solver for the extension problem (ghost-penalty extension).
       LinearSolverData<number> linear_solver;
@@ -321,6 +374,32 @@ namespace MeltPoolDG::LevelSet
       NarrowBandViscosityCells cells = NarrowBandViscosityCells::all_band_cells;
     } artificial_viscosity;
 
+    /// Removal of thin features, which cannot be resolved by the mesh (DG advection of the band,
+    /// i.e., NarrowBandType::extension and NarrowBandType::advected_layers): after the advection,
+    /// a cell K of the band is cleared from a phase, if the thickness 2 |K cap phase| / |Gamma cap
+    /// K| of the phase in K is below thickness * h (h: cell size) and if two boundaries of the
+    /// phase in K (branches of the interface or faces, at which the face neighbor has the other
+    /// sign) of opposite orientation enclose a region of this phase and are closer than thickness *
+    /// h, or if the phase does not continue into any face neighbor of K (e.g., the remainder of a
+    /// filament, whose neighboring part has been removed); the part of each face in the phase is
+    /// determined by a face quadrature. The nodal values of the removed phase are set to the other
+    /// phase. A cell is not cleared, if a face neighbor would have the other
+    /// sign in the whole cell afterwards, since the interface would lie on the shared face (of two
+    /// face neighbors, which would be cleared to different phases, only the one with the thinner
+    /// removed phase is cleared). Thus, a thin filament disappears cell by cell from its tip once
+    /// it is thinner than thickness * h, instead of creating spurious interfaces in the
+    /// reinitialization and the redistancing of the under-resolved cells (see
+    /// NarrowBand::remove_thin_features()).
+    struct ThinFeatureRemoval
+    {
+      /// Thickness relative to the cell size, below which a thin feature is removed. Zero
+      /// disables the removal.
+      number thickness = 0.;
+
+      /// Minimum magnitude epsilon * h of the level set in a cleared cell.
+      number epsilon = 0.05;
+    } thin_feature_removal;
+
     /// Face neighbors of the cut cells, which are activated as neighbor cells of the band
     /// (extension band). For downstream_face_neighbors, only the face neighbors, into which the
     /// velocity points across a face shared with a cut cell (at the beginning or the end of the
@@ -395,6 +474,14 @@ namespace MeltPoolDG::LevelSet
     /// sqrt(int_cut (|grad phi| - 1)^2 dx / |cut cells|) exceeds this value. A value of zero
     /// disables the error-based reinitialization.
     number reinitialization_eikonal_threshold = 0.0;
+
+    /// Reinitialize the level-set field on the cut cells, once the displacement of the interface
+    /// since the last reinitialization, estimated by the sum of max |u| dt over the time steps
+    /// (maximum of the velocity on the band), reaches this length. The number of
+    /// reinitializations then depends on the distance travelled by the interface, but neither on
+    /// the time step size nor on the cell size. A value of zero disables the displacement-based
+    /// reinitialization.
+    number reinitialization_displacement = 0.0;
 
     /// Parameters of the advected interface points (reinitialization interface =
     /// advected_points, see NarrowBandInterfacePoints).

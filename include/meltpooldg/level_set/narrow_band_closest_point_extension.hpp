@@ -107,8 +107,31 @@ namespace MeltPoolDG::LevelSet
      * @param dof_handler Band DoFHandler.
      * @param level_set Level-set vector of the band DoFHandler. The DoFs of the cut cells hold the
      * given values.
+     * For NarrowBandRedistancing::signed_distance and given @p cell_sides, the level set at the
+     * nodes of a cell with a nonzero side $s$ is set to the signed distance $s |x_i - y_i|$ to the
+     * closest point instead, i.e., the side of the cell is not taken from the polynomial of the
+     * cut cell at the closest point (which might be under-resolved, e.g., at the tip of a thin
+     * filament). If the polynomial of the cell changes its sign, i.e., attains $s \phi_h < 0$
+     * (checked at the Gauss-Lobatto points with $p+3$ points per direction), a constant is added
+     * such that $\min s \phi_h = \epsilon h$ with $\epsilon$ =
+     * NarrowBandData::Extension::sign_clamp_epsilon or, if it is zero, such that $\min s \phi_h$
+     * is 1/10 of the undershoot (e.g., next to an interface, which passes through a corner of
+     * the cell, the modification is of the order of the undershoot and vanishes with it). Thus,
+     * the redistancing never changes the sign of a cell; cells without a sign change are not
+     * modified, such that the interface can approach and enter them. Cells with side zero are
+     * redistanced by the Taylor expansion.
+     *
+     * @param dof_handler Band DoFHandler.
+     * @param level_set Level-set vector of the band DoFHandler. The DoFs of the cut cells hold the
+     * given values.
      * @param cell_flags Flags indexed by the active cell index of the cells to be redistanced.
      * @param label Label of the printed statistics.
+     * @param cell_sides Sides (+1, -1, or 0 if unknown) of the cells indexed by the active cell
+     * index (only used for NarrowBandRedistancing::signed_distance and scaled_signed_distance).
+     * @param source_flags Optional flags indexed by the active cell index of the locally owned
+     * cells, whose interface is used as source of the redistancing. By default, the cells with
+     * the FE index NarrowBand::ActiveFEIndex::cut are the sources. Source cells are not
+     * redistanced.
      *
      * @return Number of redistanced cells (summed over all processes).
      */
@@ -116,7 +139,9 @@ namespace MeltPoolDG::LevelSet
     redistance(const dealii::DoFHandler<dim> &dof_handler,
                VectorType                    &level_set,
                const std::vector<bool>       &cell_flags,
-               const std::string             &label) const;
+               const std::string             &label,
+               const std::vector<int>        *cell_sides   = nullptr,
+               const std::vector<bool>       *source_flags = nullptr) const;
 
   private:
     /// Parameters of the extension.

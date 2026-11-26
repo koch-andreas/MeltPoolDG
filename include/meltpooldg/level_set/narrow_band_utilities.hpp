@@ -265,7 +265,7 @@ namespace MeltPoolDG::LevelSet::NarrowBand
    *
    * @param is_cut_cell Flags indexed by the active cell index, which are true for the locally
    * owned cut cells.
-   * @param n_layers Number of layers (at least 2).
+   * @param n_layers Number of layers (at least 1).
    * @param dof_handler_cut Cut DoFHandler.
    * @param fe_collection_cut FE collection of the cut DoFHandler (see
    * create_layered_cut_fe_collection()).
@@ -435,6 +435,103 @@ namespace MeltPoolDG::LevelSet::NarrowBand
               const number                                        epsilon);
 
   /**
+   * @brief Remove thin features of the level set, which cannot be resolved by the cells of the
+   * band (e.g., the tip of a stretched filament).
+   *
+   * For each locally owned cell $K$ with DoFs, whose zero level set is non-empty, the interface
+   * points (quadrature points of the discrete interface, see
+   * dealii::NonMatching::DiscreteQuadratureGenerator) and the normals $n = \nabla\phi /
+   * |\nabla\phi|$ are computed. A phase $s \in \{+1, -1\}$ (sign of the level set) is removed
+   * from $K$, if its thickness $2 |K \cap \{s \phi > 0\}| / |\Gamma \cap K|$ in $K$ is below
+   * $t h$ ($t$: @p thickness, $h$: cell size) and if
+   * - (a) two boundaries of the phase face each other across the phase: points $x_i, x_j$ with
+   *   directions $m_i, m_j$ into the phase, $m_i \cdot m_j < -1/2$, $|x_i - x_j| < t h$,
+   *   $(x_j - x_i) \cdot m_i > 0$ and $(x_i - x_j) \cdot m_j > 0$, where the boundaries are the
+   *   interface points ($m = s n$; two branches of opposite orientation, e.g., both sides or the
+   *   cap of a thin filament) and the face points of closed faces ($m$: inward normal of the
+   *   face; a face is closed, if the face neighbor has the other sign at all, but at least two,
+   *   face points in the phase, e.g., a thin film of the phase along a face,
+   *   which is bounded by the discontinuity of the level set; small mismatches at the crossings
+   *   of a resolved interface do not close a face), where at least one of both points is an
+   *   interface point, or
+   * - (b) the phase does not continue into any face neighbor, i.e., at all face points in the
+   *   phase, the face neighbor has the other sign (the phase is enclosed by the interface and by
+   *   discontinuities of the level set, e.g., the remainder of a filament, whose neighboring
+   *   part has been removed). Faces at the boundary of the domain or to cells without DoFs count
+   *   as continuation.
+   *
+   * The face points in the phase are the points of the face quadrature of $\{s \phi_K > 0\}$
+   * (dealii::NonMatching::DiscreteFaceQuadratureGenerator). In contrast to fixed sample points,
+   * they also capture a phase, which touches a face only between the sample points (e.g., a flat
+   * cap of a resolved interface, which is almost tangential to the face and continues into the
+   * face neighbor; with fixed sample points, such a cap would be considered as enclosed).
+   *
+   * The thickness criterion excludes cells, which contain a resolved part of the phase as well;
+   * a single resolved branch (e.g., an interface clipping a corner of the cell), whose phase
+   * continues into the face neighbors, neither has facing boundaries nor is it enclosed. If both
+   * phases qualify, the thinner one is removed. The nodal values of the removed phase (and all
+   * nodal values with $|\phi| < \epsilon h$) are set to $-s \epsilon h$, i.e., to the remaining
+   * phase. If the polynomial of the cell still changes its sign (checked at the Gauss-Lobatto
+   * points with $p+3$ points per direction), the cell is set to the constant $-s \max(-s
+   * \bar{\phi}, \epsilon h)$ with the mean $\bar{\phi}$ of the nodal values. Thus, a cleared cell
+   * is not cut anymore. A cell is not cleared, if a face neighbor would have the other sign in
+   * the whole cell afterwards, since the interface would then lie on the shared face, where it is
+   * not represented by any cut cell: of two face neighbors, which would be cleared to different
+   * phases (e.g., a thin film of one phase and a thin filament of the other phase on both sides
+   * of the face), only the one with the thinner removed phase is cleared (ties: smaller cell
+   * id; the candidates are communicated to the ghost cells), and a cell is not cleared next to a
+   * cell, which is not cut and has the other sign. The criteria are evaluated with the level set
+   * before the removal, i.e., a thin feature is removed cell by cell over several calls (e.g., time
+   * steps), starting at its tip.
+   *
+   * @param dof_handler (hp-)DoFHandler of the level-set field (FE_DGQ on all cells with DoFs).
+   * @param level_set Level-set vector.
+   * @param fe_degree Polynomial degree of the level-set field.
+   * @param thickness Thickness $t$ relative to the cell size.
+   * @param epsilon Minimum magnitude $\epsilon h$ of the level set in a cleared cell.
+   * @param cleared_cells Optional output: flags indexed by the active cell index, which are set to
+   * true for the locally owned cleared cells (other entries are not modified).
+   *
+   * @return Number of cleared cells (summed over all processes).
+   */
+  template <int dim, typename number>
+  unsigned int
+  remove_thin_features(const dealii::DoFHandler<dim>                      &dof_handler,
+                       dealii::LinearAlgebra::distributed::Vector<number> &level_set,
+                       const unsigned int                                  fe_degree,
+                       const number                                        thickness,
+                       const number                                        epsilon,
+                       std::vector<bool>                                  *cleared_cells = nullptr);
+
+  /**
+   * @brief Find the cells, whose corner or face is clipped by the interface of an adjacent cut
+   * cell, although their own polynomial does not change its sign (mismatch of the discontinuous
+   * level set at a vertex or a face).
+   *
+   * A locally owned cell $K$ with DoFs, which is not cut (@p is_cut_cell), with the sign $s$ of
+   * the mean of its nodal values is flagged, if an adjacent cut cell $C$ (owned or ghost) has the
+   * other sign, $s \phi_C < 0$, at a vertex shared with $K$ (cells sharing only a vertex, e.g.,
+   * the diagonal neighbor) or at a Gauss-Lobatto point ($p+2$ points per direction) of a face
+   * shared with $K$. The interface of $C$ then passes through the corner or along the face of
+   * $K$, which the polynomial of $K$ does not resolve (e.g., a new cut cell, which is connected
+   * to the previous interface only through a vertex, an interface hidden in the discontinuity at
+   * a face, or an interface, which is tangent to a face and dips slightly into $K$). Such cells
+   * are redistanced by the Taylor expansion from the closest point (see
+   * NarrowBandData::Extension::cut_clipped_cells).
+   *
+   * @param dof_handler Band DoFHandler (FE_DGQ on all cells with DoFs).
+   * @param level_set Level-set vector of the band DoFHandler.
+   * @param is_cut_cell Flags of the locally owned cut cells (see compute_cut_cells()).
+   *
+   * @return Flags indexed by the active cell index of the locally owned clipped cells.
+   */
+  template <int dim, typename number>
+  std::vector<bool>
+  find_clipped_cells(const dealii::DoFHandler<dim>                            &dof_handler,
+                     const dealii::LinearAlgebra::distributed::Vector<number> &level_set,
+                     const std::vector<bool>                                  &is_cut_cell);
+
+  /**
    * @brief Count the new cut cells and the new cut cells, whose interface is not connected to the
    * interface of the previous cut cells (diagnostics of spurious interfaces).
    *
@@ -460,6 +557,33 @@ namespace MeltPoolDG::LevelSet::NarrowBand
                       const dealii::DoFHandler<dim>                            &dof_handler,
                       const dealii::LinearAlgebra::distributed::Vector<number> &level_set,
                       const std::vector<bool>                                  &is_cut_cell);
+
+  /**
+   * @brief Count the faces on the outer boundary of the band, which are touched by the interface
+   * (diagnostics of the advected band: the interface has moved through all layers).
+   *
+   * The outer boundary of the band consists of the faces between a locally owned cell with DoFs
+   * and a face neighbor without DoFs; faces at the boundary of the domain and faces with refined
+   * neighbors are skipped. The level set is evaluated on the face at the Gauss-Lobatto points
+   * with $p+2$ points per direction. A face is counted, if the level set changes its sign
+   * (including zero) on the face or, if @p cell_signs is given and the neighbor has a nonzero
+   * sign $s$, if $s\,\phi \le 0$ at any point of the face (i.e., the interface has passed the
+   * face).
+   *
+   * @param mapping Mapping.
+   * @param dof_handler Band DoFHandler.
+   * @param level_set Level-set vector of the band DoFHandler.
+   * @param cell_signs Optional signs (+1, -1, 0: unknown) of all locally owned and ghost cells
+   * indexed by the active cell index.
+   *
+   * @return Number of faces (summed over all processes).
+   */
+  template <int dim, typename number>
+  unsigned int
+  count_band_boundary_crossings(const dealii::Mapping<dim>    &mapping,
+                                const dealii::DoFHandler<dim> &dof_handler,
+                                const dealii::LinearAlgebra::distributed::Vector<number> &level_set,
+                                const std::vector<int> *cell_signs = nullptr);
 
   /**
    * @brief Modal smoothness indicator of Persson & Peraire (2006,

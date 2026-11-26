@@ -431,6 +431,42 @@ namespace MeltPoolDG::LevelSet
     return dealii::Utilities::MPI::max(max_cfl, matrix_free.get_task_info().communicator);
   }
 
+  template <int dim, typename number>
+  number
+  NarrowBandAdvectionDGOperator<dim, number>::compute_max_velocity(const number time) const
+  {
+    AssertThrow(velocity_function, dealii::ExcMessage("No advection velocity has been set."));
+    velocity_function->set_time(time);
+
+    const auto &matrix_free = scratch_data.get_matrix_free();
+
+    number max_velocity = 0.;
+
+    for (unsigned int cell = 0; cell < matrix_free.n_cell_batches(); ++cell)
+      {
+        const unsigned int active_fe_index = matrix_free.get_cell_category(cell, band_dof_idx);
+        if (not is_band_fe_index(active_fe_index))
+          continue;
+
+        FECellIntegrator<dim, 1, number> phi(
+          matrix_free, band_dof_idx, quad_idx, 0, active_fe_index);
+        phi.reinit(cell);
+
+        for (const unsigned int q : phi.quadrature_point_indices())
+          {
+            const auto velocity =
+              MeltPoolDG::VectorTools::evaluate_function_at_vectorized_points<dim, number>(
+                *velocity_function, phi.quadrature_point(q));
+            const auto norm = velocity.norm();
+
+            for (unsigned int v = 0; v < matrix_free.n_active_entries_per_cell_batch(cell); ++v)
+              max_velocity = std::max(max_velocity, norm[v]);
+          }
+      }
+
+    return dealii::Utilities::MPI::max(max_velocity, matrix_free.get_task_info().communicator);
+  }
+
   template class NarrowBandAdvectionDGOperator<1, double>;
   template class NarrowBandAdvectionDGOperator<2, double>;
   template class NarrowBandAdvectionDGOperator<3, double>;

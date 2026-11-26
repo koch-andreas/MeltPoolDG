@@ -56,8 +56,10 @@ namespace MeltPoolDG::LevelSet
       prm.add_parameter("number of layers",
                         n_layers,
                         "Number of layers of vertex neighbors around the cut cells "
-                        "(advected_layers).",
-                        dealii::Patterns::Integer(2));
+                        "(advected_layers). The interface must move less than one cell per time "
+                        "step (warning with one layer: the interface reaches the outer boundary "
+                        "of the band; with more layers: new cells in the first layer).",
+                        dealii::Patterns::Integer(1));
 
       prm.enter_subsection("extension");
       {
@@ -116,7 +118,75 @@ namespace MeltPoolDG::LevelSet
           "activation volume fraction', all neighbor cells remain active. Set to 0 to use all cut "
           "cells as sources.",
           dealii::Patterns::Double(0.0, 1.0));
+        prm.add_parameter(
+          "redistancing",
+          extension.redistancing,
+          "Geometric redistancing of the cells of the advected band (newly added cells and all "
+          "cells of the layers after the reinitialization). taylor_expansion: first-order Taylor "
+          "expansion phi(y) + grad phi(y) . (x - y) from the closest point y on the discrete "
+          "interface. signed_distance: signed distance s |x - y| with the tracked sign s of the "
+          "cell, which only changes if the interface passes through the cell; the redistancing "
+          "never creates an interface, even if the cut cell at the closest point is under-resolved "
+          "(e.g., at the tip of a thin filament): if the polynomial of a redistanced cell changes "
+          "its sign, it is shifted such that the minimum of |phi| is 'sign clamp epsilon' * h "
+          "(if 'sign clamp epsilon' is zero: 1/10 of the undershoot, such that the modification "
+          "vanishes with the undershoot). scaled_signed_distance: as signed_distance, but scaled "
+          "with the gradient magnitude at the closest point, s |grad phi(y)| |x - y| (limited to "
+          "[1/2, 2]), i.e., the magnitude of the Taylor expansion, which is consistent with a "
+          "level set of the cut cells, which is not a signed distance function (e.g., between "
+          "two reinitializations).");
+        prm.add_parameter(
+          "layer redistancing",
+          extension.layer_redistancing,
+          "Redistancing of all cells of the layers of the advected band: after each "
+          "reinitialization of the cut cells (after_reinitialization) or in every time step "
+          "(every_time_step). The latter allows to reinitialize less often (e.g., 'reinitialization "
+          "displacement'), while the layers, which provide the inflow data of the cut cells, do "
+          "not degrade by the inflow condition at the outer boundary of the band.");
+        prm.add_parameter(
+          "cut clipped cells",
+          extension.cut_clipped_cells,
+          "Advected band with tracked signs (signed_distance, scaled_signed_distance): a cell, "
+          "which is not cut, but at whose vertices or faces an adjacent cut cell has the other "
+          "sign (the interface passes through a corner or along a face of the cell, which the "
+          "discontinuous level set of the cell itself does not resolve), is redistanced by the "
+          "Taylor expansion from the closest point on the interface of the cut cells, such that it "
+          "becomes a cut cell. If the quadrature generator finds no interface in it afterwards "
+          "(e.g., an interface, which is tangent to a face and dips slightly into the cell), it is "
+          "excluded from the redistancing of the layers in this time step, which would otherwise "
+          "remove this part of the interface with the tracked sign. Cells cleared by the thin "
+          "feature removal are excluded, until they are cut again. Recommended for resolved "
+          "interfaces and high orders; in strongly deformed, under-resolved regions, many cells "
+          "may be clipped in every time step.");
         extension.linear_solver.add_parameters(prm);
+      }
+      prm.leave_subsection();
+
+      prm.enter_subsection("thin feature removal");
+      {
+        prm.add_parameter(
+          "thickness",
+          thin_feature_removal.thickness,
+          "Removal of thin features, which cannot be resolved by the mesh (DG advection of the "
+          "band: types extension and advected_layers). After the advection, a cell K of the band "
+          "is cleared from a phase, if the thickness 2 |K cap phase| / |interface in K| of the "
+          "phase is below thickness * h (h: cell size) and if two boundaries of the phase in K "
+          "(branches of the interface or faces, at which the face neighbor has the other sign) of "
+          "opposite orientation enclose a region of this phase and are closer than thickness * h, "
+          "or if the phase does not continue into any face neighbor of K (e.g., "
+          "the remainder of a filament, whose neighboring part has been removed). The part of "
+          "each face in the phase is determined by a face quadrature. The nodal "
+          "values of the removed phase are set to the other phase. A cell is not cleared, if a "
+          "face neighbor would have the other sign in the whole cell afterwards (two face "
+          "neighbors, which would be cleared to different phases: only the one with the thinner "
+          "removed phase), since the interface would lie on the shared face. A thin filament thus "
+          "disappears cell by cell from its tip, once it is thinner than thickness * h, instead "
+          "of creating spurious interfaces. Set to 0 to disable the removal.",
+          dealii::Patterns::Double(0.0));
+        prm.add_parameter("epsilon",
+                          thin_feature_removal.epsilon,
+                          "Minimum magnitude epsilon * h of the level set in a cleared cell.",
+                          dealii::Patterns::Double(0.0));
       }
       prm.leave_subsection();
 
@@ -348,6 +418,20 @@ namespace MeltPoolDG::LevelSet
                         "sqrt(int (|grad phi| - 1)^2 dx / V) on the cut cells exceeds this value. "
                         "Set to 0 to disable the error-based reinitialization.",
                         dealii::Patterns::Double(0.0));
+      prm.add_parameter(
+        "reinitialization displacement",
+        reinitialization_displacement,
+        "Reinitialize the level-set field on the cut cells, once the displacement of the "
+        "interface since the last reinitialization, estimated by the sum of max |u| dt over the "
+        "time steps (maximum of the velocity on the band at the beginning of the time step), "
+        "reaches this length (absolute length, not relative to the cell size). The number of "
+        "reinitializations then depends on the distance travelled by the interface, but neither "
+        "on the time step size nor on the cell size. Combined with 'reinitialization frequency' "
+        "and 'reinitialization eikonal threshold' (a reinitialization is performed, if any "
+        "criterion holds); set 'reinitialization frequency' to 0 to use this criterion only. For "
+        "the advected band, combine it with 'extension/layer redistancing = every_time_step'. "
+        "Set to 0 to disable the displacement-based reinitialization.",
+        dealii::Patterns::Double(0.0));
 
       prm.enter_subsection("advected points");
       {
@@ -592,8 +676,8 @@ namespace MeltPoolDG::LevelSet
 
     if (type == NarrowBandType::advected_layers)
       {
-        AssertThrow(n_layers >= 2,
-                    dealii::ExcMessage("The advected band requires at least two layers."));
+        AssertThrow(n_layers >= 1,
+                    dealii::ExcMessage("The advected band requires at least one layer."));
         AssertThrow(neighbor_activation_volume_fraction == 0.,
                     dealii::ExcMessage("The neighbor activation volume fraction is not "
                                        "supported by the advected band."));
@@ -601,6 +685,36 @@ namespace MeltPoolDG::LevelSet
                     dealii::ExcMessage("The downstream neighbor activation is not supported by "
                                        "the advected band."));
       }
+
+    AssertThrow(extension.redistancing == NarrowBandRedistancing::taylor_expansion or
+                  type == NarrowBandType::advected_layers,
+                dealii::ExcMessage("The redistancing signed_distance (scaled_signed_distance) "
+                                   "requires the advected band (narrow band/type = "
+                                   "advected_layers)."));
+    AssertThrow(extension.layer_redistancing ==
+                    NarrowBandLayerRedistancing::after_reinitialization or
+                  type == NarrowBandType::advected_layers,
+                dealii::ExcMessage("The layer redistancing every_time_step requires the advected "
+                                   "band (narrow band/type = advected_layers)."));
+    AssertThrow(reinitialization_displacement == 0. or type != NarrowBandType::semi_lagrangian,
+                dealii::ExcMessage("The displacement-based reinitialization requires the DG "
+                                   "advection of the narrow band (narrow band/type = extension "
+                                   "or advected_layers); for the semi-Lagrangian band, use the "
+                                   "sub-cycling ('level set update cfl')."));
+    AssertThrow(not extension.cut_clipped_cells or
+                  (type == NarrowBandType::advected_layers and
+                   extension.redistancing != NarrowBandRedistancing::taylor_expansion),
+                dealii::ExcMessage("The option 'cut clipped cells' requires the advected band "
+                                   "with tracked signs (narrow band/type = advected_layers, "
+                                   "extension/redistancing = signed_distance or "
+                                   "scaled_signed_distance)."));
+
+    AssertThrow(thin_feature_removal.thickness == 0. or type != NarrowBandType::semi_lagrangian,
+                dealii::ExcMessage("The thin feature removal requires the DG advection of the "
+                                   "narrow band (narrow band/type = extension or "
+                                   "advected_layers)."));
+    AssertThrow(thin_feature_removal.thickness == 0. or thin_feature_removal.epsilon > 0.,
+                dealii::ExcMessage("The epsilon of the thin feature removal must be positive."));
 
     AssertThrow(advection_velocity == NarrowBandAdvectionVelocity::bulk or
                   type != NarrowBandType::semi_lagrangian,

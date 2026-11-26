@@ -24,7 +24,10 @@
 #include <cmath>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <sstream>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace MeltPoolDG::LevelSet
@@ -230,7 +233,9 @@ namespace MeltPoolDG::LevelSet
     const dealii::DoFHandler<dim> &dof_handler,
     VectorType                    &level_set,
     const std::vector<bool>       &cell_flags,
-    const std::string             &label) const
+    const std::string             &label,
+    const std::vector<int>        *cell_sides,
+    const std::vector<bool>       *source_flags) const
   {
     using namespace NarrowBand;
 
@@ -240,6 +245,14 @@ namespace MeltPoolDG::LevelSet
                 dealii::ExcMessage("The redistancing requires the band DoFHandler of the "
                                    "narrow-band level set."));
     AssertDimension(cell_flags.size(), dof_handler.get_triangulation().n_active_cells());
+    if (source_flags != nullptr)
+      AssertDimension(source_flags->size(), dof_handler.get_triangulation().n_active_cells());
+
+    // source cells: by default, the cells with the FE index of the cut cells
+    const auto is_source_cell = [&](const auto &cell) {
+      return source_flags != nullptr ? (*source_flags)[cell->active_cell_index()] :
+                                       cell->active_fe_index() == ActiveFEIndex::cut;
+    };
 
     const auto        &fe_cut    = fe_collection[ActiveFEIndex::cut];
     const unsigned int fe_degree = fe_cut.degree;
@@ -265,7 +278,8 @@ namespace MeltPoolDG::LevelSet
 
       for (const auto &cell : dof_handler.active_cell_iterators())
         {
-          if (not cell->is_locally_owned() or cell->active_fe_index() != ActiveFEIndex::cut)
+          if (not cell->is_locally_owned() or not is_source_cell(cell) or
+              cell->get_fe().n_dofs_per_cell() == 0)
             continue;
 
           quadrature_generator.generate(cell);
@@ -337,6 +351,21 @@ namespace MeltPoolDG::LevelSet
     const bool   use_sign_clamp   = data.sign_clamp_epsilon > 0.;
     unsigned int n_clamped_values = 0;
 
+    // signed distance with the given sides of the cells (scaled with the gradient magnitude at
+    // the closest point for scaled_signed_distance)
+    const bool use_signed_distance =
+      data.redistancing != NarrowBandRedistancing::taylor_expansion and cell_sides != nullptr;
+    const bool use_gradient_scaling =
+      data.redistancing == NarrowBandRedistancing::scaled_signed_distance;
+    if (use_signed_distance)
+      AssertDimension(cell_sides->size(), cell_flags.size());
+    // margin of the shifted polynomial relative to its undershoot (without sign clamp)
+    constexpr number relative_margin = 0.1;
+
+    std::optional<SignSampler<dim>> sign_sampler;
+    unsigned int                    n_signed_cells  = 0;
+    unsigned int                    n_shifted_cells = 0;
+
     if (not interface_points.empty())
       {
         const auto tree = dealii::pack_rtree(interface_points);
@@ -352,8 +381,7 @@ namespace MeltPoolDG::LevelSet
         for (const auto &cell : dof_handler.active_cell_iterators())
           {
             if (not cell->is_locally_owned() or not cell_flags[cell->active_cell_index()] or
-                cell->active_fe_index() == ActiveFEIndex::cut or
-                cell->get_fe().n_dofs_per_cell() == 0)
+                is_source_cell(cell) or cell->get_fe().n_dofs_per_cell() == 0)
               continue;
 
             AssertThrow(cell->get_fe().has_support_points(),
@@ -363,8 +391,9 @@ namespace MeltPoolDG::LevelSet
             const AffineCellMap<dim> map(cell);
             dealii::Vector<number>   values(cell->get_fe().n_dofs_per_cell());
 
-            // first-order Taylor expansion from the closest point on the interface
-            const auto closest_point_value = [&](const dealii::Point<dim> &x) {
+            // first-order Taylor expansion from the closest point on the interface, distance to
+            // the closest point and gradient magnitude at the closest point
+            const auto closest_point_data = [&](const dealii::Point<dim> &x) {
               nearest_points.clear();
               tree.query(boost::geometry::index::nearest(x, n_nearest_points),
                          std::back_inserter(nearest_points));
@@ -375,8 +404,9 @@ namespace MeltPoolDG::LevelSet
               std::sort(candidates.begin(), candidates.end());
               candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
 
-              number result       = 0.;
-              number min_distance = std::numeric_limits<number>::max();
+              number result        = 0.;
+              number min_distance  = std::numeric_limits<number>::max();
+              number gradient_norm = 1.;
               for (const unsigned int c : candidates)
                 {
                   const auto [y, distance, n_iterations] =
@@ -388,16 +418,59 @@ namespace MeltPoolDG::LevelSet
                       min_distance                 = distance;
                       const auto [value, gradient] = evaluate(basis, cut_cells[c], y);
                       result                       = value + gradient * (x - y);
+                      gradient_norm                = gradient.norm();
                     }
                 }
-              return result;
+              return std::make_tuple(result, min_distance, gradient_norm);
+            };
+            const auto closest_point_value = [&](const dealii::Point<dim> &x) {
+              return std::get<0>(closest_point_data(x));
             };
 
-            for (unsigned int i = 0; i < values.size(); ++i)
-              values[i] = closest_point_value(map.to_real(unit_support_points[i]));
+            // tracked side of the cell (signed distance)
+            const int side = use_signed_distance ? (*cell_sides)[cell->active_cell_index()] : 0;
+
+            if (side != 0)
+              {
+                // signed distance with the side of the cell (scaled with the gradient magnitude
+                // at the closest point, limited to [1/2, 2], for scaled_signed_distance)
+                for (unsigned int i = 0; i < values.size(); ++i)
+                  {
+                    const auto [value, distance, gradient_norm] =
+                      closest_point_data(map.to_real(unit_support_points[i]));
+                    (void)value;
+                    const number scaling =
+                      use_gradient_scaling ? std::clamp<number>(gradient_norm, 0.5, 2.) : 1.;
+                    values[i] = side * scaling * distance;
+                  }
+
+                // The polynomial must not change its sign within the cell. If it does (e.g.,
+                // next to an interface, which passes through a corner of the cell, or next to
+                // an under-resolved interface), it is shifted such that its minimum is a
+                // fraction of the undershoot (or epsilon h with the sign clamp), i.e., the
+                // modification is of the order of the undershoot and vanishes with it. Cells
+                // without a sign change are not modified, such that the interface can approach
+                // the cell and enter it.
+                if (not sign_sampler)
+                  sign_sampler.emplace(cell->get_fe());
+                const number min_value = sign_sampler->min_signed_value(values, side);
+                if (min_value < 0.)
+                  {
+                    const number minimum =
+                      use_sign_clamp ? data.sign_clamp_epsilon * cell->minimum_vertex_distance() :
+                                       -relative_margin * min_value;
+                    for (auto &value : values)
+                      value += side * (minimum - min_value);
+                    ++n_shifted_cells;
+                  }
+                ++n_signed_cells;
+              }
+            else
+              for (unsigned int i = 0; i < values.size(); ++i)
+                values[i] = closest_point_value(map.to_real(unit_support_points[i]));
 
             // sign clamp: the side of the cell is given by the sign at the cell center
-            if (use_sign_clamp)
+            if (use_sign_clamp and side == 0)
               {
                 dealii::Point<dim> unit_center;
                 for (unsigned int d = 0; d < dim; ++d)
@@ -423,11 +496,15 @@ namespace MeltPoolDG::LevelSet
     n_redistanced_cells = dealii::Utilities::MPI::sum(n_redistanced_cells, mpi_comm);
     max_n_iterations    = dealii::Utilities::MPI::max(max_n_iterations, mpi_comm);
     n_clamped_values    = dealii::Utilities::MPI::sum(n_clamped_values, mpi_comm);
+    n_signed_cells      = dealii::Utilities::MPI::sum(n_signed_cells, mpi_comm);
+    n_shifted_cells     = dealii::Utilities::MPI::sum(n_shifted_cells, mpi_comm);
 
     {
       std::ostringstream str;
       str << "redistancing (" << label << ") of " << n_redistanced_cells << " cells: max. "
           << max_n_iterations << " iterations";
+      if (use_signed_distance)
+        str << ", " << n_signed_cells << " with tracked sign (" << n_shifted_cells << " shifted)";
       if (use_sign_clamp)
         str << ", " << n_clamped_values << " clamped";
       Journal::print_line(pcout, str.str(), "narrow_band");

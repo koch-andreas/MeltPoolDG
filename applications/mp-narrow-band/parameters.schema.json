@@ -111,9 +111,9 @@
         },
         "number of layers": {
           "type": "integer",
-          "minimum": 2,
+          "minimum": 1,
           "maximum": 2147483647,
-          "description": "Number of layers of vertex neighbors around the cut cells (advected_layers).",
+          "description": "Number of layers of vertex neighbors around the cut cells (advected_layers). The interface must move less than one cell per time step (warning with one layer: the interface reaches the outer boundary of the band; with more layers: new cells in the first layer).",
           "default": 2
         },
         "extension": {
@@ -160,6 +160,30 @@
               "maximum": 1.0,
               "description": "Minimum volume fraction |K cap {phi > 0}| / |K| of the positive phase of a cut cell K, for which K serves as source of the extension. Ghost-penalty extension: the ghost-penalty faces between cut cells with a smaller volume fraction and neighbor cells are not evaluated, i.e., the neighbor cells are extended from the other cut cells via the faces to these cut cells and to other neighbor cells (if the ghost-penalty faces include all band faces). If a neighbor cell is not connected to a cut cell with a sufficient volume fraction, its faces to the small cut cells are kept. Closest-point extension: small cut cells are only considered in the closest-point search, if no other cut cells share a vertex with the neighbor cell. In contrast to 'neighbor activation volume fraction', all neighbor cells remain active. Set to 0 to use all cut cells as sources.",
               "default": 0.0
+            },
+            "redistancing": {
+              "type": "string",
+              "enum": [
+                "taylor_expansion",
+                "signed_distance",
+                "scaled_signed_distance"
+              ],
+              "description": "Geometric redistancing of the cells of the advected band (newly added cells and all cells of the layers after the reinitialization). taylor_expansion: first-order Taylor expansion phi(y) + grad phi(y) . (x - y) from the closest point y on the discrete interface. signed_distance: signed distance s |x - y| with the tracked sign s of the cell, which only changes if the interface passes through the cell; the redistancing never creates an interface, even if the cut cell at the closest point is under-resolved (e.g., at the tip of a thin filament): if the polynomial of a redistanced cell changes its sign, it is shifted such that the minimum of |phi| is 'sign clamp epsilon' * h (if 'sign clamp epsilon' is zero: 1/10 of the undershoot, such that the modification vanishes with the undershoot). scaled_signed_distance: as signed_distance, but scaled with the gradient magnitude at the closest point, s |grad phi(y)| |x - y| (limited to [1/2, 2]), i.e., the magnitude of the Taylor expansion, which is consistent with a level set of the cut cells, which is not a signed distance function (e.g., between two reinitializations).",
+              "default": "taylor_expansion"
+            },
+            "layer redistancing": {
+              "type": "string",
+              "enum": [
+                "after_reinitialization",
+                "every_time_step"
+              ],
+              "description": "Redistancing of all cells of the layers of the advected band: after each reinitialization of the cut cells (after_reinitialization) or in every time step (every_time_step). The latter allows to reinitialize less often (e.g., 'reinitialization displacement'), while the layers, which provide the inflow data of the cut cells, do not degrade by the inflow condition at the outer boundary of the band.",
+              "default": "after_reinitialization"
+            },
+            "cut clipped cells": {
+              "type": "boolean",
+              "description": "Advected band with tracked signs (signed_distance, scaled_signed_distance): a cell, which is not cut, but at whose vertices or faces an adjacent cut cell has the other sign (the interface passes through a corner or along a face of the cell, which the discontinuous level set of the cell itself does not resolve), is redistanced by the Taylor expansion from the closest point on the interface of the cut cells, such that it becomes a cut cell. If the quadrature generator finds no interface in it afterwards (e.g., an interface, which is tangent to a face and dips slightly into the cell), it is excluded from the redistancing of the layers in this time step, which would otherwise remove this part of the interface with the tracked sign. Cells cleared by the thin feature removal are excluded, until they are cut again. Recommended for resolved interfaces and high orders; in strongly deformed, under-resolved regions, many cells may be clipped in every time step.",
+              "default": false
             },
             "linear solver": {
               "type": "object",
@@ -216,6 +240,24 @@
                 }
               },
               "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "thin feature removal": {
+          "type": "object",
+          "properties": {
+            "thickness": {
+              "type": "number",
+              "minimum": 0.0,
+              "description": "Removal of thin features, which cannot be resolved by the mesh (DG advection of the band: types extension and advected_layers). After the advection, a cell K of the band is cleared from a phase, if the thickness 2 |K cap phase| / |interface in K| of the phase is below thickness * h (h: cell size) and if two boundaries of the phase in K (branches of the interface or faces, at which the face neighbor has the other sign) of opposite orientation enclose a region of this phase and are closer than thickness * h, or if the phase does not continue into any face neighbor of K (e.g., the remainder of a filament, whose neighboring part has been removed). The part of each face in the phase is determined by a face quadrature. The nodal values of the removed phase are set to the other phase. A cell is not cleared, if a face neighbor would have the other sign in the whole cell afterwards (two face neighbors, which would be cleared to different phases: only the one with the thinner removed phase), since the interface would lie on the shared face. A thin filament thus disappears cell by cell from its tip, once it is thinner than thickness * h, instead of creating spurious interfaces. Set to 0 to disable the removal.",
+              "default": 0.0
+            },
+            "epsilon": {
+              "type": "number",
+              "minimum": 0.0,
+              "description": "Minimum magnitude epsilon * h of the level set in a cleared cell.",
+              "default": 0.05
             }
           },
           "additionalProperties": false
@@ -554,6 +596,12 @@
           "type": "number",
           "minimum": 0.0,
           "description": "Reinitialize the level-set field on the cut cells, if the eikonal error sqrt(int (|grad phi| - 1)^2 dx / V) on the cut cells exceeds this value. Set to 0 to disable the error-based reinitialization.",
+          "default": 0.0
+        },
+        "reinitialization displacement": {
+          "type": "number",
+          "minimum": 0.0,
+          "description": "Reinitialize the level-set field on the cut cells, once the displacement of the interface since the last reinitialization, estimated by the sum of max |u| dt over the time steps (maximum of the velocity on the band at the beginning of the time step), reaches this length (absolute length, not relative to the cell size). The number of reinitializations then depends on the distance travelled by the interface, but neither on the time step size nor on the cell size. Combined with 'reinitialization frequency' and 'reinitialization eikonal threshold' (a reinitialization is performed, if any criterion holds); set 'reinitialization frequency' to 0 to use this criterion only. For the advected band, combine it with 'extension/layer redistancing = every_time_step'. Set to 0 to disable the displacement-based reinitialization.",
           "default": 0.0
         },
         "advected points": {

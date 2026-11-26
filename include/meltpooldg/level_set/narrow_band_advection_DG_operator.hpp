@@ -167,6 +167,15 @@ namespace MeltPoolDG::LevelSet
     number
     compute_cfl_number(const number time, const number time_step) const;
 
+    /**
+     * @brief Compute the maximum $\max |\boldsymbol{u}_h|$ of the given velocity over the
+     * quadrature points of the locally owned cells of the narrow band (all processes).
+     *
+     * @param time Time at which the velocity is evaluated.
+     */
+    number
+    compute_max_velocity(const number time) const;
+
   private:
     /**
      * @brief Check whether an active FE index belongs to the narrow band, i.e., holds level-set

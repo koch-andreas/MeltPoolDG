@@ -178,11 +178,12 @@ namespace MeltPoolDG::TimeIntegration
       {
         rk_register_ki = 0.;
         if (stage_pre_processing)
-          stage_pre_processing(current_time + ci[stage - 1] * time_step,
+          stage_pre_processing(current_time + ci[stage] * time_step,
                                ci[stage] * time_step,
                                rk_register_ki,
                                rk_register_ri);
-        compute_rhs(current_time + ci[stage - 1] * time_step,
+        // the stage is evaluated at t + c_stage dt
+        compute_rhs(current_time + ci[stage] * time_step,
                     ci[stage] * time_step,
                     rk_register_ki,
                     rk_register_ri,

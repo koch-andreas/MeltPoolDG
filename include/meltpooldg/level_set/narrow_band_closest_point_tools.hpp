@@ -3,11 +3,13 @@
 #include <deal.II/base/exceptions.h>
 #include <deal.II/base/point.h>
 #include <deal.II/base/polynomial.h>
+#include <deal.II/base/quadrature_lib.h>
 #include <deal.II/base/tensor.h>
 #include <deal.II/base/utilities.h>
 
 #include <deal.II/fe/fe.h>
 
+#include <deal.II/lac/full_matrix.h>
 #include <deal.II/lac/vector.h>
 
 #include <algorithm>
@@ -230,6 +232,47 @@ namespace MeltPoolDG::LevelSet::NarrowBand::internal
   private:
     unsigned int                                         n_points_1d;
     std::vector<dealii::Polynomials::Polynomial<double>> basis;
+  };
+
+  /**
+   * Minimum of the signed polynomial $s \phi_h$ of a nodal element at sample points (Gauss-Lobatto
+   * points with $p+3$ points per direction, including the vertices), which is used to check that
+   * the polynomial of a cell does not change its sign.
+   */
+  template <int dim>
+  class SignSampler
+  {
+  public:
+    explicit SignSampler(const dealii::FiniteElement<dim> &fe)
+    {
+      const dealii::QGaussLobatto<dim> sample_points(fe.degree + 3);
+      shape_values.reinit(sample_points.size(), fe.n_dofs_per_cell());
+      for (unsigned int q = 0; q < sample_points.size(); ++q)
+        for (unsigned int i = 0; i < fe.n_dofs_per_cell(); ++i)
+          shape_values(q, i) = fe.shape_value(i, sample_points.point(q));
+    }
+
+    /**
+     * Return $\min_q s \phi_h(\hat{x}_q)$ for the nodal values @p values and the side @p side.
+     */
+    template <typename number>
+    number
+    min_signed_value(const dealii::Vector<number> &values, const int side) const
+    {
+      AssertDimension(values.size(), shape_values.n());
+      number min_value = std::numeric_limits<number>::max();
+      for (unsigned int q = 0; q < shape_values.m(); ++q)
+        {
+          number value = 0.;
+          for (unsigned int i = 0; i < shape_values.n(); ++i)
+            value += shape_values(q, i) * values[i];
+          min_value = std::min(min_value, side * value);
+        }
+      return min_value;
+    }
+
+  private:
+    dealii::FullMatrix<double> shape_values;
   };
 
   /**

@@ -415,8 +415,9 @@ namespace MeltPoolDG::LevelSet
 
     setup_dof_system(is_cut_cell, compute_small_cut_cells(is_cut_cell, volume_fractions));
 
-    // semi-Lagrangian band: signs of all cells from the initial level set
-    if (is_semi_lagrangian())
+    // semi-Lagrangian band and tracked signs of the advected band: signs of all cells from the
+    // initial level set
+    if (tracks_cell_signs())
       update_cell_signs(is_cut_cell, &level_set_function);
 
     // 3) level-set field on the cut cells
@@ -519,6 +520,12 @@ namespace MeltPoolDG::LevelSet
 
     // semi-Lagrangian band: statistics of the evaluation (maximum displacement of the nodes)
     typename NarrowBandSemiLagrangianAdvection<dim, number>::Statistics sl_statistics;
+
+    // displacement-based reinitialization: estimated displacement of the interface in this time
+    // step (maximum velocity on the band at the beginning of the time step)
+    if (narrow_band_data.reinitialization_displacement > 0.)
+      displacement_since_reinitialization +=
+        advection_operator.compute_max_velocity(time) * time_step;
 
     // S4: advection on the band
     {
@@ -643,6 +650,28 @@ namespace MeltPoolDG::LevelSet
     if (interface_points)
       interface_points->advect(*velocity_function, time, time_step);
 
+    // removal of thin features, which cannot be resolved by the cells of the band (DG advection)
+    if (narrow_band_data.thin_feature_removal.thickness > 0. and not is_semi_lagrangian())
+      {
+        ScopedName                 sc_removal("narrow_band::remove_thin_features");
+        dealii::TimerOutput::Scope scope_removal(scratch_data.get_timer(), sc_removal);
+
+        level_set_band.zero_out_ghost_values();
+        is_cleared_cell.resize(dof_handler_band.get_triangulation().n_active_cells(), false);
+        const unsigned int n_cleared_cells =
+          NarrowBand::remove_thin_features(dof_handler_band,
+                                           level_set_band,
+                                           fe_degree,
+                                           narrow_band_data.thin_feature_removal.thickness,
+                                           narrow_band_data.thin_feature_removal.epsilon,
+                                           &is_cleared_cell);
+        if (n_cleared_cells > 0)
+          Journal::print_line(scratch_data.get_pcout(1),
+                              "thin feature removal: " + std::to_string(n_cleared_cells) +
+                                " cells cleared",
+                              "narrow_band");
+      }
+
     // S1: new cut cells and band, cell-wise transfer of the level-set values of the new cut cells
     {
       ScopedName                 sc_band("narrow_band::update_band");
@@ -654,12 +683,78 @@ namespace MeltPoolDG::LevelSet
       const VectorType &level_set_evaluation =
         is_subcycling() ? level_set_band_reference : level_set_band;
 
-      std::vector<number>     volume_fractions;
-      const std::vector<bool> is_cut_cell = NarrowBand::compute_cut_cells(dof_handler_evaluation,
-                                                                          level_set_evaluation,
-                                                                          fe_degree,
-                                                                          &volume_fractions);
+      std::vector<number> volume_fractions;
+      std::vector<bool>   is_cut_cell = NarrowBand::compute_cut_cells(dof_handler_evaluation,
+                                                                    level_set_evaluation,
+                                                                    fe_degree,
+                                                                    &volume_fractions);
       check_cut_cells_exist(is_cut_cell, scratch_data.get_mpi_comm());
+
+      // advected band: cells, whose corner or face is clipped by the interface of an adjacent cut
+      // cell, are redistanced by the Taylor expansion from the closest point on the interface of
+      // the cut cells. If the interface in such a cell is too small to be found by the quadrature
+      // generator (e.g., an interface, which is tangent to a face and dips slightly into the
+      // cell), the cell is not cut, but it is excluded from the redistancing of the layers in this
+      // time step; otherwise, the redistancing with the tracked sign would remove this part of
+      // the interface in every time step. Cells cleared by the thin feature removal keep their
+      // sign, until they are cut again.
+      std::fill(is_unresolved_clipped_cell.begin(), is_unresolved_clipped_cell.end(), false);
+      if (narrow_band_data.extension.cut_clipped_cells and is_advected_band() and
+          not is_subcycling())
+        {
+          is_cleared_cell.resize(is_cut_cell.size(), false);
+          for (unsigned int i = 0; i < is_cut_cell.size(); ++i)
+            if (is_cut_cell[i])
+              is_cleared_cell[i] = false;
+
+          std::vector<bool> is_clipped =
+            NarrowBand::find_clipped_cells(dof_handler_band, level_set_band, is_cut_cell);
+          unsigned int n_clipped_cells = 0;
+          for (unsigned int i = 0; i < is_clipped.size(); ++i)
+            {
+              if (is_cleared_cell[i])
+                is_clipped[i] = false;
+              if (is_clipped[i])
+                ++n_clipped_cells;
+            }
+          n_clipped_cells =
+            dealii::Utilities::MPI::sum(n_clipped_cells, scratch_data.get_mpi_comm());
+
+          if (n_clipped_cells > 0)
+            {
+              level_set_band.zero_out_ghost_values();
+              closest_point_extension.redistance(dof_handler_band,
+                                                 level_set_band,
+                                                 is_clipped,
+                                                 "clipped cells",
+                                                 nullptr,
+                                                 &is_cut_cell);
+              is_cut_cell = NarrowBand::compute_cut_cells(dof_handler_band,
+                                                          level_set_band,
+                                                          fe_degree,
+                                                          &volume_fractions);
+
+              // clipped cells without a detected interface: excluded from the redistancing of the
+              // layers in this time step
+              is_unresolved_clipped_cell.assign(is_cut_cell.size(), false);
+              unsigned int n_unresolved_cells = 0;
+              for (unsigned int i = 0; i < is_cut_cell.size(); ++i)
+                if (is_clipped[i] and not is_cut_cell[i])
+                  {
+                    is_unresolved_clipped_cell[i] = true;
+                    ++n_unresolved_cells;
+                  }
+              n_unresolved_cells =
+                dealii::Utilities::MPI::sum(n_unresolved_cells, scratch_data.get_mpi_comm());
+
+              Journal::print_line(scratch_data.get_pcout(1),
+                                  "clipped cells: " + std::to_string(n_clipped_cells) +
+                                    " redistanced by the Taylor expansion (" +
+                                    std::to_string(n_unresolved_cells) +
+                                    " without detected interface, not redistanced as layers)",
+                                  "narrow_band");
+            }
+        }
 
       // closed-interface correction: level set on the candidate cells, which are not cut (cells,
       // into which the reinitialization may move the interface)
@@ -686,7 +781,7 @@ namespace MeltPoolDG::LevelSet
           cell_signs = cell_signs_reference;
           update_cell_signs(is_cut_cell, nullptr, dof_handler_evaluation, level_set_evaluation);
         }
-      else if (is_semi_lagrangian())
+      else if (tracks_cell_signs())
         update_cell_signs(is_cut_cell, nullptr);
 
       // diagnostics: new cut cells, whose interface is not connected to the previous interface
@@ -734,6 +829,24 @@ namespace MeltPoolDG::LevelSet
 
       if (is_advected_band())
         {
+          // With one layer, the interface regularly enters the first (outermost) layer. It has
+          // moved too far within the time step, if it reaches the outer boundary of the band.
+          if (narrow_band_data.n_layers == 1)
+            {
+              const unsigned int n_boundary_faces =
+                NarrowBand::count_band_boundary_crossings(scratch_data.get_mapping(),
+                                                          dof_handler_band,
+                                                          level_set_band,
+                                                          tracks_cell_signs() ? &cell_signs :
+                                                                                nullptr);
+              if (n_boundary_faces > 0)
+                Journal::print_line(scratch_data.get_pcout(0),
+                                    "Warning: the interface reached the outer boundary of the "
+                                    "band on " +
+                                      std::to_string(n_boundary_faces) + " faces.",
+                                    "narrow_band");
+            }
+
           if (cut_cells_changed)
             {
               // Transfer the advected level set of all cells of the band. The cells of the new
@@ -759,12 +872,14 @@ namespace MeltPoolDG::LevelSet
                     band_cell_values[cell->active_cell_index()].size() == 0)
                   {
                     is_new_cell[cell->active_cell_index()] = true;
-                    if (cell->active_fe_index() == NarrowBand::ActiveFEIndex::neighbor)
+                    if (cell->active_fe_index() == NarrowBand::ActiveFEIndex::neighbor and
+                        narrow_band_data.n_layers >= 2)
                       ++n_new_first_layer_cells;
                   }
 
               // new cells next to the cut cells indicate that the interface has moved more
-              // than one layer within the time step
+              // than one layer within the time step (only with two or more layers; with one
+              // layer, the first layer is the outermost layer, see the check above)
               n_new_first_layer_cells =
                 dealii::Utilities::MPI::sum(n_new_first_layer_cells, scratch_data.get_mpi_comm());
               if (n_new_first_layer_cells > 0)
@@ -776,7 +891,8 @@ namespace MeltPoolDG::LevelSet
               closest_point_extension.redistance(dof_handler_band,
                                                  level_set_band_new,
                                                  is_new_cell,
-                                                 "new cells");
+                                                 "new cells",
+                                                 tracks_cell_signs() ? &cell_signs : nullptr);
             }
 
           VectorType &level_set_band_current = solution_history_band.get_current_solution();
@@ -832,7 +948,11 @@ namespace MeltPoolDG::LevelSet
           (narrow_band_data.reinitialization_frequency > 0 and
            update_number % narrow_band_data.reinitialization_frequency == 0) or
           (narrow_band_data.reinitialization_eikonal_threshold > 0. and
-           eikonal_error > narrow_band_data.reinitialization_eikonal_threshold);
+           eikonal_error > narrow_band_data.reinitialization_eikonal_threshold) or
+          (narrow_band_data.reinitialization_displacement > 0. and
+           displacement_since_reinitialization >= narrow_band_data.reinitialization_displacement);
+        if (do_reinitialize)
+          displacement_since_reinitialization = 0.;
 
         std::ostringstream str;
         str << "eikonal error on cut cells: " << std::scientific << std::setprecision(4)
@@ -850,8 +970,11 @@ namespace MeltPoolDG::LevelSet
 
         Journal::print_line(scratch_data.get_pcout(1), str.str(), "narrow_band");
 
-        // advected band: geometric redistancing of the layers after the reinitialization
-        if (do_reinitialize and is_advected_band())
+        // advected band: geometric redistancing of the layers after the reinitialization (or in
+        // every time step)
+        if ((do_reinitialize or narrow_band_data.extension.layer_redistancing ==
+                                  NarrowBandLayerRedistancing::every_time_step) and
+            is_advected_band())
           redistance_layers();
       }
 
@@ -1367,6 +1490,15 @@ namespace MeltPoolDG::LevelSet
   }
 
   template <int dim, typename number>
+  bool
+  NarrowBandLevelSetOperation<dim, number>::tracks_cell_signs() const
+  {
+    return is_semi_lagrangian() or
+           (is_advected_band() and
+            narrow_band_data.extension.redistancing != NarrowBandRedistancing::taylor_expansion);
+  }
+
+  template <int dim, typename number>
   void
   NarrowBandLevelSetOperation<dim, number>::redistance_layers()
   {
@@ -1379,14 +1511,21 @@ namespace MeltPoolDG::LevelSet
     // reinitialized level set of the cut cells
     NarrowBand::copy_cut_cell_values(dof_handler_cut, level_set, dof_handler_band, level_set_band);
 
-    // all cells of the layers
+    // all cells of the layers (except for clipped cells without detected interface, see
+    // NarrowBandData::Extension::cut_clipped_cells)
     std::vector<bool> is_layer_cell(dof_handler_band.get_triangulation().n_active_cells(), false);
     for (const auto &cell : dof_handler_band.active_cell_iterators())
       if (cell->is_locally_owned() and (cell->active_fe_index() == NarrowBand::neighbor or
                                         cell->active_fe_index() == NarrowBand::outer))
-        is_layer_cell[cell->active_cell_index()] = true;
+        is_layer_cell[cell->active_cell_index()] =
+          is_unresolved_clipped_cell.empty() or
+          not is_unresolved_clipped_cell[cell->active_cell_index()];
 
-    closest_point_extension.redistance(dof_handler_band, level_set_band, is_layer_cell, "layers");
+    closest_point_extension.redistance(dof_handler_band,
+                                       level_set_band,
+                                       is_layer_cell,
+                                       "layers",
+                                       tracks_cell_signs() ? &cell_signs : nullptr);
   }
 
   template <int dim, typename number>

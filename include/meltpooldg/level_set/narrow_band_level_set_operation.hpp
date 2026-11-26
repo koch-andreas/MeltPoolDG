@@ -85,14 +85,26 @@ namespace MeltPoolDG::LevelSet
    * and NarrowBandData::n_layers layers of vertex neighbors, which are advected together with
    * the cut cells (step 4 is omitted). Whenever the cut cells change, the band is rebuilt: the
    * advected level set of the cells of the old band is transferred cell-wise and newly added
-   * cells, which are at least two layers away from the cut cells if the interface moves less than
-   * one cell per time step, are initialized by geometric redistancing (closest point on the
-   * discrete interface, see NarrowBandClosestPointExtension::redistance()). After the elliptic
-   * reinitialization of the cut cells, all cells of the layers are redistanced geometrically.
+   * cells, which belong to the outermost layer if the interface moves less than one cell per time
+   * step, are initialized by geometric redistancing (closest point on the discrete interface, see
+   * NarrowBandClosestPointExtension::redistance()). Larger displacements are reported by a
+   * warning (one layer: the interface reaches the outer boundary of the band, see
+   * NarrowBand::count_band_boundary_crossings(); more layers: new cells in the first layer). After
+   * the elliptic reinitialization of the cut cells, all cells of the layers are redistanced
+   * geometrically.
    *
    * Optionally, an artificial viscosity is added to the advection in the cells flagged by a modal
    * smoothness indicator (see NarrowBandData::ArtificialViscosity and
    * NarrowBandAdvectionDGOperator::compute_artificial_viscosity()).
+   *
+   * Optionally (NarrowBandData::ThinFeatureRemoval), thin features of the advected level set,
+   * which cannot be resolved by the cells (e.g., the tip of a stretched filament), are removed
+   * before the new cut cells are determined (see NarrowBand::remove_thin_features()).
+   *
+   * For the advected band with the redistancing NarrowBandRedistancing::signed_distance, the
+   * signs of the cells, which are not cut, are tracked (cell_signs), and the geometric
+   * redistancing of the layers sets the signed distance with the tracked sign of each cell, i.e.,
+   * it never creates an interface.
    *
    * Optionally, the advection is limited after each stage of the SSP Runge-Kutta scheme by a
    * bound-preserving limiter (local maximum principle or sign preservation, see
@@ -330,6 +342,10 @@ namespace MeltPoolDG::LevelSet
       ar &has_small_cut_cells_on_restart;
       ar &has_cell_signs_on_restart;
       ar &has_reference_on_restart;
+      // only stored with the displacement-based reinitialization (restart data written without it
+      // remains readable)
+      if (narrow_band_data.reinitialization_displacement > 0.)
+        ar &displacement_since_reinitialization;
       if (interface_points)
         ar &*interface_points;
     }
@@ -469,6 +485,14 @@ namespace MeltPoolDG::LevelSet
     is_layered_band() const;
 
     /**
+     * @brief Return true, if the signs of the cells, which are not cut, are tracked (cell_signs):
+     * semi-Lagrangian band and advected band with the redistancing
+     * NarrowBandRedistancing::signed_distance.
+     */
+    bool
+    tracks_cell_signs() const;
+
+    /**
      * @brief Advected band: copy the (reinitialized) level-set field of the cut cells to the band
      * and redistance all cells of the layers geometrically (see
      * NarrowBandClosestPointExtension::redistance()).
@@ -573,10 +597,12 @@ namespace MeltPoolDG::LevelSet
     /// (NarrowBandReinitializationInterface::advected_points).
     std::unique_ptr<NarrowBandInterfacePoints<dim, number>> interface_points;
 
-    /// Semi-Lagrangian band: signs (+1, -1) of the level set on the locally owned and ghost cells,
-    /// which are not cut, indexed by the active cell index (0: unknown). The sign of a cell only
-    /// changes if the interface passes through it, i.e., the signs are updated on the candidate
-    /// cells in each time step.
+    /// Semi-Lagrangian band and advected band with the redistancing
+    /// NarrowBandRedistancing::signed_distance (see tracks_cell_signs()): signs (+1, -1) of the
+    /// level set on the locally owned and ghost cells, which are not cut, indexed by the active
+    /// cell index (0: unknown). The sign of a cell only changes if the interface passes through
+    /// it, i.e., the signs are updated on the candidate cells (cells of the band) in each time
+    /// step.
     std::vector<int> cell_signs;
 
     /// Closed-interface correction: level set of the semi-Lagrangian step on the locally owned
@@ -596,6 +622,22 @@ namespace MeltPoolDG::LevelSet
     number                  time_reference          = std::numeric_limits<number>::quiet_NaN();
     unsigned int            n_steps_since_reference = 0;
     unsigned int            n_reference_updates     = 0;
+
+    /// Advected band with NarrowBandData::Extension::cut_clipped_cells: flags of the locally owned
+    /// cells, which have been cleared by the thin feature removal and have not been cut since
+    /// (they are not treated as clipped cells).
+    std::vector<bool> is_cleared_cell;
+
+    /// Advected band with NarrowBandData::Extension::cut_clipped_cells: flags of the locally owned
+    /// clipped cells of the current time step, in which the quadrature generator finds no interface
+    /// after the redistancing by the Taylor expansion (excluded from the redistancing of the
+    /// layers in this time step).
+    std::vector<bool> is_unresolved_clipped_cell;
+
+    /// Displacement-based reinitialization (NarrowBandData::reinitialization_displacement):
+    /// estimated displacement of the interface since the last reinitialization (sum of
+    /// max |u| dt).
+    number displacement_since_reinitialization = 0.;
 
     /// Sub-cycling with the characteristic map (NarrowBandData::level_set_update_characteristics):
     /// displacement of the nodes of the candidate cells of the reference since the reference.
