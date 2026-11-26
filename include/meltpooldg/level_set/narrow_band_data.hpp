@@ -400,6 +400,32 @@ namespace MeltPoolDG::LevelSet
       number epsilon = 0.05;
     } thin_feature_removal;
 
+    /**
+     * Geometric reconstruction of the advected band (type advected_layers), which replaces the
+     * elliptic reinitialization, the removal of thin features, the clipped cells and the
+     * redistancing of the layers: signed distance to the discrete interface (zero level sets of
+     * the cells and faces, at which the traces of the two cells have opposite signs),
+     * morphological opening of both phases with the radius thickness * h / 2 (features thinner
+     * than thickness * h disappear; smaller changes than a quarter of the thickness, e.g., rounded
+     * corners, are ignored), and cell-wise projection onto the polynomials, which keeps the
+     * remaining interface by a penalty term (see NarrowBandGeometricReconstruction).
+     */
+    struct GeometricReconstruction
+    {
+      /// Enable the geometric reconstruction.
+      bool enable = false;
+
+      /// Thickness relative to the cell size, below which a feature is removed by the opening.
+      number thickness = 0.8;
+
+      /// Penalty gamma of the interface term gamma h ||phi||^2 on the remaining interface.
+      number penalty = 100.;
+
+      /// Displacement (sum of max |u| dt), after which the reconstruction is performed; zero:
+      /// in every time step. In the other time steps, the band is only advected.
+      number displacement = 0.;
+    } geometric_reconstruction;
+
     /// Face neighbors of the cut cells, which are activated as neighbor cells of the band
     /// (extension band). For downstream_face_neighbors, only the face neighbors, into which the
     /// velocity points across a face shared with a cut cell (at the beginning or the end of the

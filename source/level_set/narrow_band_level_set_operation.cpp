@@ -157,6 +157,8 @@ namespace MeltPoolDG::LevelSet
                               scratch_data_in.get_mapping(),
                               scratch_data_in.get_pcout(1))
     , semi_lagrangian_advection(scratch_data_in.get_pcout(1))
+    , geometric_reconstruction(narrow_band_data_in.geometric_reconstruction,
+                               scratch_data_in.get_pcout(1))
     , dof_handler_cut_reference(triangulation)
     , dof_handler_band_reference(triangulation)
     , advection_operator(scratch_data_in, band_dof_idx, quad_idx)
@@ -460,7 +462,18 @@ namespace MeltPoolDG::LevelSet
         if (is_semi_lagrangian())
           store_candidate_cell_values(dof_handler_band, level_set_band, is_cut_cell);
 
-        if (do_reinitialize)
+        // geometric reconstruction of the advected band (instead of the reinitialization)
+        if (narrow_band_data.geometric_reconstruction.enable)
+          {
+            level_set_band.zero_out_ghost_values();
+            geometric_reconstruction.reconstruct(dof_handler_band, level_set_band);
+            level_set.zero_out_ghost_values();
+            NarrowBand::copy_cut_cell_values(dof_handler_band,
+                                             level_set_band,
+                                             dof_handler_cut,
+                                             level_set);
+          }
+        else if (do_reinitialize)
           {
             reinitialize();
             if (is_advected_band())
@@ -523,9 +536,14 @@ namespace MeltPoolDG::LevelSet
 
     // displacement-based reinitialization: estimated displacement of the interface in this time
     // step (maximum velocity on the band at the beginning of the time step)
-    if (narrow_band_data.reinitialization_displacement > 0.)
-      displacement_since_reinitialization +=
-        advection_operator.compute_max_velocity(time) * time_step;
+    const auto &reconstruction_data = narrow_band_data.geometric_reconstruction;
+    if (narrow_band_data.reinitialization_displacement > 0. or
+        (reconstruction_data.enable and reconstruction_data.displacement > 0.))
+      {
+        const number displacement = advection_operator.compute_max_velocity(time) * time_step;
+        displacement_since_reinitialization += displacement;
+        displacement_since_reconstruction += displacement;
+      }
 
     // S4: advection on the band
     {
@@ -650,8 +668,27 @@ namespace MeltPoolDG::LevelSet
     if (interface_points)
       interface_points->advect(*velocity_function, time, time_step);
 
+    // geometric reconstruction of the advected band: signed distance to the discrete interface,
+    // morphological opening of both phases (removal of features thinner than thickness * h) and
+    // cell-wise projection, which keeps the remaining interface (instead of the thin feature
+    // removal, the clipped cells, the reinitialization and the redistancing of the layers); in
+    // every time step or once the interface has travelled the given distance
+    if (reconstruction_data.enable)
+      {
+        if (reconstruction_data.displacement <= 0. or
+            displacement_since_reconstruction >= reconstruction_data.displacement)
+          {
+            ScopedName                 sc_reconstruction("narrow_band::geometric_reconstruction");
+            dealii::TimerOutput::Scope scope_reconstruction(scratch_data.get_timer(),
+                                                            sc_reconstruction);
+
+            displacement_since_reconstruction = 0.;
+            level_set_band.zero_out_ghost_values();
+            geometric_reconstruction.reconstruct(dof_handler_band, level_set_band);
+          }
+      }
     // removal of thin features, which cannot be resolved by the cells of the band (DG advection)
-    if (narrow_band_data.thin_feature_removal.thickness > 0. and not is_semi_lagrangian())
+    else if (narrow_band_data.thin_feature_removal.thickness > 0. and not is_semi_lagrangian())
       {
         ScopedName                 sc_removal("narrow_band::remove_thin_features");
         dealii::TimerOutput::Scope scope_removal(scratch_data.get_timer(), sc_removal);
@@ -700,7 +737,7 @@ namespace MeltPoolDG::LevelSet
       // sign, until they are cut again.
       std::fill(is_unresolved_clipped_cell.begin(), is_unresolved_clipped_cell.end(), false);
       if (narrow_band_data.extension.cut_clipped_cells and is_advected_band() and
-          not is_subcycling())
+          not is_subcycling() and not reconstruction_data.enable)
         {
           is_cleared_cell.resize(is_cut_cell.size(), false);
           for (unsigned int i = 0; i < is_cut_cell.size(); ++i)
@@ -938,8 +975,9 @@ namespace MeltPoolDG::LevelSet
                                                            narrow_band_data.level_set_update_cfl;
     const unsigned int update_number = is_subcycling() ? n_reference_updates + 1 : time_step_number;
 
-    // S5: reinitialization on the cut cells
-    if (reinit_data.enable and update_reference)
+    // S5: reinitialization on the cut cells (not with the geometric reconstruction; in the time
+    // steps without reconstruction, the band is only advected)
+    if (reinit_data.enable and update_reference and not reconstruction_data.enable)
       {
         const number eikonal_error =
           NarrowBand::compute_eikonal_error(scratch_data.get_mapping(), dof_handler_cut, level_set);

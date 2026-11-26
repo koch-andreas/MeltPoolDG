@@ -179,7 +179,8 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
     /**
      * @brief Print the size of the narrow band and the measures of the interface. At the start
      * time and at multiples of the period, print the errors with respect to the initial signed
-     * distance function.
+     * distance function and, for the continuous level set of the narrow band, the errors of its
+     * curvature and normal vector (with 'curvature/enable').
      */
     void
     do_postprocessing(const GenericDataOut<dim, number> &generic_data_out) const final
@@ -214,6 +215,33 @@ namespace MeltPoolDG::Simulation::NarrowBandVortexBubble
                                                           exact_interface_measure,
                                                           this->mpi_communicator,
                                                           "vortex_bubble");
+
+          // continuous level set: interface errors and, with 'curvature/enable', the errors of
+          // the curvature (dim - 1) / R (positive inside) and of the inner normal vector of the
+          // circle (sphere)
+          if (this->parameters.narrow_band.continuous_level_set.enable)
+            {
+              LevelSet::print_narrow_band_errors<dim, number>(generic_data_out,
+                                                              "level_set_cg",
+                                                              exact_solution,
+                                                              exact_interface_measure,
+                                                              this->mpi_communicator,
+                                                              "level_set_cg");
+
+              if (this->parameters.curvature.enable)
+                {
+                  const dealii::Point<dim> center = to_point(center_point);
+                  LevelSet::print_interface_geometry_errors<dim, number>(
+                    generic_data_out,
+                    (dim - 1.) / radius,
+                    [&](const dealii::Point<dim> &p) {
+                      const dealii::Tensor<1, dim, number> r = center - p;
+                      return r / r.norm();
+                    },
+                    this->mpi_communicator,
+                    "level_set_cg");
+                }
+            }
         }
     }
 

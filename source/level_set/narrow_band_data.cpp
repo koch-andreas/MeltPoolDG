@@ -190,6 +190,43 @@ namespace MeltPoolDG::LevelSet
       }
       prm.leave_subsection();
 
+      prm.enter_subsection("geometric reconstruction");
+      {
+        prm.add_parameter(
+          "enable",
+          geometric_reconstruction.enable,
+          "Geometric reconstruction of the advected band (type advected_layers), which replaces "
+          "the elliptic reinitialization, the thin feature removal, the cut clipped cells and the "
+          "redistancing of the layers: after the advection (and for the initial condition), the "
+          "level set of all cells of the band is replaced by (1) the signed distance to the "
+          "discrete interface (zero level sets of the cells and points of the faces, at which the "
+          "traces of the two cells have opposite signs; the sign is taken from the polynomial of "
+          "the cell), (2) its morphological opening of both phases with the radius r = thickness "
+          "* h / 2 (erosion by r and dilation by r), which removes all features thinner than "
+          "thickness * h, and (3) the cell-wise projection onto the polynomials with the penalty "
+          "term penalty * h * ||phi||^2 on the points of the discrete interface, which survive the "
+          "opening (|phi| < r / 2 after the opening). Changes of the opening below r / 2 (rounded "
+          "corners) are ignored, such that only thin features are removed.");
+        prm.add_parameter("thickness",
+                          geometric_reconstruction.thickness,
+                          "Thickness relative to the cell size, below which a feature is removed "
+                          "by the morphological opening of the geometric reconstruction.",
+                          dealii::Patterns::Double(0.0));
+        prm.add_parameter("penalty",
+                          geometric_reconstruction.penalty,
+                          "Penalty gamma of the interface term gamma * h * ||phi||^2 of the "
+                          "cell-wise projection of the geometric reconstruction.",
+                          dealii::Patterns::Double(0.0));
+        prm.add_parameter("displacement",
+                          geometric_reconstruction.displacement,
+                          "Perform the geometric reconstruction, once the displacement of the "
+                          "interface (sum of max |u| dt) since the last reconstruction reaches "
+                          "this length; zero: in every time step. In the other time steps, the "
+                          "band is only advected.",
+                          dealii::Patterns::Double(0.0));
+      }
+      prm.leave_subsection();
+
       prm.enter_subsection("advection");
       {
         time_integrator.add_parameters(prm);
@@ -708,6 +745,10 @@ namespace MeltPoolDG::LevelSet
                                    "with tracked signs (narrow band/type = advected_layers, "
                                    "extension/redistancing = signed_distance or "
                                    "scaled_signed_distance)."));
+
+    AssertThrow(not geometric_reconstruction.enable or type == NarrowBandType::advected_layers,
+                dealii::ExcMessage("The geometric reconstruction requires the advected band "
+                                   "(narrow band/type = advected_layers)."));
 
     AssertThrow(thin_feature_removal.thickness == 0. or type != NarrowBandType::semi_lagrangian,
                 dealii::ExcMessage("The thin feature removal requires the DG advection of the "

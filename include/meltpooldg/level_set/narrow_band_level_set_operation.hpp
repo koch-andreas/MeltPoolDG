@@ -21,6 +21,7 @@
 #include <meltpooldg/level_set/narrow_band_continuous_level_set.hpp>
 #include <meltpooldg/level_set/narrow_band_continuous_reinitialization.hpp>
 #include <meltpooldg/level_set/narrow_band_data.hpp>
+#include <meltpooldg/level_set/narrow_band_geometric_reconstruction.hpp>
 #include <meltpooldg/level_set/narrow_band_ghost_penalty_extension.hpp>
 #include <meltpooldg/level_set/narrow_band_interface_points.hpp>
 #include <meltpooldg/level_set/narrow_band_semi_lagrangian_advection.hpp>
@@ -346,6 +347,9 @@ namespace MeltPoolDG::LevelSet
       // remains readable)
       if (narrow_band_data.reinitialization_displacement > 0.)
         ar &displacement_since_reinitialization;
+      if (narrow_band_data.geometric_reconstruction.enable and
+          narrow_band_data.geometric_reconstruction.displacement > 0.)
+        ar &displacement_since_reconstruction;
       if (interface_points)
         ar &*interface_points;
     }
@@ -593,6 +597,9 @@ namespace MeltPoolDG::LevelSet
     /// Semi-Lagrangian advection (NarrowBandType::semi_lagrangian).
     const NarrowBandSemiLagrangianAdvection<dim, number> semi_lagrangian_advection;
 
+    /// Geometric reconstruction of the advected band (NarrowBandData::GeometricReconstruction).
+    const NarrowBandGeometricReconstruction<dim, number> geometric_reconstruction;
+
     /// Advected interface points for the interface penalty term of the reinitialization
     /// (NarrowBandReinitializationInterface::advected_points).
     std::unique_ptr<NarrowBandInterfacePoints<dim, number>> interface_points;
@@ -638,6 +645,10 @@ namespace MeltPoolDG::LevelSet
     /// estimated displacement of the interface since the last reinitialization (sum of
     /// max |u| dt).
     number displacement_since_reinitialization = 0.;
+
+    /// Geometric reconstruction with NarrowBandData::GeometricReconstruction::displacement:
+    /// estimated displacement of the interface since the last reconstruction (sum of max |u| dt).
+    number displacement_since_reconstruction = 0.;
 
     /// Sub-cycling with the characteristic map (NarrowBandData::level_set_update_characteristics):
     /// displacement of the nodes of the candidate cells of the reference since the reference.
